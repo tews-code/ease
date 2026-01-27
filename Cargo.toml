@@ -1,0 +1,8 @@
+[package]
+name = "ease"
+version = "0.1.0"
+edition = "2024"
+description = "EASE - OS for RP2350"
+
+[package.metadata.docs.rs]
+targets = ["riscv32imac-unknown-none-elf"]
