@@ -568,7 +568,7 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] **Learn:** What a linker script does (where code/data goes in memory)
 - [x] Create simple linker script for QEMU virt machine
 - [x] Boot on QEMU - confirm it doesn't crash (verified via QEMU monitor `info registers`)
-- [ ] **Doc:** Add `//!` module docs explaining the boot process
+- [x] **Doc:** Add `//!` module docs explaining the boot process
 
 #### Week 2: UART Output
 - [ ] **Learn:** What UART is (serial communication)
