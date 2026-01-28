@@ -6,6 +6,11 @@
 #![no_main]
 #![warn(missing_docs)]
 
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn _start() {
     loop {}
