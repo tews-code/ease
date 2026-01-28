@@ -5,7 +5,10 @@ MEMORY {
 }
 
 SECTIONS {
-    .text : { *(.text .text.*) } > RAM
+    .text : {
+        *(.text.init)
+        *(.text .text.*)
+    } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM
     .data : { *(.data .data.*) } > RAM
     .bss : { *(.bss .bss.*) } > RAM

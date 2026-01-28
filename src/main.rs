@@ -25,12 +25,32 @@
 #![no_main]
 #![warn(missing_docs)]
 
+use core::arch::naked_asm;
+use core::ptr::write_volatile;
+
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
+fn uart_putc(byte: u8) {
+    const UART_ADDRESS: usize = 0x10000000;
+    unsafe { write_volatile(UART_ADDRESS as *mut u8, byte); }
+}
+
 #[unsafe(no_mangle)]
-extern "C" fn _start() {
+extern "C" fn main() -> ! {
+    uart_putc(b'H');
     loop {}
+}
+
+#[unsafe(link_section = ".text.init")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+extern "C" fn _start() -> ! {
+    naked_asm!(
+        "li sp, 0x80100000",
+        "j main",
+        "unimp",
+    );
 }

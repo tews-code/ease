@@ -9,6 +9,11 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 - `#[export_name]` requires `#[unsafe(export_name)]`
 - `#[link_section]` requires `#[unsafe(link_section)]`
 
+## Tooling Reminders
+
+- **Target is riscv32**, not riscv64. Use `riscv32-unknown-elf-*` tools or `llvm-objdump`/`cargo objdump`
+- Example: `llvm-objdump -d target/riscv32imac-unknown-none-elf/debug/ease`
+
 ## Current Status
 
 **Phase 0: Complete** (tagged v0.0.1)
