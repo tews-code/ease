@@ -13,6 +13,9 @@
 - **No `static mut`** — use safe abstractions (`Mutex`, `OnceCell`, atomics)
 - **Interrupt-driven I/O** where appropriate, not pure polling
 - **User/kernel separation** — applications run in RISC-V User mode
+- **Test-driven development** — each feature requires tests before commit
+  - Tests run via `cargo test` (QEMU for hardware, host for pure logic)
+  - Commit workflow: implement → test → commit → update plan
 
 ### Documentation
 - **rustdoc** for all public APIs with examples
@@ -228,12 +231,17 @@ This separation provides predictable latency for I/O operations and keeps the ap
 ```
 ease/
 ├── Cargo.toml
+├── rust-toolchain.toml        # Pins nightly for custom_test_frameworks
 ├── memory-qemu.x              # QEMU virt linker script
 ├── memory-rp2350.x            # RP2350 linker script
 ├── build.rs                   # Compiles Doom C code
 │
 ├── src/
-│   ├── main.rs                # Entry point, Core 0 init
+│   ├── main.rs                # Entry point, Core 0 init, QEMU tests
+│   ├── lib.rs                 # Library crate for host-testable pure logic
+│   ├── io.rs                  # I/O traits (Writer/Reader) + test capture
+│   ├── qemu.rs                # QEMU exit mechanism (sifive_test device)
+│   ├── bench.rs               # Benchmarking via RISC-V cycle counter
 │   │
 │   ├── arch/                  # Architecture-specific
 │   │   ├── mod.rs
@@ -582,14 +590,41 @@ This is your "Hello World" moment. Everything else builds on this.
   - **Why:** `write_volatile` and other functions may use the stack; without valid `sp`, CPU will fault
 - [x] Write single character to UART using `core::ptr::write_volatile`
 - [x] See character appear in QEMU console - celebrate!
-- [ ] Implement `print!` / `println!` macros using `core::fmt::Write`
-- [ ] Print "Hello from EASE!"
-- [ ] **Learn:** `core::fmt::Write` trait
+- [x] Implement `print!` / `println!` macros using `core::fmt::Write`
+- [x] Print "Hello from EASE!"
+- [x] **Learn:** `core::fmt::Write` trait
 - [ ] **Doc:** Document UART module with usage examples
 
-**Milestone 1:** "Hello from EASE!" prints to QEMU console
+#### Week 2 (continued): Testing Infrastructure
+- [x] Set up custom test framework for QEMU (`#![feature(custom_test_frameworks)]`)
+- [x] Set up QEMU exit mechanism (`src/qemu.rs` with sifive_test device)
+- [x] Verify QEMU tests pass with exit code 0, failures exit with code 1
+- [x] Set up host-side testing for pure logic (`src/lib.rs`)
+- [x] Add `rust-toolchain.toml` to pin nightly toolchain
+- [x] Create I/O abstraction for testable output (`src/io.rs`)
+  - `Writer` trait for byte-level output
+  - `UartWriter` implementation for QEMU UART
+  - Test capture buffer (4KB static buffer with atomic length)
+  - `test_io::clear()`, `output()`, `contains()`, `equals()` helpers
+- [x] Add tests that verify print output content
+- [x] Create benchmarking infrastructure (`src/bench.rs`)
+  - RISC-V cycle counter via `rdcycle`/`rdcycleh` CSRs
+  - `bench::measure()`, `run()`, `run_avg()` functions
+  - `bench::check()` for regression detection with baselines
+  - Regression tests for `print!`/`println!` operations
+  - Tests fail if performance degrades beyond 20% tolerance
+- [x] **Learn:** `UnsafeCell`, `AtomicUsize`, trait-based abstraction, inline asm for CSRs
 
-**Rust concepts introduced:** `no_std`, `no_main`, raw pointers, volatile, traits (`Write`), macros, `#[naked]` functions
+**Testing commands:**
+```bash
+cargo test --bin ease                              # QEMU tests + benchmarks
+cargo test --lib --target aarch64-unknown-linux-gnu  # Host tests (pure logic)
+cargo run                                          # Normal run
+```
+
+**Milestone 1:** "Hello from EASE!" prints to QEMU console; test and benchmark infrastructure operational
+
+**Rust concepts introduced:** `no_std`, `no_main`, raw pointers, volatile, traits (`Write`, `Writer`), macros, `#[naked]` functions, `UnsafeCell`, atomics, `cfg(test)`, inline asm
 
 ---
 
@@ -1365,10 +1400,170 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 
 ## Testing Strategy
 
+### Three-Tier Testing Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    cargo test --lib                          │
+│                 --target <host-triple>                       │
+│  - Pure logic tests (parsers, data structures)              │
+│  - Runs on development machine                              │
+│  - Standard #[test] infrastructure                          │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                    cargo test --bin ease                     │
+│  - Custom test framework on QEMU                            │
+│  - Tests UART, interrupts, memory, boot                     │
+│  - Prints results, exits with status code                   │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│                       CI Pipeline                            │
+│  - Runs both test suites                                    │
+│  - QEMU exit code determines pass/fail                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Test Commands
+
+```bash
+# Run QEMU tests (hardware-dependent code)
+cargo test --bin ease
+
+# Run host tests (pure logic in lib.rs)
+cargo test --lib --target <host-triple>
+
+# Example for aarch64 Linux:
+cargo test --lib --target aarch64-unknown-linux-gnu
+```
+
+### Test Files
+
+| File | Purpose |
+|------|---------|
+| `src/main.rs` | QEMU tests and benchmarks (`#[test_case]`) |
+| `src/lib.rs` | Host tests (pure logic, standard `#[test]`) |
+| `src/io.rs` | I/O abstraction with `Writer` trait and test capture |
+| `src/bench.rs` | Benchmarking via RISC-V cycle counter |
+| `src/qemu.rs` | QEMU exit mechanism (sifive_test device) |
+| `rust-toolchain.toml` | Pins nightly toolchain for `custom_test_frameworks` |
+
 ### QEMU Testing
-- Unit tests for pure logic (parser, algorithms)
-- Integration tests for kernel services
-- HAL abstraction allows testing without hardware
+- Uses custom test framework (`#![feature(custom_test_frameworks)]`)
+- Tests run on QEMU virt machine with automatic exit
+- Exit code 0 = all tests pass, exit code 1 = test failure
+- Panic handler calls `qemu::exit_failure()` on test panic
+
+### Host Testing
+- Standard `#[test]` for pure logic (parser, algorithms)
+- Runs on development machine (not cross-compiled)
+- `src/lib.rs` is `#![no_std]` in release, uses std for testing
+
+### I/O Abstraction for Testing
+
+The `src/io.rs` module provides trait-based I/O that enables output verification:
+
+```rust
+// Writer trait - implemented by UartWriter, future MockWriter, etc.
+pub trait Writer {
+    fn write_byte(&mut self, byte: u8);
+    fn write_str(&mut self, s: &str) { ... }
+}
+
+// In test mode, output is captured to a static buffer
+#[cfg(test)]
+pub mod test_io {
+    pub fn clear();                    // Reset capture buffer
+    pub fn output() -> &'static str;   // Get captured output
+    pub fn contains(s: &str) -> bool;  // Check substring
+    pub fn equals(s: &str) -> bool;    // Check exact match
+}
+```
+
+**Example test:**
+```rust
+#[test_case]
+fn test_println_output() {
+    test_io::clear();
+    println!("hello");
+    assert!(test_io::equals("hello\n"));
+}
+```
+
+**Future expansion:** Add `Reader` trait and input buffer for testing interactive features (shell, editor).
+
+### Benchmarking
+
+The `src/bench.rs` module provides cycle-accurate benchmarking using RISC-V's cycle counter CSR:
+
+```rust
+// Read cycle counter (works without timer interrupt setup)
+fn cycles() -> u64;
+
+// Measure cycles for a single operation
+pub fn measure<F: FnOnce()>(f: F) -> u64;
+
+// Run and print a single benchmark
+pub fn run<F: FnOnce()>(name: &str, f: F);
+
+// Run multiple iterations and print average
+pub fn run_avg<F: Fn()>(name: &str, iterations: u32, f: F);
+```
+
+**Example benchmark:**
+```rust
+#[test_case]
+fn bench_my_operation() {
+    bench::run("operation name", || {
+        // code to measure
+    });
+}
+```
+
+**Sample results (QEMU):**
+| Operation | Cycles |
+|-----------|--------|
+| `print!("hello")` | ~54,500 |
+| `println!("hello")` | ~58,000 |
+| `println!` with formatting | ~57,300 |
+| `println!` 50 chars | ~146,000 |
+
+Benchmarks run as part of `cargo test --bin ease` and report cycle counts for each measured operation.
+
+### Regression Detection
+
+Benchmarks include regression checks that fail if performance degrades beyond a threshold:
+
+```rust
+// In src/main.rs - baselines module
+mod baselines {
+    pub const PRINT_HELLO: u64 = 38_000;      // Update when intentionally changed
+    pub const PRINTLN_HELLO: u64 = 32_000;
+    // ...
+}
+
+// Regression test - fails if cycles exceed baseline + 20%
+#[test_case]
+fn regression_println_hello() {
+    test_io::clear();
+    bench::check("println!(hello)", baselines::PRINTLN_HELLO, ITERATIONS, || {
+        println!("hello");
+    });
+}
+```
+
+**Workflow before milestone commits:**
+1. Run `cargo test --bin ease`
+2. Regression checks run automatically
+3. If any check fails with "REGRESSION", investigate before committing
+4. If performance intentionally changed, update baseline constants
+
+**Output format:**
+```
+OK println!(hello): 25000 cycles (baseline: 32000, -21%)     # Pass
+REGRESSION print!(x): 50000 cycles (baseline: 30000, +66%)   # Fail
+```
 
 ### Hardware Testing
 - Debug probe for step-through debugging

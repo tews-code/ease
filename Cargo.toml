@@ -4,5 +4,17 @@ version = "0.1.0"
 edition = "2024"
 description = "EASE - OS for RP2350"
 
+[lib]
+name = "ease"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ease"
+path = "src/main.rs"
+
+[features]
+default = []
+qemu = []  # For QEMU-specific code
+
 [package.metadata.docs.rs]
 targets = ["riscv32imac-unknown-none-elf"]
