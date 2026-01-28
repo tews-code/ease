@@ -571,11 +571,11 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] **Doc:** Add `//!` module docs explaining the boot process
 
 #### Week 2: UART Output
-- [ ] **Learn:** What UART is (serial communication)
-- [ ] **Learn:** Memory-mapped I/O and volatile access
-- [ ] Find QEMU virt UART address (0x10000000)
-- [ ] Write single character to UART using `core::ptr::write_volatile`
-- [ ] See character appear in QEMU console - celebrate! 🎉
+- [x] **Learn:** What UART is (serial communication)
+- [x] **Learn:** Memory-mapped I/O and volatile access
+- [x] Find QEMU virt UART address (0x10000000)
+- [x] Write single character to UART using `core::ptr::write_volatile`
+- [x] See character appear in QEMU console - celebrate!
 - [ ] Implement `print!` / `println!` macros using `core::fmt::Write`
 - [ ] Print "Hello from EASE!"
 - [ ] **Learn:** `core::fmt::Write` trait
