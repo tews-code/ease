@@ -560,14 +560,14 @@ Complete this before Week 1 starts. This is setup, not development.
 This is your "Hello World" moment. Everything else builds on this.
 
 #### Week 1: Environment & First Boot
-- [ ] Install Rust, add `riscv32imac-unknown-none-elf` target
-- [ ] Install QEMU (`qemu-system-riscv32`)
-- [ ] Create new Cargo project with `#![no_std]`, `#![no_main]`
-- [ ] **Learn:** What `no_std` means and why embedded needs it
-- [ ] Write minimal `_start` function (just infinite loop)
-- [ ] **Learn:** What a linker script does (where code/data goes in memory)
-- [ ] Create simple linker script for QEMU virt machine
-- [ ] Boot on QEMU - confirm it doesn't crash (use GDB to verify)
+- [x] Install Rust, add `riscv32imac-unknown-none-elf` target
+- [x] Install QEMU (`qemu-system-riscv32`)
+- [x] Create new Cargo project with `#![no_std]`, `#![no_main]`
+- [x] **Learn:** What `no_std` means and why embedded needs it
+- [x] Write minimal `_start` function (just infinite loop)
+- [x] **Learn:** What a linker script does (where code/data goes in memory)
+- [x] Create simple linker script for QEMU virt machine
+- [x] Boot on QEMU - confirm it doesn't crash (verified via QEMU monitor `info registers`)
 - [ ] **Doc:** Add `//!` module docs explaining the boot process
 
 #### Week 2: UART Output
