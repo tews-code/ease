@@ -555,9 +555,11 @@ Complete this before Week 1 starts. This is setup, not development.
 
 ### Phase 1: Hello QEMU (Weeks 1-2)
 **Goal:** Get Rust code running on QEMU and printing to console
-**New concepts:** `no_std`, linker scripts, QEMU basics, volatile access
+**New concepts:** `no_std`, linker scripts, QEMU basics, volatile access, inline assembly
 
 This is your "Hello World" moment. Everything else builds on this.
+
+**Prerequisites:** None (first phase)
 
 #### Week 1: Environment & First Boot
 - [x] Install Rust, add `riscv32imac-unknown-none-elf` target
@@ -567,6 +569,7 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] Write minimal `_start` function (just infinite loop)
 - [x] **Learn:** What a linker script does (where code/data goes in memory)
 - [x] Create simple linker script for QEMU virt machine
+  - **Note:** Use `.text.init` section and `#[link_section]` to ensure `_start` is placed at entry point
 - [x] Boot on QEMU - confirm it doesn't crash (verified via QEMU monitor `info registers`)
 - [x] **Doc:** Add `//!` module docs explaining the boot process
 
@@ -574,6 +577,9 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] **Learn:** What UART is (serial communication)
 - [x] **Learn:** Memory-mapped I/O and volatile access
 - [x] Find QEMU virt UART address (0x10000000)
+- [x] **Prerequisite:** Set up stack pointer before any function calls
+  - Use `#[naked]` function with inline asm to set `sp` before jumping to Rust code
+  - **Why:** `write_volatile` and other functions may use the stack; without valid `sp`, CPU will fault
 - [x] Write single character to UART using `core::ptr::write_volatile`
 - [x] See character appear in QEMU console - celebrate!
 - [ ] Implement `print!` / `println!` macros using `core::fmt::Write`
@@ -583,23 +589,26 @@ This is your "Hello World" moment. Everything else builds on this.
 
 **Milestone 1:** "Hello from EASE!" prints to QEMU console
 
-**Rust concepts introduced:** `no_std`, `no_main`, raw pointers, volatile, traits (`Write`), macros
+**Rust concepts introduced:** `no_std`, `no_main`, raw pointers, volatile, traits (`Write`), macros, `#[naked]` functions
 
 ---
 
 ### Phase 2: Kernel Foundations (Weeks 3-4)
 **Goal:** Proper boot sequence, panic handling, basic project structure
-**New concepts:** Boot assembly, BSS, panic handlers, modules
+**New concepts:** BSS initialization, panic handlers, modules
+
+**Prerequisites:** Phase 1 complete (stack pointer already set up in Week 2)
 
 #### Week 3: Proper Boot Sequence
 - [ ] **Learn:** What happens before `main()` (stack, BSS, etc.)
-- [ ] Write `boot.S` assembly: set stack pointer, zero BSS, call Rust
+- [ ] **Note:** Stack pointer setup already done in Phase 1 Week 2
 - [ ] **Learn:** RISC-V calling convention basics (just sp and ra)
-- [ ] Define stack in linker script (e.g., 8KB)
-- [ ] Define BSS section, add symbols for start/end
-- [ ] Implement BSS zeroing in assembly or early Rust
+- [ ] Define stack region properly in linker script (e.g., 8KB with symbols)
+- [ ] Define BSS section, add symbols for start/end (`__bss_start`, `__bss_end`)
+- [ ] Implement BSS zeroing in early Rust (before using any statics)
 - [ ] Create `src/arch/mod.rs` and `src/arch/boot.rs`
-- [ ] Verify BSS works: add a static variable, confirm it starts as zero
+- [ ] Move `_start` and boot code to `src/arch/boot.rs`
+- [ ] Verify BSS works: add a `static` variable, confirm it starts as zero
 
 #### Week 4: Panic Handler & Project Structure
 - [ ] **Learn:** Why `#[panic_handler]` is required in `no_std`
@@ -621,14 +630,19 @@ This is your "Hello World" moment. Everything else builds on this.
 
 ### Phase 3: Memory Management (Weeks 5-6)
 **Goal:** Dynamic memory allocation working
-**New concepts:** Allocators, `GlobalAlloc`, unsafe, heap vs stack
+**New concepts:** Allocators, `GlobalAlloc`, unsafe, heap vs stack, `Spinlock`
+
+**Prerequisites:** Phase 2 complete (BSS working, project structure)
 
 #### Week 5: Bump Allocator
 - [ ] **Learn:** Stack vs heap, why dynamic allocation matters
 - [ ] **Learn:** What an allocator does (manage free memory)
 - [ ] Define heap region in linker script (e.g., 64KB at known address)
+- [ ] **First:** Implement basic `Spinlock` using `AtomicBool`
+  - Needed for thread-safe allocator (and will be used throughout project)
+  - Simple spin-wait loop with `Acquire`/`Release` ordering
 - [ ] Implement simple bump allocator:
-  - Single `static` pointer tracking next free address
+  - Use `Spinlock<BumpAllocatorInner>` — **not `static mut`** (design philosophy)
   - `alloc()` bumps pointer forward, returns old value
   - `dealloc()` does nothing (memory never freed)
 - [ ] **Learn:** Why bump allocator leaks memory (and why that's okay for now)
@@ -644,15 +658,17 @@ This is your "Hello World" moment. Everything else builds on this.
 - [ ] Add out-of-memory handler (`#[alloc_error_handler]`)
 - [ ] **Stretch:** Implement simple free-list allocator (reuses memory)
 
-**Milestone 3:** Can use `Vec`, `String`, `Box` in kernel code
+**Milestone 3:** Can use `Vec`, `String`, `Box` in kernel code; basic `Spinlock` working
 
-**Rust concepts introduced:** `GlobalAlloc`, `unsafe` blocks, raw pointers, alignment, `alloc` crate
+**Rust concepts introduced:** `GlobalAlloc`, `unsafe` blocks, raw pointers, alignment, `alloc` crate, `AtomicBool`, basic spinlock
 
 ---
 
 ### Phase 4: Time & Interrupts (Weeks 7-8)
 **Goal:** Interrupt-driven timer, proper system tick
 **New concepts:** RISC-V trap handling, interrupt-safe state, `Mutex` for shared state
+
+**Prerequisites:** Phase 3 complete (`Spinlock` available for building `Mutex`)
 
 Interrupts are fundamental to the system design. Core 1 will be interrupt-driven, so we learn this now.
 
@@ -664,25 +680,28 @@ Interrupts are fundamental to the system design. Core 1 will be interrupt-driven
 - [ ] Set up `mtvec` to point to trap vector
 - [ ] Test with illegal instruction exception (verify handler runs)
 - [ ] **Learn:** Why we save/restore registers (context preservation)
+- [ ] Implement `Mutex<T>` wrapper using `Spinlock` from Phase 3
+  - Disables interrupts while held (critical section)
 
 #### Week 8: Timer Interrupt
 - [ ] **Learn:** CLINT timer (mtime, mtimecmp registers)
 - [ ] Enable machine timer interrupt (`mie.MTIE` bit)
 - [ ] Set `mtimecmp` to trigger interrupt after N ticks
 - [ ] Handle timer interrupt: update system tick counter, reset mtimecmp
-- [ ] **Pattern:** Use `Mutex<u64>` for tick counter (not `static mut`)
-- [ ] Implement `ticks_ms()` reading from mutex-protected counter
+- [ ] Use `AtomicU64` for tick counter (simpler than Mutex for single value)
+  - Alternative: `Mutex<u64>` if you want to practice the pattern
+- [ ] Implement `ticks_ms()` reading from atomic counter
 - [ ] Implement `sleep_ms()` using WFI + tick checking
 - [ ] Test: print timestamp, sleep 1 second, print again
 - [ ] **Learn:** Critical sections and interrupt masking
 
 **Milestone 4:** Timer interrupt fires regularly, `sleep_ms()` works correctly
 
-**Rust concepts practiced:** Trap handling, `Mutex` for interrupt-safe state, no `static mut`
+**Rust concepts practiced:** Trap handling, atomics, `Mutex` for interrupt-safe state, no `static mut`
 
 **Pattern Note:** All shared mutable state uses synchronization primitives:
-- `Mutex<T>` for data modified by interrupts
-- `AtomicU64` for simple counters
+- `AtomicU64` for simple counters (preferred for single values)
+- `Mutex<T>` for complex data modified by interrupts
 - Never `static mut`
 
 ---
@@ -691,13 +710,20 @@ Interrupts are fundamental to the system design. Core 1 will be interrupt-driven
 **Goal:** Render text to QEMU's graphical framebuffer
 **New concepts:** Framebuffers, bitmap fonts, traits for abstraction, QEMU device configuration
 
+**Prerequisites:** Phase 4 complete (timer working for any refresh timing)
+
 This phase provides **visual feedback**, making subsequent development more satisfying.
 
 #### Week 9: QEMU Framebuffer Setup
-- [ ] **Learn:** QEMU virt machine's framebuffer device (ramfb or virtio-gpu)
-- [ ] Configure QEMU to show graphical window: `-device ramfb` or similar
-- [ ] **Learn:** How ramfb works (write address/size to fw_cfg, get framebuffer address)
-- [ ] Alternatively: Use `-device virtio-gpu-device` with simpler setup
+- [ ] **Learn:** QEMU virt machine's framebuffer device options
+- [ ] **Option A: ramfb** (complex but flexible)
+  - Requires fw_cfg protocol: write framebuffer config to special DMA region
+  - fw_cfg at 0x10100000 on QEMU virt (selector + data + DMA registers)
+  - Must allocate framebuffer memory, register it with fw_cfg
+  - **Note:** This is more complex than simple MMIO — expect to spend time here
+- [ ] **Option B: virtio-gpu** (even more complex, skip for now)
+- [ ] **Option C: Serial/text only** (simplest fallback if display is blocking)
+- [ ] Configure QEMU: `-device ramfb` and remove `-nographic`
 - [ ] Decide on resolution: 640×480 for development (smaller than e-ink)
 - [ ] Decide on pixel format: 32-bit BGRA (common for QEMU devices)
 - [ ] Write directly to framebuffer memory, see pixels appear on screen
@@ -732,12 +758,20 @@ This phase provides **visual feedback**, making subsequent development more sati
 **Goal:** Interactive command-line shell
 **New concepts:** Input handling, parsing, command dispatch, state machines
 
+**Prerequisites:** Phase 5 complete (display for visual feedback), Phase 4 (timer for key repeat)
+
 #### Week 12: Keyboard Input
 - [ ] **Learn:** How keyboard input works in QEMU (serial input via UART)
-- [ ] Implement `read_char()` - poll UART for input, return `Option<char>`
+- [ ] **Learn:** 16550 UART RX side — check LSR (Line Status Register) bit 0 for data ready
+  - TX just writes to THR; RX must poll LSR before reading RBR
+  - LSR at UART_BASE + 5, RBR at UART_BASE + 0
+- [ ] Implement `read_char()` - poll UART LSR, return `Option<char>` if data ready
 - [ ] Implement `wait_char()` - block until character received
 - [ ] Create `Keyboard` trait with `poll()` returning `Option<KeyEvent>`
 - [ ] Define `KeyEvent` enum: `Press(char)`, `Special(SpecialKey)`
+- [ ] **Learn:** VT100/ANSI escape sequences for special keys
+  - Arrow keys send `ESC [ A/B/C/D` (up/down/right/left)
+  - Need state machine to parse multi-byte sequences
 - [ ] Handle special keys: Enter, Backspace, arrow keys (escape sequences)
 
 #### Week 13: Line Editor
@@ -767,12 +801,17 @@ This phase provides **visual feedback**, making subsequent development more sati
 **Goal:** Read and write files on FAT16 filesystem
 **New concepts:** Block devices, filesystem structures, file handles, buffering
 
+**Prerequisites:** Phase 6 complete (shell for testing commands)
+
 This phase is longer because filesystems are complex. Take it slow.
 
 #### Week 15: Block Device Abstraction
 - [ ] **Learn:** Block devices (read/write fixed-size blocks, typically 512 bytes)
 - [ ] Create `BlockDevice` trait: `read_block(n, &mut buf)`, `write_block(n, &buf)`
-- [ ] Implement `FileBackedBlockDevice` - reads from file on host
+- [ ] **Choose block device interface for QEMU:**
+  - **Option A: pflash** (simplest) — memory-mapped flash, use `-drive if=pflash,file=disk.img,format=raw`
+  - **Option B: virtio-blk** (more realistic but requires virtio driver)
+  - Recommend pflash for QEMU phase; will use SPI for real hardware anyway
 - [ ] Use QEMU's `-drive` option to attach a disk image
 - [ ] Create test disk image on host: `dd if=/dev/zero of=disk.img bs=512 count=2048`
 - [ ] Test: read block 0, print first 16 bytes as hex
@@ -814,6 +853,8 @@ This phase is longer because filesystems are complex. Take it slow.
 **Goal:** Simple text editor with load/save
 **New concepts:** Gap buffer data structure, modal interfaces
 
+**Prerequisites:** Phase 7 complete (filesystem for load/save), Phase 6 (keyboard input), Phase 5 (display)
+
 Building an application using the kernel services developed so far.
 
 #### Week 19: Gap Buffer
@@ -848,14 +889,22 @@ Building an application using the kernel services developed so far.
 **Goal:** Time display, alarm setting and triggering
 **New concepts:** Time formatting, persistent storage
 
+**Prerequisites:** Phase 8 complete (editor done), Phase 7 (filesystem for saving alarms)
+
 Simpler than editor, reinforces previous concepts.
+
+**Note on Time:** There is no RTC (real-time clock) — only ticks since boot. Time-of-day must be:
+1. Set manually via `settime` command after each boot
+2. Stored as offset from boot ticks
+3. On real hardware, could add RTC module later (Phase 18 stretch goal)
 
 #### Week 22: Time Display
 - [ ] Create alarm clock UI: large time display
+- [ ] Track time-of-day as: `boot_ticks_at_settime` + `(current_ticks - boot_ticks_at_settime)`
 - [ ] Format time as HH:MM:SS
 - [ ] Update display every second (poll timer)
-- [ ] Implement `date` shell command (show current time)
-- [ ] Implement `settime HH:MM:SS` shell command
+- [ ] Implement `date` shell command (show current time, or "time not set")
+- [ ] Implement `settime HH:MM:SS` shell command (stores reference point)
 
 #### Week 23: Alarms
 - [ ] Create alarm data structure (hour, minute, enabled)
@@ -875,6 +924,13 @@ Simpler than editor, reinforces previous concepts.
 ### Phase 10: Doom Integration (Weeks 24-28)
 **Goal:** Run Doom using doomgeneric
 **New concepts:** FFI, C interop, libc stubs, build.rs
+
+**Prerequisites:**
+- Phase 3 (allocator for malloc/free)
+- Phase 4 (timer for DG_GetTicksMs, DG_SleepMs)
+- Phase 5 (display for DG_DrawFrame)
+- Phase 6 (keyboard for DG_GetKey)
+- Phase 7 (filesystem for WAD loading)
 
 This is the most complex integration. Take 5 weeks.
 
@@ -928,16 +984,25 @@ This is the most complex integration. Take 5 weeks.
 **Goal:** Sound output for alarm beeps and Doom
 **New concepts:** Digital audio, sample buffers, mixing, audio queues
 
+**Prerequisites:** Phase 10 complete (Doom working, wants sound)
+
 Audio is important for the alarm clock and enhances Doom significantly.
+
+**Note on QEMU Audio:** The `virt` machine may have limited audio support. Options:
+1. **virtio-sound** — requires virtio driver (complex)
+2. **Skip QEMU audio** — implement Audio trait as no-op, test on real hardware
+3. **PC speaker emulation** — some QEMU machines support, but not virt
+
+Recommendation: Design the `Audio` trait now, but audio output may only work on real hardware (PWM). Use stub implementation for QEMU that logs instead of playing.
 
 #### Week 29: Audio Abstraction
 - [ ] **Learn:** Digital audio basics (samples, sample rate, bit depth, buffers)
-- [ ] **Learn:** QEMU audio options (`-audiodev` and sound devices)
-- [ ] Configure QEMU with audio output (e.g., `-audiodev pa,id=snd0 -machine sound=on`)
-- [ ] Create `Audio` trait: `sample_rate()`, `queue_samples(&[i16])`
-- [ ] Implement `QemuAudio` using QEMU's audio device
+- [ ] **Research:** QEMU virt audio options (may be limited)
+- [ ] Create `Audio` trait: `sample_rate()`, `queue_samples(&[i16])`, `is_available()`
+- [ ] Implement `StubAudio` that does nothing (for QEMU if no audio device works)
 - [ ] Generate simple tones programmatically (sine wave at frequency)
-- [ ] Test: play 440Hz tone (A4 note), verify sound comes from speakers
+- [ ] If QEMU audio works: test 440Hz tone
+- [ ] If not: defer actual audio testing to Phase 17 (PWM on real hardware)
 
 #### Week 30: Audio Integration
 - [ ] Create audio buffer/queue system (producer-consumer for samples)
@@ -953,33 +1018,37 @@ Audio is important for the alarm clock and enhances Doom significantly.
 ---
 
 ### Phase 12: Dual-Core & Concurrency (Weeks 31-32)
-**Goal:** Synchronization primitives and dual-core execution in QEMU
-**New concepts:** Atomics, spinlocks, mutexes, memory ordering, SMP simulation
+**Goal:** Dual-core execution in QEMU, advanced synchronization
+**New concepts:** SMP simulation, inter-core communication, lock-free queues
+
+**Prerequisites:** Phase 11 complete; basic `Spinlock` and `Mutex` already implemented in Phases 3-4
 
 Dual-core is required for the final system (Core 1 handles USB/audio while Core 0 runs apps).
 
-#### Week 31: Synchronization Primitives
-- [ ] **Learn:** Atomics and memory ordering (`Ordering::Relaxed`, `Acquire`, `Release`, `SeqCst`)
-- [ ] **Learn:** Why ordering matters (compiler/CPU reordering)
-- [ ] Implement `Spinlock` using `AtomicBool` with correct ordering
-- [ ] Implement `SpinlockGuard` with `Drop` for automatic unlock (RAII pattern)
-- [ ] Implement `Mutex<T>` wrapping data with spinlock
-- [ ] **Learn:** Interior mutability, `UnsafeCell`
-- [ ] Test: verify lock/unlock works, test contention behavior
+#### Week 31: Advanced Synchronization
+- [ ] **Review:** Atomics and memory ordering (`Ordering::Relaxed`, `Acquire`, `Release`, `SeqCst`)
+- [ ] **Note:** Basic `Spinlock` and `Mutex<T>` already done in Phases 3-4
+- [ ] Implement `SpinlockGuard` with `Drop` if not already done (RAII pattern)
+- [ ] **Learn:** Interior mutability, `UnsafeCell` (deeper understanding)
+- [ ] Implement `SpscQueue<T, N>` (single-producer single-consumer ring buffer)
+  - Lock-free using atomics for head/tail
+  - Will be used for inter-core communication
+- [ ] Test: verify SPSC queue works in single-core scenario first
 
 #### Week 32: Dual-Core in QEMU
 - [ ] **Learn:** QEMU SMP options (`-smp 2`)
-- [ ] **Learn:** How cores discover each other (device tree or spin-table)
+- [ ] **Learn:** RISC-V SMP boot — QEMU virt uses spin-table or device tree method
+  - Secondary cores spin waiting for entry address to be written
+  - Need to research exact mechanism for QEMU virt RISC-V
 - [ ] Configure QEMU for 2 cores
 - [ ] Implement core ID detection (read `mhartid` CSR)
-- [ ] Implement Core 1 startup (spin-wait for release, then jump to function)
-- [ ] Implement `SpscQueue<T, N>` (single-producer single-consumer ring buffer)
-- [ ] Test: Core 0 produces, Core 1 consumes, verify FIFO order
+- [ ] Implement Core 1 startup (write entry address, signal core to start)
+- [ ] Test: Core 0 produces to SPSC queue, Core 1 consumes, verify FIFO order
 - [ ] Test: both cores printing interleaved (with mutex protection)
 
 **Milestone 12:** Dual-core running in QEMU with working synchronization
 
-**Rust concepts practiced:** Atomics, `UnsafeCell`, RAII guards, const generics
+**Rust concepts practiced:** Atomics (advanced), `UnsafeCell`, RAII guards, const generics, lock-free data structures
 
 ---
 
