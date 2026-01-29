@@ -556,15 +556,14 @@ Complete this before Week 1 starts. This is setup, not development.
 - [ ] Add initial module documentation to lib.rs
 
 #### Continuous Integration (CI)
-- [ ] Create `.github/workflows/ci.yml` with:
-  - **QEMU tests:** `cargo test --bin ease` (runs on QEMU virt machine)
-  - **Host tests:** `cargo test --package ease --tests` (runs integration tests on host)
-  - **Clippy:** `cargo clippy --target riscv32imac-unknown-none-elf`
+- [x] Create `ci.sh` local CI script with:
   - **Format check:** `cargo fmt --check`
+  - **Clippy:** `cargo clippy --target riscv32imac-unknown-none-elf -- -D warnings`
+  - **QEMU tests:** `cargo test --bin ease` (runs on QEMU virt machine)
+  - **Host tests:** `cargo test --package ease --tests` (placeholder, runs when tests/ exists)
   - **Documentation:** `cargo doc --no-deps`
-- [ ] Configure CI to run on push to `main`/`develop` and on PRs
-- [ ] Add CI status badge to README.md
-- [ ] Verify CI passes before merging PRs
+- [x] Run `./ci.sh` before commits to catch issues early
+- [ ] (Optional) Add GitHub Actions later if needed for collaboration
 
 #### Git Workflow
 - [ ] Create develop branch: `git checkout -b develop`
@@ -572,7 +571,7 @@ Complete this before Week 1 starts. This is setup, not development.
 - [ ] Practice: make change, commit, push, create PR, merge
 - [ ] Tag setup complete: `git tag -a v0.0.1 -m "Project setup complete"`
 
-**Milestone 0:** Repository ready, toolchain working, CI pipeline running, `cargo doc` generates documentation
+**Milestone 0:** Repository ready, toolchain working, local CI script (`./ci.sh`) passing, `cargo doc` generates documentation
 
 ---
 
