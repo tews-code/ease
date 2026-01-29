@@ -17,8 +17,12 @@ cargo test --bin ease
 
 echo ""
 echo "=== Host Tests ==="
-# Uncomment when tests/ directory exists:
-# cargo test --package ease --tests
+# Host tests run on native target, not RISC-V (which has no std)
+# Note: Only --lib works because --tests also compiles the binary which has RISC-V asm
+HOST_TARGET=$(rustc --version --verbose | grep host | cut -d' ' -f2)
+cargo test --package ease --lib --target "$HOST_TARGET"
+# TODO: Enable when binary is target-conditional
+# cargo test --package ease --tests --target "$HOST_TARGET"
 
 echo ""
 echo "=== Documentation ==="
