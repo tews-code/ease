@@ -98,20 +98,29 @@ pub fn check_regression<F: Fn()>(
         let regression_pct = (avg - baseline) * 100 / baseline;
         crate::println!(
             "  REGRESSION {}: {} cycles (baseline: {}, +{}%)",
-            name, avg, baseline, regression_pct
+            name,
+            avg,
+            baseline,
+            regression_pct
         );
         panic!("Performance regression detected");
     } else if avg > baseline {
         let over_pct = (avg - baseline) * 100 / baseline;
         crate::println!(
             "  OK {}: {} cycles (baseline: {}, +{}%)",
-            name, avg, baseline, over_pct
+            name,
+            avg,
+            baseline,
+            over_pct
         );
     } else {
         let under_pct = (baseline - avg) * 100 / baseline;
         crate::println!(
             "  OK {}: {} cycles (baseline: {}, -{}%)",
-            name, avg, baseline, under_pct
+            name,
+            avg,
+            baseline,
+            under_pct
         );
     }
 }

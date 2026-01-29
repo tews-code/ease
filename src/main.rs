@@ -24,7 +24,6 @@
 #![no_std]
 #![no_main]
 #![warn(missing_docs)]
-
 #![cfg_attr(test, feature(custom_test_frameworks))]
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
@@ -113,7 +112,9 @@ fn test_runner(tests: &[&dyn Testable]) {
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     test_main();
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 #[cfg(not(test))]
@@ -121,18 +122,16 @@ extern "C" fn main() -> ! {
 extern "C" fn main() -> ! {
     print!("Hello ");
     println!("from EASE!");
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 #[unsafe(link_section = ".text.init")]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
 extern "C" fn _start() -> ! {
-    naked_asm!(
-        "li sp, 0x80100000",
-        "j main",
-        "unimp",
-    );
+    naked_asm!("li sp, 0x80100000", "j main", "unimp",);
 }
 
 // =============================================================================
@@ -193,10 +192,10 @@ mod tests {
 /// Baselines set ~20% above measured values to allow for variance.
 #[cfg(test)]
 mod baselines {
-    pub const PRINT_HELLO: u64 = 38_000;      // Measured: ~31,000
-    pub const PRINTLN_HELLO: u64 = 32_000;    // Measured: ~25,000
+    pub const PRINT_HELLO: u64 = 38_000; // Measured: ~31,000
+    pub const PRINTLN_HELLO: u64 = 32_000; // Measured: ~25,000
     pub const PRINTLN_FORMATTED: u64 = 36_000; // Measured: ~30,000
-    pub const PRINTLN_LONG: u64 = 165_000;    // Measured: ~138,000
+    pub const PRINTLN_LONG: u64 = 165_000; // Measured: ~138,000
 }
 
 #[cfg(test)]
@@ -221,24 +220,39 @@ mod benchmarks {
     #[test_case]
     fn regression_println_hello() {
         test_io::clear();
-        bench::check("println!(hello)", baselines::PRINTLN_HELLO, ITERATIONS, || {
-            println!("hello");
-        });
+        bench::check(
+            "println!(hello)",
+            baselines::PRINTLN_HELLO,
+            ITERATIONS,
+            || {
+                println!("hello");
+            },
+        );
     }
 
     #[test_case]
     fn regression_println_formatted() {
         test_io::clear();
-        bench::check("println!(formatted)", baselines::PRINTLN_FORMATTED, ITERATIONS, || {
-            println!("num: {}", 42);
-        });
+        bench::check(
+            "println!(formatted)",
+            baselines::PRINTLN_FORMATTED,
+            ITERATIONS,
+            || {
+                println!("num: {}", 42);
+            },
+        );
     }
 
     #[test_case]
     fn regression_println_long() {
         test_io::clear();
-        bench::check("println!(50 chars)", baselines::PRINTLN_LONG, ITERATIONS, || {
-            println!("the quick brown fox jumps over the lazy dog!!");
-        });
+        bench::check(
+            "println!(50 chars)",
+            baselines::PRINTLN_LONG,
+            ITERATIONS,
+            || {
+                println!("the quick brown fox jumps over the lazy dog!!");
+            },
+        );
     }
 }

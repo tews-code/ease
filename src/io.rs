@@ -32,7 +32,9 @@ pub struct UartWriter;
 impl Writer for UartWriter {
     fn write_byte(&mut self, byte: u8) {
         // Write to UART hardware
-        unsafe { write_volatile(UART_ADDRESS as *mut u8, byte); }
+        unsafe {
+            write_volatile(UART_ADDRESS as *mut u8, byte);
+        }
 
         // In test mode, also capture for verification
         #[cfg(test)]
