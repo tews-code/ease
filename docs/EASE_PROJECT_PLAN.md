@@ -1570,6 +1570,30 @@ cargo test --package ease --tests
 - Standard `#[test]` in `tests/` directory for pure logic (parsers, algorithms)
 - Runs on development machine (automatically uses std)
 - Tests import from `src/lib.rs` which exposes hardware-independent modules
+- **Supports `#[should_panic]`** for testing expected panics
+
+### Panic Testing Limitation
+
+**QEMU tests cannot use `#[should_panic]`** — this attribute is part of the built-in test harness and not available with `custom_test_frameworks`. When a QEMU test panics:
+1. The panic handler calls `qemu::exit_failure()`
+2. QEMU terminates immediately
+3. The entire test run fails
+
+**Workarounds:**
+- **Preferred:** Test panic conditions in host tests (`tests/`) using `#[should_panic]`
+- **Alternative:** Test that invalid inputs return `Result::Err` or `Option::None` instead of panicking
+- **Future:** Implement `setjmp`/`longjmp` in RISC-V assembly to enable non-local return from panic handler
+
+**Example — testing OOM in host tests:**
+```rust
+// In tests/allocator.rs (runs on host with std)
+#[test]
+#[should_panic(expected = "out of memory")]
+fn test_alloc_oom() {
+    let mut alloc = BumpAllocator::new(16);  // Tiny heap
+    alloc.alloc(1024);  // Should panic
+}
+```
 
 ### I/O Abstraction for Testing
 
