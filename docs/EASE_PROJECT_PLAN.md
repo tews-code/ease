@@ -16,6 +16,10 @@
 - **Test-driven development** — each feature requires tests before commit
   - Tests run via `cargo test` (QEMU for hardware, host for pure logic)
   - Commit workflow: implement → test → commit → update plan
+- **Rust 2024 Edition** — uses latest language features including:
+  - New `unsafe` attribute syntax (`#[unsafe(no_mangle)]`, `#[unsafe(link_section)]`)
+  - Stricter unsafe block requirements
+  - Improved ergonomics and diagnostics
 
 ### Documentation
 - **rustdoc** for all public APIs with examples
@@ -541,15 +545,26 @@ Complete this before Week 1 starts. This is setup, not development.
   [package]
   name = "ease"
   version = "0.1.0"
-  edition = "2021"
+  edition = "2024"
   description = "E-ink Alarm Shell Editor - A hobby OS for RP2350"
   documentation = "https://<username>.github.io/ease"
-  
+
   [package.metadata.docs.rs]
   targets = ["riscv32imac-unknown-none-elf"]
   ```
 - [ ] Test rustdoc: `cargo doc --open`
 - [ ] Add initial module documentation to lib.rs
+
+#### Continuous Integration (CI)
+- [ ] Create `.github/workflows/ci.yml` with:
+  - **QEMU tests:** `cargo test --bin ease` (runs on QEMU virt machine)
+  - **Host tests:** `cargo test --package ease --tests` (runs integration tests on host)
+  - **Clippy:** `cargo clippy --target riscv32imac-unknown-none-elf`
+  - **Format check:** `cargo fmt --check`
+  - **Documentation:** `cargo doc --no-deps`
+- [ ] Configure CI to run on push to `main`/`develop` and on PRs
+- [ ] Add CI status badge to README.md
+- [ ] Verify CI passes before merging PRs
 
 #### Git Workflow
 - [ ] Create develop branch: `git checkout -b develop`
@@ -557,7 +572,7 @@ Complete this before Week 1 starts. This is setup, not development.
 - [ ] Practice: make change, commit, push, create PR, merge
 - [ ] Tag setup complete: `git tag -a v0.0.1 -m "Project setup complete"`
 
-**Milestone 0:** Repository ready, toolchain working, `cargo doc` generates documentation
+**Milestone 0:** Repository ready, toolchain working, CI pipeline running, `cargo doc` generates documentation
 
 ---
 
@@ -593,13 +608,20 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] Implement `print!` / `println!` macros using `core::fmt::Write`
 - [x] Print "Hello from EASE!"
 - [x] **Learn:** `core::fmt::Write` trait
-- [ ] **Doc:** Document UART module with usage examples
+- [ ] **Doc:** Create `docs/uart.md` documenting:
+  - UART protocol basics (baud rate, framing, flow control)
+  - QEMU virt 16550 UART memory map and registers
+  - How `io.rs` abstracts UART access via `Writer` trait
+  - Usage examples for `print!`/`println!` macros
 
 #### Week 2 (continued): Testing Infrastructure
 - [x] Set up custom test framework for QEMU (`#![feature(custom_test_frameworks)]`)
 - [x] Set up QEMU exit mechanism (`src/qemu.rs` with sifive_test device)
 - [x] Verify QEMU tests pass with exit code 0, failures exit with code 1
-- [x] Set up host-side testing for pure logic (`src/lib.rs`)
+- [ ] Set up host-side integration tests (`tests/` directory)
+  - Create `tests/` directory for integration tests that run on host
+  - Tests automatically use std (no `no_std` constraint)
+  - Run via `cargo test --package ease --tests`
 - [x] Add `rust-toolchain.toml` to pin nightly toolchain
 - [x] Create I/O abstraction for testable output (`src/io.rs`)
   - `Writer` trait for byte-level output
@@ -613,13 +635,98 @@ This is your "Hello World" moment. Everything else builds on this.
   - `bench::check()` for regression detection with baselines
   - Regression tests for `print!`/`println!` operations
   - Tests fail if performance degrades beyond 20% tolerance
+- [ ] Add example benchmarks demonstrating `bench::run()` and `bench::run_avg()`
+  - Single-run benchmark example
+  - Averaged benchmark example (useful for noisy operations)
 - [x] **Learn:** `UnsafeCell`, `AtomicUsize`, trait-based abstraction, inline asm for CSRs
+
+##### Implementation Approach: Testing & Benchmarking
+
+**Dual-Testing Architecture:**
+
+The crate uses a split architecture to support testing on both QEMU (hardware-dependent code) and the host machine (pure logic):
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  src/main.rs - QEMU tests                                   │
+│  - #![feature(custom_test_frameworks)]                      │
+│  - #[test_case] functions run on QEMU virt machine          │
+│  - Tests UART, memory-mapped I/O, interrupts, boot          │
+│  - Uses sifive_test device for clean QEMU exit              │
+│  - Run: cargo test --bin ease                               │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  tests/ - Host integration tests                            │
+│  - Standard #[test] functions run on host machine           │
+│  - Automatically uses std (no no_std constraint)            │
+│  - Tests parsers, data structures, algorithms               │
+│  - No hardware dependencies                                 │
+│  - Run: cargo test --package ease --tests                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**I/O Abstraction (`src/io.rs`):**
+
+The `Writer` trait abstracts byte-level output, enabling:
+1. Hardware output via `UartWriter` (writes to 0x10000000)
+2. Test capture via a 4KB static buffer with atomic length counter
+
+```rust
+pub trait Writer {
+    fn write_byte(&mut self, byte: u8);
+    fn write_str(&mut self, s: &str);
+}
+
+// UartWriter writes to UART and (in test mode) captures to buffer
+impl Writer for UartWriter {
+    fn write_byte(&mut self, byte: u8) {
+        unsafe { write_volatile(UART_ADDRESS as *mut u8, byte); }
+        #[cfg(test)]
+        test_io::capture(byte);
+    }
+}
+```
+
+The capture buffer uses `UnsafeCell<[u8; 4096]>` with `AtomicUsize` length for lock-free single-threaded capture. Tests verify output via `test_io::contains()` and `test_io::equals()`.
+
+**Benchmarking (`src/bench.rs`):**
+
+Uses RISC-V cycle counter CSRs (`rdcycle`/`rdcycleh`) for precise measurements without timer setup:
+
+```rust
+fn cycles() -> u64 {
+    let (lo, hi): (u32, u32);
+    unsafe {
+        asm!("rdcycleh {hi}", "rdcycle {lo}", ...);
+    }
+    ((hi as u64) << 32) | (lo as u64)
+}
+```
+
+Key functions:
+- `measure(f)` - Returns cycle count for closure
+- `run(name, f)` - Prints single measurement
+- `run_avg(name, iters, f)` - Prints averaged measurement
+- `check(name, baseline, iters, f)` - Fails if >20% regression
+
+**Regression Detection:**
+
+Baselines stored in `src/main.rs`:
+```rust
+mod baselines {
+    pub const PRINTLN_HELLO: u64 = 32_000;
+    // Update when intentionally changing performance
+}
+```
+
+Tests call `bench::check()` with baseline; failure triggers panic with "REGRESSION" message.
 
 **Testing commands:**
 ```bash
-cargo test --bin ease                              # QEMU tests + benchmarks
-cargo test --lib --target aarch64-unknown-linux-gnu  # Host tests (pure logic)
-cargo run                                          # Normal run
+cargo test --bin ease                # QEMU tests + benchmarks (runs on QEMU virt)
+cargo test --package ease --tests    # Host integration tests (runs on host machine)
+cargo run                            # Normal run (boots on QEMU)
 ```
 
 **Milestone 1:** "Hello from EASE!" prints to QEMU console; test and benchmark infrastructure operational
@@ -672,7 +779,13 @@ cargo run                                          # Normal run
 #### Week 5: Bump Allocator
 - [ ] **Learn:** Stack vs heap, why dynamic allocation matters
 - [ ] **Learn:** What an allocator does (manage free memory)
-- [ ] Define heap region in linker script (e.g., 64KB at known address)
+- [ ] **Align QEMU memory layout with RP2350:**
+  - Update `memory-qemu.x` to simulate RP2350's memory constraints
+  - Define SRAM region at 0x20000000 (520KB, matching RP2350)
+  - Define PSRAM region at 0x11000000 (8MB, for large allocations)
+  - Keep total memory realistic so QEMU development reveals real constraints
+  - **Note:** QEMU virt uses different addresses; create abstraction or remap
+- [ ] Define heap region in linker script (e.g., 64KB at known address within SRAM)
 - [ ] **First:** Implement basic `Spinlock` using `AtomicBool`
   - Needed for thread-safe allocator (and will be used throughout project)
   - Simple spin-wait loop with `Acquire`/`Release` ordering
@@ -1404,10 +1517,10 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    cargo test --lib                          │
-│                 --target <host-triple>                       │
+│              cargo test --package ease --tests               │
+│  - Integration tests in tests/ directory                    │
 │  - Pure logic tests (parsers, data structures)              │
-│  - Runs on development machine                              │
+│  - Runs on development machine with std                     │
 │  - Standard #[test] infrastructure                          │
 └─────────────────────────────────────────────────────────────┘
 
@@ -1431,19 +1544,17 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 # Run QEMU tests (hardware-dependent code)
 cargo test --bin ease
 
-# Run host tests (pure logic in lib.rs)
-cargo test --lib --target <host-triple>
-
-# Example for aarch64 Linux:
-cargo test --lib --target aarch64-unknown-linux-gnu
+# Run host integration tests (pure logic)
+cargo test --package ease --tests
 ```
 
 ### Test Files
 
-| File | Purpose |
-|------|---------|
+| File/Directory | Purpose |
+|----------------|---------|
 | `src/main.rs` | QEMU tests and benchmarks (`#[test_case]`) |
-| `src/lib.rs` | Host tests (pure logic, standard `#[test]`) |
+| `tests/` | Host integration tests (standard `#[test]`, runs with std) |
+| `src/lib.rs` | Library crate exposing pure logic for tests |
 | `src/io.rs` | I/O abstraction with `Writer` trait and test capture |
 | `src/bench.rs` | Benchmarking via RISC-V cycle counter |
 | `src/qemu.rs` | QEMU exit mechanism (sifive_test device) |
@@ -1456,9 +1567,9 @@ cargo test --lib --target aarch64-unknown-linux-gnu
 - Panic handler calls `qemu::exit_failure()` on test panic
 
 ### Host Testing
-- Standard `#[test]` for pure logic (parser, algorithms)
-- Runs on development machine (not cross-compiled)
-- `src/lib.rs` is `#![no_std]` in release, uses std for testing
+- Standard `#[test]` in `tests/` directory for pure logic (parsers, algorithms)
+- Runs on development machine (automatically uses std)
+- Tests import from `src/lib.rs` which exposes hardware-independent modules
 
 ### I/O Abstraction for Testing
 
@@ -1620,7 +1731,7 @@ cd ease
 rustup target add riscv32imac-unknown-none-elf
 
 # Build for QEMU
-cargo build --release --features qemu-virt
+cargo build --release --features qemu
 
 # Run on QEMU
 qemu-system-riscv32 -M virt -m 128M -nographic \
@@ -1684,7 +1795,7 @@ probe-rs gdb --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 
 | Phase | Weeks | Focus | Key Concepts |
 |-------|-------|-------|--------------|
-| 0 | 0 | Project Setup | GitHub, rustdoc, toolchain |
+| 0 | 0 | Project Setup | GitHub, CI, rustdoc, toolchain, Rust 2024 |
 | 1 | 1-2 | Hello QEMU | `no_std`, linker scripts, UART |
 | 2 | 3-4 | Kernel Foundations | Boot assembly, panic, modules |
 | 3 | 5-6 | Memory Management | Allocators, `GlobalAlloc`, Mutex |
