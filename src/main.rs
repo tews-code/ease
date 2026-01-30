@@ -32,7 +32,9 @@ use core::sync::atomic::AtomicUsize;
 
 mod arch;
 mod bench;
+mod hal;
 mod io;
+mod kernel;
 mod qemu;
 
 #[used]

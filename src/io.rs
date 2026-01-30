@@ -3,51 +3,7 @@
 //! Provides traits and implementations for byte-level I/O.
 //! In test mode, output is captured to a buffer for verification.
 
-use core::ptr::write_volatile;
-
-/// UART base address on QEMU virt machine
-const UART_ADDRESS: usize = 0x10000000;
-
-/// Trait for byte-level output
-///
-/// Implementations can write to hardware (UART) or capture for testing.
-pub trait Writer {
-    /// Write a single byte
-    fn write_byte(&mut self, byte: u8);
-
-    /// Write a string as bytes
-    fn write_str(&mut self, s: &str) {
-        for byte in s.bytes() {
-            self.write_byte(byte);
-        }
-    }
-}
-
-/// UART writer for QEMU virt machine
-///
-/// Writes bytes to the memory-mapped UART at 0x10000000.
-/// In test mode, also captures output to the test buffer.
-pub struct UartWriter;
-
-impl Writer for UartWriter {
-    fn write_byte(&mut self, byte: u8) {
-        // Write to UART hardware
-        unsafe {
-            write_volatile(UART_ADDRESS as *mut u8, byte);
-        }
-
-        // In test mode, also capture for verification
-        #[cfg(test)]
-        test_io::capture(byte);
-    }
-}
-
-impl core::fmt::Write for UartWriter {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        Writer::write_str(self, s);
-        Ok(())
-    }
-}
+pub use crate::hal::qemu_virt::UartWriter;
 
 // =============================================================================
 // Test I/O Capture
