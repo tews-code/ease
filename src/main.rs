@@ -28,16 +28,25 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
-use core::arch::naked_asm;
+use core::sync::atomic::AtomicUsize;
 
+mod arch;
 mod bench;
 mod io;
 mod qemu;
 
+#[used]
+static BSS_TEST: AtomicUsize = AtomicUsize::new(0);
+
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    println!("⚠️ PANIC! {info}");
+    loop {
+        unsafe {
+            core::arch::asm!("wfi");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -86,7 +95,7 @@ impl<T: Fn()> Testable for T {
     fn run(&self) {
         print!("{}...\t", core::any::type_name::<T>());
         self();
-        println!("[ok]");
+        println!("[\x1b[32mok\x1b[0m]");
     }
 }
 
@@ -127,20 +136,20 @@ extern "C" fn main() -> ! {
     }
 }
 
-#[unsafe(link_section = ".text.init")]
-#[unsafe(naked)]
-#[unsafe(no_mangle)]
-extern "C" fn _start() -> ! {
-    naked_asm!("li sp, 0x80100000", "j main", "unimp",);
-}
-
 // =============================================================================
 // Tests (QEMU)
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
-    use crate::io::test_io;
+    use core::sync::atomic::Ordering;
+
+    use crate::{BSS_TEST, io::test_io};
+
+    #[test_case]
+    fn test_bss_zeroed() {
+        assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
+    }
 
     #[test_case]
     fn test_println_output() {

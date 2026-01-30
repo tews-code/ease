@@ -11,5 +11,9 @@ SECTIONS {
     } > RAM
     .rodata : { *(.rodata .rodata.*) } > RAM
     .data : { *(.data .data.*) } > RAM
-    .bss : { *(.bss .bss.*) } > RAM
+    .bss : { 
+	__bss_start = .;
+	*(.bss .bss.*) 
+	__bss_end = .;
+    } > RAM
 }
