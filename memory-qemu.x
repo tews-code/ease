@@ -9,11 +9,20 @@ SECTIONS {
         *(.text.init)
         *(.text .text.*)
     } > RAM
+
     .rodata : { *(.rodata .rodata.*) } > RAM
+
     .data : { *(.data .data.*) } > RAM
+
     .bss : { 
 	__bss_start = .;
 	*(.bss .bss.*) 
 	__bss_end = .;
     } > RAM
+
+    /* Heap: 64KB after BSS */
+    . = ALIGN(16);
+    __heap_start = .;
+    . = . + 64K;
+    __heap_end = .;
 }
