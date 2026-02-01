@@ -28,6 +28,8 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
+extern crate alloc;
+
 use core::sync::atomic::AtomicUsize;
 
 mod arch;
@@ -122,6 +124,7 @@ fn test_runner(tests: &[&dyn Testable]) {
 #[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
+    kernel::alloc::init();
     test_main();
     loop {
         core::hint::spin_loop();
@@ -131,6 +134,7 @@ extern "C" fn main() -> ! {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
+    kernel::alloc::init();
     print!("Hello ");
     println!("from EASE!");
     loop {
@@ -151,6 +155,24 @@ mod tests {
     #[test_case]
     fn test_bss_zeroed() {
         assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
+    }
+
+    #[test_case]
+    fn test_vec_allocation() {
+        use alloc::vec::Vec;
+        let mut v = Vec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], 1);
+    }
+
+    #[test_case]
+    fn test_string_allocation() {
+        use alloc::string::String;
+        let s = String::from("hello heap!");
+        assert!(s.contains("heap"));
     }
 
     #[test_case]
@@ -207,6 +229,9 @@ mod baselines {
     pub const PRINTLN_HELLO: u64 = 32_000; // Measured: ~25,000
     pub const PRINTLN_FORMATTED: u64 = 36_000; // Measured: ~30,000
     pub const PRINTLN_LONG: u64 = 165_000; // Measured: ~138,000
+    pub const BOX_NEW_U64: u64 = 12_000; // Measured: ~604,000
+    pub const VEC_PUSH_100_ITEMS: u64 = 60_000; // Measured: ~53,000
+    pub const STRING_FROM_SHORT: u64 = 10_000; // Measured: ~390,000
 }
 
 #[cfg(test)]
@@ -265,5 +290,50 @@ mod benchmarks {
                 println!("the quick brown fox jumps over the lazy dog!!");
             },
         );
+    }
+
+    #[test_case]
+    fn bench_small_allocation() {
+        use alloc::vec::Vec;
+        use core::hint::black_box;
+        test_io::clear();
+        bench::check(
+            "Vec::push 100 items",
+            baselines::VEC_PUSH_100_ITEMS,
+            ITERATIONS,
+            || {
+                let mut v: Vec<u32> = Vec::new();
+                for i in 0..100 {
+                    v.push(black_box(i));
+                }
+            }
+        );
+    }
+
+    #[test_case]
+    fn bench_string_allocation() {
+        use alloc::string::String;
+        test_io::clear();
+        bench::check(
+            "String::from short",
+            baselines::STRING_FROM_SHORT,
+            ITERATIONS,
+            || {
+            let _ = String::from("hello");
+        });
+    }
+
+    #[test_case]
+    fn bench_box_allocation() {
+        use alloc::boxed::Box;
+        use core::hint::black_box;
+        test_io::clear();
+        bench::check(
+            "Box::new u64",
+            baselines::BOX_NEW_U64,
+            ITERATIONS,
+            || {
+            let _ = Box::new(black_box(42u64));
+        });
     }
 }
