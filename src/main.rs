@@ -32,6 +32,7 @@ extern crate alloc;
 
 mod arch;
 mod bench;
+mod drivers;
 mod hal;
 mod io;
 mod kernel;
@@ -87,6 +88,8 @@ macro_rules! println {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
+    drivers::ramfb::init();
+    drivers::ramfb::clear(0x0000FF); // Blue screen
 
     test_main();
     loop {
@@ -99,6 +102,8 @@ extern "C" fn main() -> ! {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
+    drivers::ramfb::init();
+    drivers::ramfb::clear(0x0000FF); // Blue screen
 
     print!("Hello ");
     println!("from EASE!");
@@ -106,9 +111,7 @@ extern "C" fn main() -> ! {
     println!("Tick: {}", arch::timer::ticks_ms());
     arch::timer::sleep_ms(1000); // Sleep 1 second
     println!("Tick: {}", arch::timer::ticks_ms());
-    unsafe {
-        core::arch::asm!("unimp");
-    }
+
     loop {
         core::hint::spin_loop();
     }

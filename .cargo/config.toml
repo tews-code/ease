@@ -3,4 +3,4 @@ target = "riscv32imac-unknown-none-elf"
 
 [target.riscv32imac-unknown-none-elf]
 rustflags = ["-C", "link-arg=-Tmemory-qemu.x"]
-runner = "qemu-system-riscv32 -M virt -nographic -bios none -kernel"
+runner = "qemu-system-riscv32 -M virt -device ramfb -serial stdio -bios none -kernel"
