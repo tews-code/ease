@@ -18,6 +18,7 @@ unsafe extern "C" {
 extern "C" fn _start() -> ! {
     naked_asm!(
         "li sp, 0x80100000",
+
         // Zero BSS segment
         "la t0, {bss_start}",
         "la t1, {bss_end}",
@@ -27,6 +28,11 @@ extern "C" fn _start() -> ! {
         "addi t0, t0, 4",       // A word is 4 bytes
         "j 1b",                 // "b" means jump backward
         "2:",
+
+        // Set trap vector
+        "la t0, _trap_vector",
+        "csrw mtvec, t0",
+
         "j main",
         "unimp",
         bss_start = sym __bss_start,
