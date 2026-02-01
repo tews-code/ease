@@ -39,6 +39,7 @@ pub fn measure<F: FnOnce()>(f: F) -> u64 {
 /// Run a benchmark and print results
 ///
 /// Runs the closure and prints the cycle count.
+#[expect(dead_code)]
 pub fn run<F: FnOnce()>(name: &str, f: F) {
     let elapsed = measure(f);
     crate::println!("  {}: {} cycles", name, elapsed);
@@ -47,6 +48,7 @@ pub fn run<F: FnOnce()>(name: &str, f: F) {
 /// Run a benchmark multiple times and print average
 ///
 /// Useful for reducing noise in measurements.
+#[expect(dead_code)]
 pub fn run_avg<F: Fn()>(name: &str, iterations: u32, f: F) {
     // Warm-up run (not counted)
     f();

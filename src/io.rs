@@ -76,3 +76,125 @@ pub mod test_io {
         output() == expected
     }
 }
+
+// Tests
+#[cfg(test)]
+mod test {
+    use crate::io::test_io;
+    use crate::{print, println};
+
+    #[test_case]
+    fn test_println_output() {
+        test_io::clear();
+        println!("hello");
+        assert!(test_io::equals("hello\n"));
+    }
+
+    #[test_case]
+    fn test_print_no_newline() {
+        test_io::clear();
+        print!("abc");
+        assert!(test_io::equals("abc"));
+    }
+
+    #[test_case]
+    fn test_println_formatted() {
+        test_io::clear();
+        println!("count: {}", 42);
+        assert!(test_io::equals("count: 42\n"));
+    }
+
+    #[test_case]
+    fn test_multiple_prints() {
+        test_io::clear();
+        print!("one ");
+        print!("two ");
+        println!("three");
+        assert!(test_io::equals("one two three\n"));
+    }
+
+    #[test_case]
+    fn test_output_contains() {
+        test_io::clear();
+        println!("the quick brown fox");
+        assert!(test_io::contains("quick"));
+        assert!(test_io::contains("brown"));
+        assert!(!test_io::contains("lazy"));
+    }
+}
+
+// =============================================================================
+// Benchmarks (QEMU)
+// =============================================================================
+
+/// Baseline cycle counts for regression detection.
+/// Update these when intentionally changing performance.
+/// Run `cargo test --bin ease` to see current measurements.
+/// Baselines set ~20% above measured values to allow for variance.
+#[cfg(test)]
+mod baselines {
+    pub const PRINT_HELLO: u64 = 180_000; // Measured without interrupts: ~31,000
+    pub const PRINTLN_HELLO: u64 = 240_000; // Measured without interrupts: ~25,000
+    pub const PRINTLN_FORMATTED: u64 = 320_000; // Measured without interrupts: ~30,000
+    pub const PRINTLN_LONG: u64 = 750_000; // Measured without interrupts: ~138,000
+}
+
+#[cfg(test)]
+mod benchmarks {
+    use super::baselines;
+    use crate::bench;
+    use crate::io::test_io;
+    use crate::{print, println};
+
+    /// Number of iterations for averaging (reduces noise)
+    const ITERATIONS: u32 = 10;
+
+    #[test_case]
+    fn regression_print_hello() {
+        println!();
+        println!("=== Regression Checks ===");
+        test_io::clear();
+        bench::check("print!(hello)", baselines::PRINT_HELLO, ITERATIONS, || {
+            print!("hello");
+        });
+    }
+
+    #[test_case]
+    fn regression_println_hello() {
+        test_io::clear();
+        bench::check(
+            "println!(hello)",
+            baselines::PRINTLN_HELLO,
+            ITERATIONS,
+            || {
+                println!("hello");
+            },
+        );
+    }
+
+    #[test_case]
+    fn regression_println_formatted() {
+        test_io::clear();
+        bench::check(
+            "println!(formatted)",
+            baselines::PRINTLN_FORMATTED,
+            ITERATIONS,
+            || {
+                println!("num: {}", 42);
+            },
+        );
+    }
+
+    #[test_case]
+    fn regression_println_long() {
+        test_io::clear();
+        bench::check(
+            "println!(50 chars)",
+            baselines::PRINTLN_LONG,
+            ITERATIONS,
+            || {
+                println!("the quick brown fox jumps over the lazy dog!!");
+            },
+        );
+    }
+}

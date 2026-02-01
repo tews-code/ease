@@ -70,3 +70,78 @@ fn align_up(addr: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     (addr + align - 1) & !(align - 1)
 }
+
+#[cfg(test)]
+mod tests {
+
+    // TESTS
+
+    #[test_case]
+    fn test_vec_allocation() {
+        use alloc::vec::Vec;
+        let mut v = Vec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[0], 1);
+    }
+
+    #[test_case]
+    fn test_string_allocation() {
+        use alloc::string::String;
+        let s = String::from("hello heap!");
+        assert!(s.contains("heap"));
+    }
+
+    // BENCHMARKS
+
+    use crate::bench;
+
+    const ITERATIONS: u32 = 10;
+
+    mod baselines {
+        pub const BOX_NEW_U64: u64 = 90_000;
+        pub const VEC_PUSH_100_ITEMS: u64 = 500_000;
+        pub const STRING_FROM_SHORT: u64 = 60_000;
+    }
+
+    #[test_case]
+    fn bench_small_allocation() {
+        use alloc::vec::Vec;
+        use core::hint::black_box;
+        bench::check(
+            "Vec::push 100 items",
+            baselines::VEC_PUSH_100_ITEMS,
+            ITERATIONS,
+            || {
+                let mut v: Vec<u32> = Vec::new();
+                for i in 0..100 {
+                    v.push(black_box(i));
+                }
+            },
+        );
+    }
+
+    #[test_case]
+    fn bench_string_allocation() {
+        use alloc::string::String;
+        bench::check(
+            "String::from short",
+            baselines::STRING_FROM_SHORT,
+            ITERATIONS,
+            || {
+                let _ = String::from("hello");
+            },
+        );
+    }
+
+    #[test_case]
+    fn bench_box_allocation() {
+        use alloc::boxed::Box;
+        use core::hint::black_box;
+        bench::check("Box::new u64", baselines::BOX_NEW_U64, ITERATIONS, || {
+            let _ = Box::new(black_box(42u64));
+        });
+    }
+}

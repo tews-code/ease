@@ -102,7 +102,7 @@ extern "C" fn trap_handler() {
 
     if is_interrupt {
         match code {
-            INTERRUPT_TIMER => timer_interrupt(),
+            INTERRUPT_TIMER => crate::arch::timer::handle_interrupt(),
             _ => crate::println!("Unknown interrupt {}", code),
         }
     } else {
@@ -111,9 +111,4 @@ extern "C" fn trap_handler() {
             _ => panic!("Unknown exception mcause {:x} mepc {:x}", mcause, mepc),
         }
     }
-}
-
-fn timer_interrupt() {
-    crate::println!("Timer interrupt!");
-    todo!()
 }
