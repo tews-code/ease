@@ -137,15 +137,24 @@ This is an educational project. The primary goal is learning through hands-on im
 
 ```
 SRAM (520KB) - 0x20000000
-├── 0x20000000: Core 0 Stack (8KB)
-├── 0x20002000: Core 1 Stack (8KB)
-├── 0x20004000: Kernel Heap (64KB)
+├── 0x20000000: Kernel Stack (4KB)
+│   └── Used during trap handling and scheduling
+├── 0x20001000: Core 1 I/O Stack (4KB)
+├── 0x20002000: Kernel Heap (64KB)
 │   └── Sync primitives, small allocations
-├── 0x20014000: Shared IPC Region (4KB)
+├── 0x20012000: Shared IPC Region (4KB)
 │   ├── Spinlock-protected queues
 │   ├── Audio double-buffer (2KB)
 │   └── Input event queue (1KB)
-├── 0x20015000: Reserved (remaining ~436KB)
+├── 0x20013000: Thread Stack Pool (40KB)
+│   ├── Thread 0 (Idle): 2KB
+│   ├── Thread 1 (Shell): 2KB
+│   ├── Thread 2 (Doom): 16KB
+│   ├── Thread 3 (Editor): 4KB
+│   ├── Thread 4 (Alarm): 2KB
+│   └── Threads 5-7: 4KB each (reserved)
+├── 0x2001D000: TCBs + Scheduler State (2KB)
+├── 0x2001D800: Reserved (remaining ~398KB)
 │   └── Display buffer, working memory
 └── 0x20082000: End of SRAM
 
@@ -272,6 +281,7 @@ ease/
 │   │   ├── heap.rs            # Simple allocator
 │   │   ├── sync.rs            # Spinlocks, mutexes, channels
 │   │   ├── timer.rs           # System tick, sleep
+│   │   ├── sched.rs           # Preemptive scheduler, threads
 │   │   └── panic.rs           # Panic handler
 │   │
 │   ├── drivers/               # Device drivers
@@ -496,7 +506,8 @@ Phase 5-6: I/O Systems     → display, input, shell
 Phase 7-8: Applications    → editor, alarm (simpler apps first)
 Phase 9-10: Doom          → FFI, libc, complex integration
 Phase 11: Audio           → optional enhancement
-Phase 12-14: Hardware     → port everything to real Pico 2
+Phase 12-12A: Concurrency → dual-core, preemptive scheduler
+Phase 13-18: Hardware     → port everything to real Pico 2
 ```
 
 Each phase builds directly on the previous. No phase requires concepts not yet introduced.
@@ -1199,9 +1210,182 @@ Dual-core is required for the final system (Core 1 handles USB/audio while Core 
 
 ---
 
-## 🎯 MVP Milestone: QEMU Feature-Complete (Week 32)
+### Phase 12A: Preemptive Scheduler (Weeks 33-34)
+**Goal:** Round-robin preemptive multitasking on Core 0
+**New concepts:** Context switching, thread control blocks, timer-driven preemption
 
-At the end of Phase 12, the QEMU build is **feature-complete**:
+**Prerequisites:** Phase 12 complete (dual-core working, SPSC queues)
+
+This phase adds true preemptive multitasking, allowing multiple threads to run concurrently on Core 0 while Core 1 continues dedicated I/O handling (maintaining the AMP design).
+
+#### Memory Budget (520KB SRAM)
+
+The scheduler adds thread stacks to the existing memory layout:
+
+| Component | Size | Notes |
+|-----------|------|-------|
+| Kernel/interrupt stack | 4KB | Shared for trap handling |
+| Core 1 I/O stack | 4KB | Unchanged |
+| Kernel heap | 64KB | Unchanged |
+| IPC region | 4KB | Unchanged |
+| **Thread stacks** | 40KB | Static pool (see below) |
+| TCBs + scheduler | 2KB | Static allocation |
+| **Total** | ~118KB | Leaves 400KB for app data |
+
+**Thread Stack Allocation (static pool of 8 slots):**
+
+| Slot | Stack | Purpose |
+|------|-------|---------|
+| 0 | 2KB | Idle thread |
+| 1 | 2KB | Shell |
+| 2 | 16KB | Doom (C code, deep recursion) |
+| 3 | 4KB | Editor |
+| 4 | 2KB | Alarm |
+| 5-7 | 4KB each | Reserved/future |
+
+Doom needs the largest stack due to C calling conventions and recursion in the renderer.
+
+#### Week 33: Scheduler Infrastructure
+
+- [ ] **Learn:** Context switching theory (save/restore CPU state)
+- [ ] **Learn:** RISC-V register set for context save (x1-x31, mepc, mstatus)
+- [ ] Update linker script with thread stack pool (static allocation)
+- [ ] Implement interrupt-safe `SpinLock`:
+  - Must disable interrupts while held to prevent deadlock
+  - Save `mstatus.MIE` on lock, restore on unlock
+  ```rust
+  impl<T> SpinLock<T> {
+      pub fn lock(&self) -> SpinLockGuard<T> {
+          let mstatus = disable_interrupts();
+          while self.locked.swap(true, Acquire) {
+              core::hint::spin_loop();
+          }
+          SpinLockGuard { lock: self, prev_mstatus: mstatus }
+      }
+  }
+  ```
+- [ ] Define `SavedContext` struct (31 registers + mepc + mstatus = 132 bytes)
+- [ ] Define `TCB` (Task Control Block) struct:
+  ```rust
+  struct TCB {
+      context: SavedContext,
+      stack_base: *mut u8,
+      stack_size: usize,
+      state: ThreadState,  // Free, Ready, Running, Blocked
+      id: u8,
+      wake_at: Option<u64>,  // For sleep support
+  }
+  ```
+- [ ] Define `Scheduler` struct with static array of 8 TCBs
+- [ ] Implement `find_next_ready()` - round-robin scan for next Ready thread
+- [ ] Test TCB creation and state transitions (unit tests)
+
+#### Week 34: Context Switch & Preemption
+
+- [ ] **Learn:** How to switch stacks safely in assembly
+- [ ] Implement context switch assembly (~50 lines):
+  - On trap entry: switch to kernel stack, save user registers to current TCB
+  - On trap exit: restore registers from new TCB, switch to thread stack
+  - Key insight: `sp` must be saved/restored explicitly
+- [ ] Modify trap handler for timer preemption:
+  ```rust
+  fn trap_handler(regs: &mut SavedContext, mcause: u32) {
+      if mcause == MACHINE_TIMER_INTERRUPT {
+          timer::acknowledge();
+          let mut sched = SCHEDULER.lock();
+          sched.tick_count += 1;
+
+          if sched.tick_count >= TIME_SLICE_MS {  // 10ms slice
+              sched.tick_count = 0;
+              // Save current, pick next, restore
+              sched.context_switch(regs);
+          }
+      }
+  }
+  ```
+- [ ] Implement thread API:
+  - `spawn(entry: fn(), stack_size: usize) -> Option<ThreadId>`
+  - `yield_now()` - voluntary yield (triggers reschedule)
+  - `exit() -> !` - terminate current thread, mark slot Free
+  - `current() -> ThreadId` - get current thread ID
+- [ ] Implement idle thread (runs `wfi` in loop when nothing ready)
+- [ ] Implement `sleep_ms(ms: u32)` using `wake_at` field:
+  - Set `wake_at = current_ticks + ms`
+  - Mark thread Blocked
+  - Scheduler checks Blocked threads each tick, wakes if `wake_at` reached
+- [ ] Test: spawn two threads incrementing separate counters, verify both progress
+- [ ] Test: spawn threads printing interleaved output, verify round-robin fairness
+- [ ] Test: `sleep_ms` accuracy with multiple sleeping threads
+- [ ] Test: thread exit and slot reuse
+- [ ] Stress test: fill all 8 slots, verify no corruption
+
+#### Context Switch Flow
+
+```
+Timer interrupt fires (every 1ms)
+        │
+        ▼
+┌─────────────────────────────┐
+│ _trap_vector (asm)          │
+│ - Switch to kernel stack    │
+│ - Save all regs to TCB      │
+│ - Call rust trap_handler    │
+└─────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────┐
+│ trap_handler (Rust)         │
+│ - Identify: timer interrupt │
+│ - Increment tick_count      │
+│ - If tick_count >= 10:      │
+│   - current.state = Ready   │
+│   - Find next Ready thread  │
+│   - next.state = Running    │
+│   - Reset tick_count        │
+└─────────────────────────────┘
+        │
+        ▼
+┌─────────────────────────────┐
+│ _trap_vector (asm)          │
+│ - Restore regs from new TCB │
+│ - Switch to thread stack    │
+│ - mret                      │
+└─────────────────────────────┘
+```
+
+#### Scheduler API Summary
+
+```rust
+// src/kernel/sched.rs
+
+const MAX_THREADS: usize = 8;
+const TIME_SLICE_MS: u32 = 10;
+
+/// Spawn a new thread. Returns None if no slots available.
+pub fn spawn(entry: fn(), stack_size: usize) -> Option<ThreadId>;
+
+/// Voluntarily yield CPU to another thread.
+pub fn yield_now();
+
+/// Terminate the current thread. Never returns.
+pub fn exit() -> !;
+
+/// Sleep for at least `ms` milliseconds.
+pub fn sleep_ms(ms: u32);
+
+/// Get the current thread's ID.
+pub fn current() -> ThreadId;
+```
+
+**Milestone 12A:** Preemptive round-robin scheduler with 8 thread slots, timer-driven context switching, sleep support
+
+**Rust concepts introduced:** Low-level context switching, interrupt-safe locks, thread lifecycle management
+
+---
+
+## 🎯 MVP Milestone: QEMU Feature-Complete (Week 34)
+
+At the end of Phase 12A, the QEMU build is **feature-complete**:
 
 | Feature | Status |
 |---------|--------|
@@ -1217,6 +1401,7 @@ At the end of Phase 12, the QEMU build is **feature-complete**:
 | Doom | ✅ Working |
 | Audio | ✅ Working |
 | Dual-core | ✅ Working |
+| Preemptive scheduler | ✅ Working |
 
 **This is a complete, usable operating system running in QEMU.**
 
@@ -1234,28 +1419,28 @@ From here, there are two hardware paths:
 - Uses UART for I/O (no e-ink display)
 - Uses USB serial keyboard input
 - Doom runs with reduced WAD or from flash
-- **Weeks 33-36**
+- **Weeks 35-38**
 
-### Path B: Full Hardware (With Modifications)  
+### Path B: Full Hardware (With Modifications)
 **Goal:** Complete EASE device as originally planned
 - PSRAM soldered for 8MB extra RAM
 - 10.3" e-ink display
 - USB Host keyboard
 - PWM audio with speaker
 - Battery powered
-- **Weeks 33-44**
+- **Weeks 35-48**
 
 You can complete Path A first (quick win on real hardware), then continue to Path B.
 
 ---
 
-### Phase 13: MVP Hardware - Stock Pico 2 (Weeks 33-36)
+### Phase 13: MVP Hardware - Stock Pico 2 (Weeks 35-38)
 **Goal:** EASE running on unmodified Pico 2
 **New concepts:** Real hardware debugging, RP2350 peripherals, flash constraints
 
 This gives you a working system on real hardware without soldering PSRAM.
 
-#### Week 33: First Hardware Boot
+#### Week 35: First Hardware Boot
 - [ ] Set up Raspberry Pi Debug Probe (SWD connection)
 - [ ] **Learn:** probe-rs tool for flashing and debugging
 - [ ] Create RP2350 linker script (different memory map from QEMU)
@@ -1263,7 +1448,7 @@ This gives you a working system on real hardware without soldering PSRAM.
 - [ ] Verify GDB debugging works over SWD
 - [ ] **Learn:** RP2350 GPIO registers and configuration
 
-#### Week 34: UART on Real Hardware
+#### Week 36: UART on Real Hardware
 - [ ] **Learn:** RP2350 UART peripheral registers
 - [ ] Implement `Uart` for RP2350 (different from QEMU's memory-mapped UART)
 - [ ] Get "Hello from EASE!" printing to debug probe's UART
@@ -1271,7 +1456,7 @@ This gives you a working system on real hardware without soldering PSRAM.
 - [ ] Verify `sleep_ms()` works on real hardware
 - [ ] Use `#[cfg(feature = "rp2350")]` to select HAL implementation
 
-#### Week 35: SD Card & Filesystem on Hardware
+#### Week 37: SD Card & Filesystem on Hardware
 - [ ] **Learn:** RP2350 SPI peripheral
 - [ ] Connect SD card breakout to Pico 2 (SPI pins)
 - [ ] Implement SPI driver for RP2350
@@ -1279,7 +1464,7 @@ This gives you a working system on real hardware without soldering PSRAM.
 - [ ] Verify FAT16 filesystem works on real SD card
 - [ ] Test `ls`, `cat` commands via UART
 
-#### Week 36: MVP System Complete
+#### Week 38: MVP System Complete
 - [ ] Port dual-core startup to RP2350 (different from QEMU spin-table)
 - [ ] **Learn:** RP2350 multicore launch sequence (SIO FIFO)
 - [ ] Test shell interaction via UART (type commands, see responses)
@@ -1294,18 +1479,18 @@ This proves your OS works on real hardware. Everything from here adds peripheral
 
 ---
 
-### Phase 14: PSRAM & Full Memory (Weeks 37-38)
+### Phase 14: PSRAM & Full Memory (Weeks 39-40)
 **Goal:** Add 8MB PSRAM for full Doom support
 **New concepts:** QSPI interface, external memory initialization
 
-#### Week 37: PSRAM Hardware
+#### Week 39: PSRAM Hardware
 - [ ] Solder APS6404L-3SQR PSRAM chip to Pico 2 (dead-bug style to QSPI pins)
 - [ ] **Learn:** QSPI protocol and RP2350's QSPI controller
 - [ ] Implement PSRAM initialization sequence
 - [ ] Test basic read/write to PSRAM
 - [ ] Verify data integrity (write patterns, read back)
 
-#### Week 38: PSRAM Integration
+#### Week 40: PSRAM Integration
 - [ ] Integrate PSRAM with allocator (large allocations go to PSRAM)
 - [ ] **Remember:** Atomics don't work in PSRAM - keep sync primitives in SRAM
 - [ ] Load Doom WAD into PSRAM from SD card
@@ -1316,11 +1501,11 @@ This proves your OS works on real hardware. Everything from here adds peripheral
 
 ---
 
-### Phase 15: E-ink Display (Weeks 39-40)
+### Phase 15: E-ink Display (Weeks 41-42)
 **Goal:** IT8951-based e-ink display working
 **New concepts:** IT8951 command protocol, e-ink refresh modes
 
-#### Week 39: IT8951 Driver
+#### Week 41: IT8951 Driver
 - [ ] Connect Waveshare 10.3" display to Pico 2 via SPI
 - [ ] **Learn:** IT8951 command set (init, write, refresh)
 - [ ] Implement IT8951 initialization sequence
@@ -1328,7 +1513,7 @@ This proves your OS works on real hardware. Everything from here adds peripheral
 - [ ] Implement refresh command (full refresh first)
 - [ ] Display test pattern (checkerboard or gradient)
 
-#### Week 40: Display Integration
+#### Week 42: Display Integration
 - [ ] Port `Display` trait to IT8951
 - [ ] Implement partial refresh for faster updates
 - [ ] Test text console on e-ink
@@ -1339,13 +1524,13 @@ This proves your OS works on real hardware. Everything from here adds peripheral
 
 ---
 
-### Phase 16: USB Host Keyboard (Weeks 41-42)
+### Phase 16: USB Host Keyboard (Weeks 43-44)
 **Goal:** USB keyboard input on real hardware
 **New concepts:** USB Host protocol, HID class, enumeration
 
 This is one of the more complex hardware tasks.
 
-#### Week 41: USB Host Basics
+#### Week 43: USB Host Basics
 - [ ] **Learn:** USB Host vs Device mode
 - [ ] **Learn:** USB enumeration process (descriptors, configuration)
 - [ ] Configure RP2350 USB controller for Host mode
@@ -1353,7 +1538,7 @@ This is one of the more complex hardware tasks.
 - [ ] Detect when keyboard is plugged in
 - [ ] Parse device descriptor, find HID interface
 
-#### Week 42: HID Keyboard Driver
+#### Week 44: HID Keyboard Driver
 - [ ] **Learn:** HID report descriptor format
 - [ ] Implement HID report polling (interrupt transfers)
 - [ ] Parse keyboard HID reports (modifier keys, key codes)
@@ -1365,11 +1550,11 @@ This is one of the more complex hardware tasks.
 
 ---
 
-### Phase 17: Audio Hardware (Weeks 43-44)
+### Phase 17: Audio Hardware (Weeks 45-46)
 **Goal:** PWM audio output with speaker
 **New concepts:** PWM for audio, DMA, analog filtering
 
-#### Week 43: PWM Audio Driver
+#### Week 45: PWM Audio Driver
 - [ ] **Learn:** Using PWM for audio (high-frequency PWM + low-pass filter = analog)
 - [ ] Configure RP2350 PWM for audio-rate output (~44.1kHz or ~22kHz)
 - [ ] Implement DMA transfer to PWM (continuous sample streaming)
@@ -1377,7 +1562,7 @@ This is one of the more complex hardware tasks.
 - [ ] Connect filter output to small speaker or 3.5mm jack
 - [ ] Test with simple tones - verify audio quality
 
-#### Week 44: Audio Integration & Polish
+#### Week 46: Audio Integration & Polish
 - [ ] Port `Audio` trait to PWM output
 - [ ] Test alarm beep on real hardware
 - [ ] Test Doom sound effects
@@ -1388,18 +1573,18 @@ This is one of the more complex hardware tasks.
 
 ---
 
-### Phase 18: Power & Final Integration (Weeks 45-46)
+### Phase 18: Power & Final Integration (Weeks 47-48)
 **Goal:** Battery-powered portable device
 **New concepts:** Battery management, power optimization
 
-#### Week 45: Battery Integration
+#### Week 47: Battery Integration
 - [ ] Connect LiPo battery via TP4056 charging module
 - [ ] **Learn:** Pico 2 power input requirements
 - [ ] Implement battery voltage reading (ADC on VSYS)
 - [ ] Implement low-battery warning (display icon or beep)
 - [ ] Test battery life under different loads
 
-#### Week 46: Final Polish
+#### Week 48: Final Polish
 - [ ] Full system integration testing
 - [ ] Test all applications on final hardware
 - [ ] Fix any remaining bugs
@@ -1785,8 +1970,8 @@ probe-rs gdb --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 ---
 
 *Plan created: January 2026*
-*Target completion: ~12 months (46 weeks at 8 hours/week)*
-*Total estimated effort: ~370 hours*
+*Target completion: ~12 months (48 weeks at 8 hours/week)*
+*Total estimated effort: ~385 hours*
 
 ## Milestone Summary
 
@@ -1805,14 +1990,15 @@ probe-rs gdb --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 | M10 | 28 | Doom running |
 | M11 | 30 | Audio working |
 | M12 | 32 | Dual-core working |
-| **🎯 QEMU MVP** | **32** | **Feature-complete in emulation** |
-| M13 | 36 | Stock Pico 2 via UART |
-| **🎯 HW MVP** | **36** | **Running on real hardware (no mods)** |
-| M14 | 38 | PSRAM integrated |
-| M15 | 40 | E-ink display working |
-| M16 | 42 | USB keyboard working |
-| M17 | 44 | Audio hardware working |
-| **🎯 FINAL** | **46** | **Portable device complete** |
+| M12A | 34 | Preemptive scheduler working |
+| **🎯 QEMU MVP** | **34** | **Feature-complete in emulation** |
+| M13 | 38 | Stock Pico 2 via UART |
+| **🎯 HW MVP** | **38** | **Running on real hardware (no mods)** |
+| M14 | 40 | PSRAM integrated |
+| M15 | 42 | E-ink display working |
+| M16 | 44 | USB keyboard working |
+| M17 | 46 | Audio hardware working |
+| **🎯 FINAL** | **48** | **Portable device complete** |
 
 ## Phase Summary
 
@@ -1831,30 +2017,31 @@ probe-rs gdb --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 | 10 | 24-28 | Doom | FFI, libc, C interop |
 | 11 | 29-30 | Audio | QEMU audio, samples, mixing |
 | 12 | 31-32 | Dual-Core | Atomics, spinlocks, SMP |
-| 13 | 33-36 | MVP Hardware | Stock Pico 2, UART shell |
-| 14 | 37-38 | PSRAM | QSPI, external memory |
-| 15 | 39-40 | E-ink Display | IT8951, partial refresh |
-| 16 | 41-42 | USB Keyboard | USB Host, HID |
-| 17 | 43-44 | Audio Hardware | PWM, DMA, filtering |
-| 18 | 45-46 | Power & Polish | Battery, integration |
+| 12A | 33-34 | Preemptive Scheduler | Context switch, TCB, round-robin |
+| 13 | 35-38 | MVP Hardware | Stock Pico 2, UART shell |
+| 14 | 39-40 | PSRAM | QSPI, external memory |
+| 15 | 41-42 | E-ink Display | IT8951, partial refresh |
+| 16 | 43-44 | USB Keyboard | USB Host, HID |
+| 17 | 45-46 | Audio Hardware | PWM, DMA, filtering |
+| 18 | 47-48 | Power & Polish | Battery, integration |
 
 ## Complexity Curve
 
 ```
 Complexity
-    │                                                    ┌── Phase 18: Polish
-    │                                              ┌─────┘
-    │                                        ┌─────┘ Phase 15-17: Display/USB/Audio HW
-    │                                  ┌─────┘
-    │                            ┌─────┘ Phase 14: PSRAM
-    │                      ┌─────┘ Phase 13: First real hardware
-    │                ┌─────┘
-    │          ┌─────┘ Phase 10-12: Doom, Audio, Dual-core
-    │    ┌─────┘
-    │ ┌──┘ Phases 5-9: Display, Shell, FS, Apps
-    │─┘ Phases 1-4: Foundations
-    └────────────────────────────────────────────────────────────────── Time
-     W1    W8    W16    W24    W32    W36    W40    W46
+    │                                                      ┌── Phase 18: Polish
+    │                                                ┌─────┘
+    │                                          ┌─────┘ Phase 15-17: Display/USB/Audio HW
+    │                                    ┌─────┘
+    │                              ┌─────┘ Phase 14: PSRAM
+    │                        ┌─────┘ Phase 13: First real hardware
+    │                  ┌─────┘
+    │            ┌─────┘ Phase 10-12A: Doom, Audio, Dual-core, Scheduler
+    │      ┌─────┘
+    │   ┌──┘ Phases 5-9: Display, Shell, FS, Apps
+    │───┘ Phases 1-4: Foundations
+    └──────────────────────────────────────────────────────────────────── Time
+     W1    W8    W16    W24    W34    W38    W44    W48
                               │       │
                          QEMU MVP  HW MVP
 ```
@@ -1863,6 +2050,6 @@ Complexity
 
 After each MVP, you can decide whether to continue:
 
-1. **After QEMU MVP (Week 32):** You have a complete OS in emulation. Continue to hardware?
-2. **After HW MVP (Week 36):** You have EASE running on real Pico 2 via UART. Add display/keyboard/audio?
+1. **After QEMU MVP (Week 34):** You have a complete OS in emulation. Continue to hardware?
+2. **After HW MVP (Week 38):** You have EASE running on real Pico 2 via UART. Add display/keyboard/audio?
 3. **After each hardware phase:** Each peripheral is independent. Skip or reorder as desired.
