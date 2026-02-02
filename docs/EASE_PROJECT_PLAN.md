@@ -15,7 +15,8 @@
 - **User/kernel separation** — applications run in RISC-V User mode
 - **Test-driven development** — each feature requires tests before commit
   - Tests run via `cargo test` (QEMU for hardware, host for pure logic)
-  - Commit workflow: implement → test → commit → update plan
+  - Commit workflow: implement → test → commit → update status → push
+  - **Status tracking:** Update `.claude/project.md` "Current Status" section when completing phase milestones
 - **Rust 2024 Edition** — uses latest language features including:
   - New `unsafe` attribute syntax (`#[unsafe(no_mangle)]`, `#[unsafe(link_section)]`)
   - Stricter unsafe block requirements
@@ -581,6 +582,13 @@ Complete this before Week 1 starts. This is setup, not development.
 - [ ] Set branch protection on main (optional)
 - [ ] Practice: make change, commit, push, create PR, merge
 - [ ] Tag setup complete: `git tag -a v0.0.1 -m "Project setup complete"`
+
+#### Commit Checklist
+Before each commit:
+1. Run `./ci.sh` — all checks must pass
+2. If completing a phase milestone, update `.claude/project.md` "Current Status" section
+3. Commit with descriptive message
+4. Push to remote
 
 **Milestone 0:** Repository ready, toolchain working, local CI script (`./ci.sh`) passing, `cargo doc` generates documentation
 

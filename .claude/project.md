@@ -22,20 +22,37 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 - Edition: Rust 2024
 - Target: riscv32imac-unknown-none-elf (configured in .cargo/config.toml)
 
-**Phase 1: In Progress** (Hello QEMU)
+**Phase 1: Complete** (Hello QEMU)
+- `#![no_std]` and `#![no_main]`
+- Linker script `memory-qemu.x` with proper memory layout
+- UART output at 0x10000000, `print!`/`println!` macros
+- Custom test framework with QEMU exit mechanism
+- I/O abstraction (`src/io.rs`) with test capture
+- Benchmarking infrastructure (`src/bench.rs`) using RISC-V cycle counter
 
-Completed:
-- [x] `#![no_std]` and `#![no_main]` in src/lib.rs
-- [x] `_start` entry point with `#[unsafe(no_mangle)]` (Rust 2024 syntax)
-- [x] `cargo build` succeeds
+**Phase 2: Complete** (Kernel Foundations)
+- Proper boot sequence with BSS initialization
+- Panic handler with location info
+- Module structure (`src/arch/`, `src/kernel/`, `src/hal/`)
 
-Next steps:
-- [ ] Add `loop {}` inside `_start` to prevent returning
-- [ ] Create linker script `memory-qemu.x` (RAM at 0x80000000 for QEMU virt)
-- [ ] Add rustflags to .cargo/config.toml: `[target.riscv32imac-unknown-none-elf] rustflags = ["-C", "link-arg=-Tmemory-qemu.x"]`
-- [ ] Add panic handler
-- [ ] Boot on QEMU and verify it runs
-- [ ] Week 2: UART output at 0x10000000, print!/println! macros, "Hello from EASE!"
+**Phase 3: Complete** (Memory Management)
+- Bump allocator with `GlobalAlloc`
+- `Spinlock` for thread-safe allocation
+- `alloc` crate enabled (`Vec`, `String`, `Box` available)
+
+**Phase 4: Complete** (Time & Interrupts)
+- RISC-V trap handling (mtvec, mcause, mepc)
+- Timer interrupt via CLINT
+- `ticks_ms()` and `sleep_ms()` working
+
+**Phase 5: Complete** (Display Output)
+- QEMU ramfb framebuffer driver
+- fw_cfg protocol implementation
+
+**Phase 6: Next** (Input & Shell)
+- Keyboard input via UART RX
+- Line editor
+- Shell with basic commands
 
 ## Working Branch
 
