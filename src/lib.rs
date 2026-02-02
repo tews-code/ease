@@ -8,6 +8,10 @@
 //! - **Host tests (`cargo test --lib`)**: Pure logic, parsers, data structures
 //! - **QEMU tests (`cargo test --bin ease`)**: Hardware-dependent code (UART, interrupts)
 //!
+//! Note: `cargo test --tests` (integration tests in `tests/` directory) is not
+//! currently supported because it tries to compile `main.rs` which contains
+//! RISC-V assembly that fails on the host.
+//!
 //! Future modules (parser, fat16, gap_buffer, etc.) will live here
 //! with standard `#[cfg(test)] mod tests { ... }` blocks.
 

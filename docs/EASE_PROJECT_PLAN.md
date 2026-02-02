@@ -246,27 +246,36 @@ This separation provides predictable latency for I/O operations and keeps the ap
 ease/
 ├── Cargo.toml
 ├── rust-toolchain.toml        # Pins nightly for custom_test_frameworks
+├── ci.sh                      # Local CI script (format, clippy, tests)
 ├── memory-qemu.x              # QEMU virt linker script
-├── memory-rp2350.x            # RP2350 linker script
-├── build.rs                   # Compiles Doom C code
+├── memory-rp2350.x            # RP2350 linker script (future)
+├── build.rs                   # Compiles Doom C code (future)
+│
+├── .cargo/
+│   └── config.toml            # Build target, runner config
+│
+├── docs/
+│   ├── EASE_PROJECT_PLAN.md   # This file
+│   └── uart.md                # UART documentation
 │
 ├── src/
-│   ├── main.rs                # Entry point, Core 0 init, QEMU tests
+│   ├── main.rs                # Entry point, panic handler, QEMU tests
 │   ├── lib.rs                 # Library crate for host-testable pure logic
-│   ├── io.rs                  # I/O traits (Writer/Reader) + test capture
+│   ├── io.rs                  # Re-exports UartWriter, test capture buffer
 │   ├── qemu.rs                # QEMU exit mechanism (sifive_test device)
 │   ├── bench.rs               # Benchmarking via RISC-V cycle counter
 │   │
 │   ├── arch/                  # Architecture-specific
 │   │   ├── mod.rs
 │   │   ├── boot.rs            # Startup assembly, stack init
-│   │   ├── interrupts.rs      # Trap handlers
-│   │   └── multicore.rs       # Core 1 launch, parking
+│   │   ├── trap.rs            # Trap vector and handler
+│   │   ├── timer.rs           # CLINT timer, ticks, sleep
+│   │   └── multicore.rs       # Core 1 launch, parking (future)
 │   │
 │   ├── hal/                   # Hardware Abstraction Layer
-│   │   ├── mod.rs             # HAL traits
-│   │   ├── qemu_virt.rs       # QEMU virt implementation
-│   │   └── rp2350/
+│   │   ├── mod.rs             # HAL traits (Writer)
+│   │   ├── qemu_virt.rs       # QEMU virt implementation (UartWriter)
+│   │   └── rp2350/            # (future)
 │   │       ├── mod.rs
 │   │       ├── gpio.rs
 │   │       ├── spi.rs
@@ -279,27 +288,26 @@ ease/
 │   │
 │   ├── kernel/                # Core kernel services
 │   │   ├── mod.rs
-│   │   ├── heap.rs            # Simple allocator
+│   │   ├── alloc.rs           # Bump allocator, GlobalAlloc
 │   │   ├── sync.rs            # Spinlocks, mutexes, channels
-│   │   ├── timer.rs           # System tick, sleep
-│   │   ├── sched.rs           # Preemptive scheduler, threads
-│   │   └── panic.rs           # Panic handler
+│   │   └── sched.rs           # Preemptive scheduler, threads (future)
 │   │
 │   ├── drivers/               # Device drivers
 │   │   ├── mod.rs
-│   │   ├── eink/
+│   │   ├── ramfb.rs           # QEMU ramfb framebuffer
+│   │   ├── eink/              # (future)
 │   │   │   ├── mod.rs
 │   │   │   └── it8951.rs      # IT8951 controller driver
-│   │   ├── sdcard.rs          # SPI SD card
-│   │   ├── keyboard.rs        # USB HID keyboard
-│   │   └── audio.rs           # PWM audio output
+│   │   ├── sdcard.rs          # SPI SD card (future)
+│   │   ├── keyboard.rs        # USB HID keyboard (future)
+│   │   └── audio.rs           # PWM audio output (future)
 │   │
-│   ├── fs/                    # Filesystem
+│   ├── fs/                    # Filesystem (future)
 │   │   ├── mod.rs
 │   │   ├── fat16.rs           # FAT16 implementation
 │   │   └── vfs.rs             # Virtual filesystem layer
 │   │
-│   ├── syscall/               # System call interface
+│   ├── syscall/               # System call interface (future)
 │   │   ├── mod.rs
 │   │   ├── io.rs              # read, write, open, close
 │   │   ├── mem.rs             # malloc, free
@@ -307,7 +315,7 @@ ease/
 │   │   ├── display.rs         # draw, refresh
 │   │   └── input.rs           # getkey
 │   │
-│   ├── shell/                 # Command shell
+│   ├── shell/                 # Command shell (future)
 │   │   ├── mod.rs
 │   │   ├── parser.rs          # Command line parsing
 │   │   └── commands/
@@ -321,7 +329,7 @@ ease/
 │   │       ├── edit.rs        # Launch editor
 │   │       └── alarm.rs       # Launch alarm
 │   │
-│   ├── apps/                  # Applications
+│   ├── apps/                  # Applications (future)
 │   │   ├── mod.rs
 │   │   ├── doom/
 │   │   │   ├── mod.rs
@@ -335,20 +343,25 @@ ease/
 │   │       ├── mod.rs
 │   │       └── ui.rs
 │   │
-│   └── libc/                  # Minimal libc for Doom
+│   └── libc/                  # Minimal libc for Doom (future)
 │       ├── mod.rs
 │       ├── string.rs          # memcpy, strlen, etc.
 │       ├── stdlib.rs          # atoi, abs, etc.
 │       └── stdio.rs           # printf stub
 │
-├── doom/                      # doomgeneric C source
+├── tests/                     # Host integration tests (future)
+│   └── *.rs                   # Standard #[test] functions
+│
+├── doom/                      # doomgeneric C source (future)
 │   └── doomgeneric/
 │       └── *.c
 │
-└── assets/
+└── assets/                    # (future)
     ├── doom1.wad              # Shareware WAD (not in repo)
     └── dictionary.txt         # Spell check word list
 ```
+
+**Note:** The panic handler currently lives in `main.rs` for simplicity. It will move to `kernel/panic.rs` when adding hardware support (Phase 13+), to accommodate platform-specific behavior like LED blink codes and UART-only output.
 
 ---
 
@@ -522,16 +535,16 @@ Each phase builds directly on the previous. No phase requires concepts not yet i
 Complete this before Week 1 starts. This is setup, not development.
 
 #### GitHub Repository Setup
-- [ ] Create GitHub account (if needed)
-- [ ] Create new repository: `ease`
-- [ ] Initialize with README.md and .gitignore (Rust template)
-- [ ] Clone locally: `git clone git@github.com:<username>/ease.git`
-- [ ] Set up SSH key for GitHub (if not done)
+- [x] Create GitHub account (if needed)
+- [x] Create new repository: `ease`
+- [x] Initialize with README.md and .gitignore (Rust template)
+- [x] Clone locally: `git clone git@github.com:<username>/ease.git`
+- [x] Set up SSH key for GitHub (if not done)
 
 #### Project Structure
-- [ ] Create Cargo.toml with project metadata
-- [ ] Add `#![warn(missing_docs)]` to enforce documentation
-- [ ] Create initial directory structure:
+- [x] Create Cargo.toml with project metadata
+- [x] Add `#![warn(missing_docs)]` to enforce documentation
+- [x] Create initial directory structure:
   ```
   ease/
   ├── .github/
@@ -542,17 +555,17 @@ Complete this before Week 1 starts. This is setup, not development.
   ├── README.md
   └── EASE_PROJECT_PLAN.md
   ```
-- [ ] First commit: "Initial project structure"
+- [x] First commit: "Initial project structure"
 
 #### Toolchain Setup
-- [ ] Install Rust via rustup
-- [ ] Add target: `rustup target add riscv32imac-unknown-none-elf`
-- [ ] Install QEMU: `apt install qemu-system-riscv32` (or equivalent)
-- [ ] Install GDB: `apt install gdb-multiarch`
-- [ ] Verify: `qemu-system-riscv32 --version`
+- [x] Install Rust via rustup
+- [x] Add target: `rustup target add riscv32imac-unknown-none-elf`
+- [x] Install QEMU: `apt install qemu-system-riscv32` (or equivalent)
+- [x] Install GDB: `apt install gdb-multiarch`
+- [x] Verify: `qemu-system-riscv32 --version`
 
 #### Documentation Setup
-- [ ] Configure Cargo.toml for rustdoc:
+- [x] Configure Cargo.toml for rustdoc:
   ```toml
   [package]
   name = "ease"
@@ -564,24 +577,24 @@ Complete this before Week 1 starts. This is setup, not development.
   [package.metadata.docs.rs]
   targets = ["riscv32imac-unknown-none-elf"]
   ```
-- [ ] Test rustdoc: `cargo doc --open`
-- [ ] Add initial module documentation to lib.rs
+- [x] Test rustdoc: `cargo doc --open`
+- [x] Add initial module documentation to lib.rs
 
 #### Continuous Integration (CI)
 - [x] Create `ci.sh` local CI script with:
   - **Format check:** `cargo fmt --check`
   - **Clippy:** `cargo clippy --target riscv32imac-unknown-none-elf -- -D warnings`
   - **QEMU tests:** `cargo test --bin ease` (runs on QEMU virt machine)
-  - **Host tests:** `cargo test --package ease --tests` (placeholder, runs when tests/ exists)
+  - **Host tests:** `cargo test --lib` (tests lib.rs on host machine)
   - **Documentation:** `cargo doc --no-deps`
 - [x] Run `./ci.sh` before commits to catch issues early
 - [ ] (Optional) Add GitHub Actions later if needed for collaboration
 
 #### Git Workflow
-- [ ] Create develop branch: `git checkout -b develop`
+- [x] Create develop branch: `git checkout -b develop`
 - [ ] Set branch protection on main (optional)
-- [ ] Practice: make change, commit, push, create PR, merge
-- [ ] Tag setup complete: `git tag -a v0.0.1 -m "Project setup complete"`
+- [x] Practice: make change, commit, push, create PR, merge
+- [x] Tag setup complete: `git tag -a v0.0.1 -m "Project setup complete"`
 
 #### Commit Checklist
 Before each commit:
@@ -626,10 +639,10 @@ This is your "Hello World" moment. Everything else builds on this.
 - [x] Implement `print!` / `println!` macros using `core::fmt::Write`
 - [x] Print "Hello from EASE!"
 - [x] **Learn:** `core::fmt::Write` trait
-- [ ] **Doc:** Create `docs/uart.md` documenting:
+- [x] **Doc:** Create `docs/uart.md` documenting:
   - UART protocol basics (baud rate, framing, flow control)
   - QEMU virt 16550 UART memory map and registers
-  - How `io.rs` abstracts UART access via `Writer` trait
+  - How `hal/mod.rs` defines `Writer` trait
   - Usage examples for `print!`/`println!` macros
 
 #### Week 2 (continued): Testing Infrastructure
@@ -639,7 +652,8 @@ This is your "Hello World" moment. Everything else builds on this.
 - [ ] Set up host-side integration tests (`tests/` directory)
   - Create `tests/` directory for integration tests that run on host
   - Tests automatically use std (no `no_std` constraint)
-  - Run via `cargo test --package ease --tests`
+  - **Note:** Currently blocked — `cargo test --tests` tries to compile `main.rs` which contains RISC-V assembly. Requires making binary target-conditional.
+  - For now, use `cargo test --lib` to test `lib.rs` on host
 - [x] Add `rust-toolchain.toml` to pin nightly toolchain
 - [x] Create I/O abstraction for testable output (`src/io.rs`)
   - `Writer` trait for byte-level output
@@ -675,13 +689,17 @@ The crate uses a split architecture to support testing on both QEMU (hardware-de
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│  tests/ - Host integration tests                            │
+│  src/lib.rs - Host tests                                    │
 │  - Standard #[test] functions run on host machine           │
 │  - Automatically uses std (no no_std constraint)            │
 │  - Tests parsers, data structures, algorithms               │
 │  - No hardware dependencies                                 │
-│  - Run: cargo test --package ease --tests                   │
+│  - Run: cargo test --lib                                    │
 └─────────────────────────────────────────────────────────────┘
+
+Note: tests/ directory integration tests are blocked because
+`cargo test --tests` also compiles main.rs which contains
+RISC-V assembly. Requires target-conditional compilation.
 ```
 
 **I/O Abstraction (`src/io.rs`):**
@@ -692,13 +710,13 @@ The `Writer` trait abstracts byte-level output, enabling:
 
 ```rust
 pub trait Writer {
-    fn write_byte(&mut self, byte: u8);
-    fn write_str(&mut self, s: &str);
+    fn write_byte(&self, byte: u8);
+    fn write_str(&self, s: &str);
 }
 
 // UartWriter writes to UART and (in test mode) captures to buffer
 impl Writer for UartWriter {
-    fn write_byte(&mut self, byte: u8) {
+    fn write_byte(&self, byte: u8) {
         unsafe { write_volatile(UART_ADDRESS as *mut u8, byte); }
         #[cfg(test)]
         test_io::capture(byte);
@@ -742,9 +760,9 @@ Tests call `bench::check()` with baseline; failure triggers panic with "REGRESSI
 
 **Testing commands:**
 ```bash
-cargo test --bin ease                # QEMU tests + benchmarks (runs on QEMU virt)
-cargo test --package ease --tests    # Host integration tests (runs on host machine)
-cargo run                            # Normal run (boots on QEMU)
+cargo test --bin ease    # QEMU tests + benchmarks (runs on QEMU virt)
+cargo test --lib         # Host tests in lib.rs (runs on host machine)
+cargo run                # Normal run (boots on QEMU)
 ```
 
 **Milestone 1:** "Hello from EASE!" prints to QEMU console; test and benchmark infrastructure operational
@@ -760,27 +778,27 @@ cargo run                            # Normal run (boots on QEMU)
 **Prerequisites:** Phase 1 complete (stack pointer already set up in Week 2)
 
 #### Week 3: Proper Boot Sequence
-- [ ] **Learn:** What happens before `main()` (stack, BSS, etc.)
-- [ ] **Note:** Stack pointer setup already done in Phase 1 Week 2
-- [ ] **Learn:** RISC-V calling convention basics (just sp and ra)
-- [ ] Define stack region properly in linker script (e.g., 8KB with symbols)
-- [ ] Define BSS section, add symbols for start/end (`__bss_start`, `__bss_end`)
-- [ ] Implement BSS zeroing in early Rust (before using any statics)
-- [ ] Create `src/arch/mod.rs` and `src/arch/boot.rs`
-- [ ] Move `_start` and boot code to `src/arch/boot.rs`
-- [ ] Verify BSS works: add a `static` variable, confirm it starts as zero
+- [x] **Learn:** What happens before `main()` (stack, BSS, etc.)
+- [x] **Note:** Stack pointer setup already done in Phase 1 Week 2
+- [x] **Learn:** RISC-V calling convention basics (just sp and ra)
+- [x] Define stack region properly in linker script (e.g., 8KB with symbols)
+- [x] Define BSS section, add symbols for start/end (`__bss_start`, `__bss_end`)
+- [x] Implement BSS zeroing in early Rust (before using any statics)
+- [x] Create `src/arch/mod.rs` and `src/arch/boot.rs`
+- [x] Move `_start` and boot code to `src/arch/boot.rs`
+- [x] Verify BSS works: add a `static` variable, confirm it starts as zero
 
 #### Week 4: Panic Handler & Project Structure
-- [ ] **Learn:** Why `#[panic_handler]` is required in `no_std`
-- [ ] Implement panic handler that prints message and location
-- [ ] Implement infinite loop after panic (with `wfi` instruction)
-- [ ] Test panic with `panic!("test panic")`
-- [ ] Create module structure:
+- [x] **Learn:** Why `#[panic_handler]` is required in `no_std`
+- [x] Implement panic handler that prints message and location
+- [x] Implement infinite loop after panic (with `wfi` instruction)
+- [x] Test panic with `panic!("test panic")`
+- [x] Create module structure:
   - `src/arch/` - architecture-specific code
   - `src/kernel/` - kernel services (empty for now)
   - `src/hal/` - hardware abstraction (empty for now)
-- [ ] Move UART code to `src/hal/qemu_virt.rs`
-- [ ] **Learn:** Rust module system, `pub`, `pub(crate)`
+- [x] Move UART code to `src/hal/qemu_virt.rs`
+- [x] **Learn:** Rust module system, `pub`, `pub(crate)`
 
 **Milestone 2:** Proper boot sequence, panic handler works, clean project structure
 
@@ -795,33 +813,33 @@ cargo run                            # Normal run (boots on QEMU)
 **Prerequisites:** Phase 2 complete (BSS working, project structure)
 
 #### Week 5: Bump Allocator
-- [ ] **Learn:** Stack vs heap, why dynamic allocation matters
-- [ ] **Learn:** What an allocator does (manage free memory)
-- [ ] **Align QEMU memory layout with RP2350:**
+- [x] **Learn:** Stack vs heap, why dynamic allocation matters
+- [x] **Learn:** What an allocator does (manage free memory)
+- [ ] **Align QEMU memory layout with RP2350:** (deferred to Phase 13)
   - Update `memory-qemu.x` to simulate RP2350's memory constraints
   - Define SRAM region at 0x20000000 (520KB, matching RP2350)
   - Define PSRAM region at 0x11000000 (8MB, for large allocations)
   - Keep total memory realistic so QEMU development reveals real constraints
   - **Note:** QEMU virt uses different addresses; create abstraction or remap
-- [ ] Define heap region in linker script (e.g., 64KB at known address within SRAM)
-- [ ] **First:** Implement basic `Spinlock` using `AtomicBool`
+- [x] Define heap region in linker script (e.g., 64KB at known address within SRAM)
+- [x] **First:** Implement basic `Spinlock` using `AtomicBool`
   - Needed for thread-safe allocator (and will be used throughout project)
   - Simple spin-wait loop with `Acquire`/`Release` ordering
-- [ ] Implement simple bump allocator:
+- [x] Implement simple bump allocator:
   - Use `Spinlock<BumpAllocatorInner>` — **not `static mut`** (design philosophy)
   - `alloc()` bumps pointer forward, returns old value
   - `dealloc()` does nothing (memory never freed)
-- [ ] **Learn:** Why bump allocator leaks memory (and why that's okay for now)
-- [ ] Wrap in a struct with safe interface
+- [x] **Learn:** Why bump allocator leaks memory (and why that's okay for now)
+- [x] Wrap in a struct with safe interface
 
 #### Week 6: GlobalAlloc Integration
-- [ ] **Learn:** Rust's `GlobalAlloc` trait and `#[global_allocator]`
-- [ ] Implement `GlobalAlloc` for your bump allocator
-- [ ] **Learn:** Why `alloc` requires unsafe (raw pointers, alignment)
-- [ ] Enable `alloc` crate (`extern crate alloc`)
-- [ ] Test with `alloc::vec::Vec` - create vector, push items, print length
-- [ ] Test with `alloc::string::String`
-- [ ] Add out-of-memory handler (`#[alloc_error_handler]`)
+- [x] **Learn:** Rust's `GlobalAlloc` trait and `#[global_allocator]`
+- [x] Implement `GlobalAlloc` for your bump allocator
+- [x] **Learn:** Why `alloc` requires unsafe (raw pointers, alignment)
+- [x] Enable `alloc` crate (`extern crate alloc`)
+- [x] Test with `alloc::vec::Vec` - create vector, push items, print length
+- [x] Test with `alloc::string::String`
+- [x] Add out-of-memory handler (`#[alloc_error_handler]`) — returns null pointer
 - [ ] **Stretch:** Implement simple free-list allocator (reuses memory)
 
 **Milestone 3:** Can use `Vec`, `String`, `Box` in kernel code; basic `Spinlock` working
@@ -839,35 +857,34 @@ cargo run                            # Normal run (boots on QEMU)
 Interrupts are fundamental to the system design. Core 1 will be interrupt-driven, so we learn this now.
 
 #### Week 7: Trap Handler Foundation
-- [ ] **Learn:** RISC-V trap model (mtvec, mcause, mepc, mtval)
-- [ ] **Learn:** Difference between exceptions and interrupts
-- [ ] Write trap vector in assembly (save all registers to stack)
-- [ ] Implement Rust trap dispatcher (reads mcause, calls appropriate handler)
-- [ ] Set up `mtvec` to point to trap vector
-- [ ] Test with illegal instruction exception (verify handler runs)
-- [ ] **Learn:** Why we save/restore registers (context preservation)
-- [ ] Implement `Mutex<T>` wrapper using `Spinlock` from Phase 3
+- [x] **Learn:** RISC-V trap model (mtvec, mcause, mepc, mtval)
+- [x] **Learn:** Difference between exceptions and interrupts
+- [x] Write trap vector in assembly (save all registers to stack)
+- [x] Implement Rust trap dispatcher (reads mcause, calls appropriate handler)
+- [x] Set up `mtvec` to point to trap vector
+- [x] Test with illegal instruction exception (verify handler runs)
+- [x] **Learn:** Why we save/restore registers (context preservation)
+- [ ] Implement `Mutex<T>` wrapper using `Spinlock` from Phase 3 (deferred)
   - Disables interrupts while held (critical section)
 
 #### Week 8: Timer Interrupt
-- [ ] **Learn:** CLINT timer (mtime, mtimecmp registers)
-- [ ] Enable machine timer interrupt (`mie.MTIE` bit)
-- [ ] Set `mtimecmp` to trigger interrupt after N ticks
-- [ ] Handle timer interrupt: update system tick counter, reset mtimecmp
-- [ ] Use `AtomicU64` for tick counter (simpler than Mutex for single value)
-  - Alternative: `Mutex<u64>` if you want to practice the pattern
-- [ ] Implement `ticks_ms()` reading from atomic counter
-- [ ] Implement `sleep_ms()` using WFI + tick checking
-- [ ] Test: print timestamp, sleep 1 second, print again
-- [ ] **Learn:** Critical sections and interrupt masking
+- [x] **Learn:** CLINT timer (mtime, mtimecmp registers)
+- [x] Enable machine timer interrupt (`mie.MTIE` bit)
+- [x] Set `mtimecmp` to trigger interrupt after N ticks
+- [x] Handle timer interrupt: update system tick counter, reset mtimecmp
+- [x] Use `AtomicUsize` for tick counter (wraps at ~49 days, acceptable for now)
+- [x] Implement `ticks_ms()` reading from atomic counter
+- [x] Implement `sleep_ms()` using WFI + tick checking
+- [x] Test: print timestamp, sleep 1 second, print again
+- [x] **Learn:** Critical sections and interrupt masking
 
 **Milestone 4:** Timer interrupt fires regularly, `sleep_ms()` works correctly
 
-**Rust concepts practiced:** Trap handling, atomics, `Mutex` for interrupt-safe state, no `static mut`
+**Rust concepts practiced:** Trap handling, atomics, no `static mut`
 
 **Pattern Note:** All shared mutable state uses synchronization primitives:
-- `AtomicU64` for simple counters (preferred for single values)
-- `Mutex<T>` for complex data modified by interrupts
+- `AtomicUsize` for simple counters (used for tick counter)
+- `SpinLock<T>` for complex data (used in allocator)
 - Never `static mut`
 
 ---
@@ -881,21 +898,21 @@ Interrupts are fundamental to the system design. Core 1 will be interrupt-driven
 This phase provides **visual feedback**, making subsequent development more satisfying.
 
 #### Week 9: QEMU Framebuffer Setup
-- [ ] **Learn:** QEMU virt machine's framebuffer device options
-- [ ] **Option A: ramfb** (complex but flexible)
+- [x] **Learn:** QEMU virt machine's framebuffer device options
+- [x] **Option A: ramfb** (complex but flexible)
   - Requires fw_cfg protocol: write framebuffer config to special DMA region
   - fw_cfg at 0x10100000 on QEMU virt (selector + data + DMA registers)
   - Must allocate framebuffer memory, register it with fw_cfg
   - **Note:** This is more complex than simple MMIO — expect to spend time here
-- [ ] **Option B: virtio-gpu** (even more complex, skip for now)
-- [ ] **Option C: Serial/text only** (simplest fallback if display is blocking)
-- [ ] Configure QEMU: `-device ramfb` and remove `-nographic`
-- [ ] Decide on resolution: 640×480 for development (smaller than e-ink)
-- [ ] Decide on pixel format: 32-bit BGRA (common for QEMU devices)
-- [ ] Write directly to framebuffer memory, see pixels appear on screen
-- [ ] Implement: clear screen, set pixel
+- [ ] **Option B: virtio-gpu** (skipped — ramfb sufficient)
+- [ ] **Option C: Serial/text only** (skipped — ramfb works)
+- [x] Configure QEMU: `-device ramfb` and remove `-nographic`
+- [x] Decide on resolution: 640×480 for development (smaller than e-ink)
+- [x] Decide on pixel format: 32-bit XR24 (0x00RRGGBB)
+- [x] Write directly to framebuffer memory, see pixels appear on screen
+- [x] Implement: clear screen, set pixel
 
-#### Week 10: Display Abstraction & Text
+#### Week 10: Display Abstraction & Text (deferred to Phase 6)
 - [ ] Create `Display` trait: `width()`, `height()`, `set_pixel(x, y, color)`, `clear(color)`
 - [ ] Implement `QemuDisplay` using ramfb/virtio-gpu
 - [ ] **Learn:** Bitmap fonts (each character is a small pixel grid)
@@ -905,7 +922,7 @@ This phase provides **visual feedback**, making subsequent development more sati
 - [ ] Handle newlines (move to next row)
 - [ ] Test: draw "Hello from EASE!" and see it on screen 🎉
 
-#### Week 11: Console Abstraction
+#### Week 11: Console Abstraction (deferred to Phase 6)
 - [ ] Create `Console` struct (tracks cursor position, handles scrolling)
 - [ ] Implement `core::fmt::Write` trait for `Console`
 - [ ] Add scrolling: when cursor reaches bottom, shift all rows up
@@ -914,7 +931,7 @@ This phase provides **visual feedback**, making subsequent development more sati
 - [ ] Add grayscale support (for e-ink compatibility later)
 - [ ] **Stretch:** Implement double-buffering to reduce flicker
 
-**Milestone 5:** Text console renders to QEMU graphical window with scrolling
+**Milestone 5:** QEMU ramfb framebuffer working with clear/set_pixel (text rendering deferred)
 
 **Rust concepts practiced:** Defining traits, implementing traits, generics introduction
 
@@ -1458,6 +1475,13 @@ This gives you a working system on real hardware without soldering PSRAM.
 
 #### Week 36: UART on Real Hardware
 - [ ] **Learn:** RP2350 UART peripheral registers
+- [ ] Add `rp2350` feature to `Cargo.toml` and make `qemu` the default:
+  ```toml
+  [features]
+  default = ["qemu"]
+  qemu = []
+  rp2350 = []
+  ```
 - [ ] Implement `Uart` for RP2350 (different from QEMU's memory-mapped UART)
 - [ ] Get "Hello from EASE!" printing to debug probe's UART
 - [ ] Implement `Timer` for RP2350 (different from QEMU's CLINT)
@@ -1705,17 +1729,9 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 
 ## Testing Strategy
 
-### Three-Tier Testing Architecture
+### Two-Tier Testing Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│              cargo test --package ease --tests               │
-│  - Integration tests in tests/ directory                    │
-│  - Pure logic tests (parsers, data structures)              │
-│  - Runs on development machine with std                     │
-│  - Standard #[test] infrastructure                          │
-└─────────────────────────────────────────────────────────────┘
-
 ┌─────────────────────────────────────────────────────────────┐
 │                    cargo test --bin ease                     │
 │  - Custom test framework on QEMU                            │
@@ -1724,11 +1740,20 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
+│                      cargo test --lib                        │
+│  - Standard #[test] functions in src/lib.rs                 │
+│  - Pure logic tests (parsers, data structures)              │
+│  - Runs on development machine with std                     │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
 │                       CI Pipeline                            │
-│  - Runs both test suites                                    │
+│  - Runs both test suites via ci.sh                          │
 │  - QEMU exit code determines pass/fail                      │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Note:** Integration tests in `tests/` directory are not currently supported. `cargo test --tests` attempts to compile `main.rs` which contains RISC-V assembly that fails on the host. This would require making the binary target-conditional with `#[cfg(target_arch = "riscv32")]`.
 
 ### Test Commands
 
@@ -1736,8 +1761,8 @@ static KEY_QUEUE: SpscQueue<KeyEvent, 16> = SpscQueue::new();
 # Run QEMU tests (hardware-dependent code)
 cargo test --bin ease
 
-# Run host integration tests (pure logic)
-cargo test --package ease --tests
+# Run host tests (pure logic in lib.rs)
+cargo test --lib
 ```
 
 ### Test Files
@@ -1745,12 +1770,12 @@ cargo test --package ease --tests
 | File/Directory | Purpose |
 |----------------|---------|
 | `src/main.rs` | QEMU tests and benchmarks (`#[test_case]`) |
-| `tests/` | Host integration tests (standard `#[test]`, runs with std) |
-| `src/lib.rs` | Library crate exposing pure logic for tests |
-| `src/io.rs` | I/O abstraction with `Writer` trait and test capture |
+| `src/lib.rs` | Host tests and pure logic (`#[test]`) |
+| `src/io.rs` | I/O abstraction with test capture |
 | `src/bench.rs` | Benchmarking via RISC-V cycle counter |
 | `src/qemu.rs` | QEMU exit mechanism (sifive_test device) |
 | `rust-toolchain.toml` | Pins nightly toolchain for `custom_test_frameworks` |
+| `tests/` | Future: integration tests (blocked, see note above) |
 
 ### QEMU Testing
 - Uses custom test framework (`#![feature(custom_test_frameworks)]`)
@@ -1946,14 +1971,14 @@ git clone https://github.com/yourusername/ease
 cd ease
 rustup target add riscv32imac-unknown-none-elf
 
-# Build for QEMU
-cargo build --release --features qemu
+# Build for QEMU (current default, no feature flag needed)
+cargo build --release
 
 # Run on QEMU
 qemu-system-riscv32 -M virt -m 128M -nographic \
     -bios none -kernel target/riscv32imac-unknown-none-elf/release/ease
 
-# Build for RP2350
+# Build for RP2350 (available after Phase 13)
 cargo build --release --features rp2350
 
 # Flash to Pico 2 (via debug probe)
@@ -1962,6 +1987,8 @@ probe-rs run --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 # Debug
 probe-rs gdb --chip RP2350 target/riscv32imac-unknown-none-elf/release/ease
 ```
+
+**Note:** The `rp2350` feature is added in Phase 13 when hardware support begins. Until then, only QEMU is supported.
 
 ---
 

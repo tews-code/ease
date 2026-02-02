@@ -127,10 +127,10 @@ EASE abstracts UART access through the `Writer` trait in `src/io.rs`.
 /// Trait for byte-level output
 pub trait Writer {
     /// Write a single byte
-    fn write_byte(&mut self, byte: u8);
+    fn write_byte(&self, byte: u8);
 
     /// Write a string as bytes (default implementation)
-    fn write_str(&mut self, s: &str) {
+    fn write_str(&self, s: &str) {
         for byte in s.bytes() {
             self.write_byte(byte);
         }
@@ -148,7 +148,7 @@ const UART_ADDRESS: usize = 0x10000000;
 pub struct UartWriter;
 
 impl Writer for UartWriter {
-    fn write_byte(&mut self, byte: u8) {
+    fn write_byte(&self, byte: u8) {
         unsafe {
             write_volatile(UART_ADDRESS as *mut u8, byte);
         }
