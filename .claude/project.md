@@ -46,13 +46,24 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 - `ticks_ms()` and `sleep_ms()` working
 
 **Phase 5: Complete** (Display Output)
-- QEMU ramfb framebuffer driver
-- fw_cfg protocol implementation
+- QEMU ramfb framebuffer driver (640x480, XR24 pixel format)
+- fw_cfg protocol with DMA configuration
+- VGA 8x16 bitmap font rendering (`src/drivers/font.rs`)
+- Text console: 80x30 with scrolling, cursor tracking (`src/drivers/console.rs`)
+- Control character handling (backspace, tab, CR, LF, FF)
 
-**Phase 6: Next** (Input & Shell)
-- Keyboard input via UART RX
-- Line editor
-- Shell with basic commands
+**Phase 6: Complete** (Input & Shell)
+- UART RX keyboard input with escape sequence parser (`src/input/`)
+- `KeyEvent` enum: `Char`, `Backspace`, `Enter`, `Escape`, arrow keys
+- Line editor: 256-char buffer, cursor movement, 30-entry history (`src/shell/line_editor.rs`)
+- Interactive shell with prompt and command dispatch (`src/shell/mod.rs`)
+- Built-in commands: `help`, `clear`, `echo`, `time`
+- Heapless `Vec<T, N>` collection for stack-based storage (`src/kernel/collection.rs`)
+
+**Phase 7: Next** (Storage & Filesystem)
+- Block device abstraction
+- FAT16 filesystem
+- Shell commands: `ls`, `cat`, `cd`, `hexdump`
 
 ## Working Branch
 

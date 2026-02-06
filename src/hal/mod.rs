@@ -16,3 +16,10 @@ pub trait Writer {
         }
     }
 }
+
+/// Trait for byte-level input
+///
+/// Implementation can read from UART or capture input for testing
+pub trait Reader {
+    fn read_byte(&self) -> Option<u8>;
+}

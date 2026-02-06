@@ -5,21 +5,9 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-// fw_cfg MMIO addresses (QEMU virt machine)
-const FW_CFG_DMA: usize = 0x10100010;
-
-// ramfb selector (found by enumerating fw_cfg directory)
-// This value may change with different QEMU versions
-const RAMFB_SELECTOR: u16 = 0x25;
-
 // Framebuffer settings
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
-const STRIDE: u32 = WIDTH * 4; // 4 bytes per pixel
-
-// Pixel format: XR24 = 0x00RRGGBB (32-bit, X ignored)
-const FOURCC_XR24: u32 = 0x34325258;
-
 // Framebuffer address (after stack at 0x80100000)
 const FB_ADDR: usize = 0x80200000;
 
@@ -34,10 +22,12 @@ struct RamfbConfig {
     stride: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<RamfbConfig>() == 28);
-
 /// Initialize the framebuffer
 pub fn init() {
+    // Pixel format: XR24 = 0x00RRGGBB (32-bit, X ignored)
+    const FOURCC_XR24: u32 = 0x34325258;
+    const STRIDE: u32 = WIDTH * 4; // 4 bytes per pixel
+
     let config = RamfbConfig {
         addr: (FB_ADDR as u64).to_be(),
         fourcc: FOURCC_XR24.to_be(),
@@ -53,6 +43,11 @@ pub fn init() {
 
 /// Send RamfbConfig to QEMU via DMA
 fn write_fw_cfg_dma(config: &RamfbConfig) {
+    // fw_cfg MMIO addresses (QEMU virt machine)
+    const FW_CFG_DMA: usize = 0x10100010;
+    // ramfb selector (found by enumerating fw_cfg directory)
+    // This value may change with different QEMU versions
+    const RAMFB_SELECTOR: u16 = 0x25;
     const SELECT: u32 = 0x08;
     const WRITE: u32 = 0x10;
 
@@ -87,33 +82,57 @@ fn write_fw_cfg_dma(config: &RamfbConfig) {
 }
 
 /// Clear screen to a colour (0xRRGGBB)
-pub fn clear(colour: u32) {
+pub fn clear(colour: Colour) {
     unsafe {
         let fb = FB_ADDR as *mut u32;
         for i in 0..((WIDTH * HEIGHT) as usize) {
-            write_volatile(fb.add(i), colour);
+            write_volatile(fb.add(i), colour.as_raw());
         }
     }
 }
 
 /// Set a pixel at (x, y) to colour (0xRRGGBB)
-#[allow(dead_code)]
-pub fn set_pixel(x: u32, y: u32, colour: u32) {
-    if x < WIDTH && y < HEIGHT {
-        let offset = (y * WIDTH + x) as usize;
+pub fn set_pixel(x: usize, y: usize, colour: Colour) {
+    if x < WIDTH as usize && y < HEIGHT as usize {
+        let offset = y * WIDTH as usize + x;
         unsafe {
-            write_volatile((FB_ADDR as *mut u32).add(offset), colour);
+            write_volatile((FB_ADDR as *mut u32).add(offset), colour.as_raw());
         }
     }
 }
 
 /// Get framebuffer dimensions
-#[allow(dead_code)]
-pub fn width() -> u32 {
-    WIDTH
+pub fn width() -> usize {
+    WIDTH as usize
 }
 
-#[allow(dead_code)]
-pub fn height() -> u32 {
-    HEIGHT
+pub fn height() -> usize {
+    HEIGHT as usize
 }
+
+/// Colour definition for FOURCC_XR24
+#[derive(Clone, Copy)]
+pub struct Colour(u32);
+
+impl Colour {
+    #[expect(dead_code)]
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self(((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
+    }
+
+    pub const fn as_raw(&self) -> u32 {
+        self.0
+    }
+}
+
+// Predefined colors
+#[allow(dead_code)]
+impl Colour {
+    pub const BLACK: Self = Self(0x000000);
+    pub const WHITE: Self = Self(0xFFFFFF);
+    pub const RED: Self = Self(0xFF0000);
+    pub const GREEN: Self = Self(0x00FF00);
+    pub const BLUE: Self = Self(0x0000FF);
+}
+
+const _: () = assert!(core::mem::size_of::<RamfbConfig>() == 28);

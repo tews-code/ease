@@ -133,26 +133,41 @@ mod test {
 /// Baselines set ~20% above measured values to allow for variance.
 #[cfg(test)]
 mod baselines {
-    pub const PRINT_HELLO: u64 = 180_000; // Measured without interrupts: ~31,000
-    pub const PRINTLN_HELLO: u64 = 240_000; // Measured without interrupts: ~25,000
-    pub const PRINTLN_FORMATTED: u64 = 320_000; // Measured without interrupts: ~30,000
-    pub const PRINTLN_LONG: u64 = 750_000; // Measured without interrupts: ~138,000
+    // Original UART-only baselines (Phase 1-4):
+    //   PRINT_HELLO:      180,000  (measured ~31,000)
+    //   PRINTLN_HELLO:    240,000  (measured ~25,000)
+    //   PRINTLN_FORMATTED:320,000  (measured ~30,000)
+    //   PRINTLN_LONG:     750,000  (measured ~138,000)
+    // Updated: print! now writes to UART + framebuffer console (Phase 5-6)
+    // Console reset before benchmarks to avoid scroll cost
+    // Each char draws 8x16 glyph + cursor hide/show = ~384 pixel writes
+    pub const PRINT_HELLO: u64 = 2_200_000; // Measured: ~1,822,000
+    pub const PRINTLN_HELLO: u64 = 1_500_000; // Measured: ~1,232,000
+    pub const PRINTLN_FORMATTED: u64 = 1_800_000; // Measured: ~1,506,000
+    pub const PRINTLN_LONG: u64 = 12_500_000; // Measured: ~10,328,000
 }
 
 #[cfg(test)]
 mod benchmarks {
     use super::baselines;
     use crate::bench;
+    use crate::drivers::console::CONSOLE;
     use crate::io::test_io;
     use crate::{print, println};
 
     /// Number of iterations for averaging (reduces noise)
     const ITERATIONS: u32 = 10;
 
+    /// Reset console before benchmarks to avoid scroll cost dominating measurements
+    fn reset_console() {
+        CONSOLE.lock().clear();
+    }
+
     #[test_case]
     fn regression_print_hello() {
         println!();
         println!("=== Regression Checks ===");
+        reset_console();
         test_io::clear();
         bench::check("print!(hello)", baselines::PRINT_HELLO, ITERATIONS, || {
             print!("hello");
@@ -161,6 +176,7 @@ mod benchmarks {
 
     #[test_case]
     fn regression_println_hello() {
+        reset_console();
         test_io::clear();
         bench::check(
             "println!(hello)",
@@ -174,6 +190,7 @@ mod benchmarks {
 
     #[test_case]
     fn regression_println_formatted() {
+        reset_console();
         test_io::clear();
         bench::check(
             "println!(formatted)",
@@ -187,6 +204,7 @@ mod benchmarks {
 
     #[test_case]
     fn regression_println_long() {
+        reset_console();
         test_io::clear();
         bench::check(
             "println!(50 chars)",

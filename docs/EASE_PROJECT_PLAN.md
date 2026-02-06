@@ -2,7 +2,7 @@
 
 ## Overview
 
-**EASE** (E-ink Alarm Shell Editor) is a hobby operating system written in Rust for the Raspberry Pi Pico 2 (RP2350) running in RISC-V mode. It features dual-core support, a simple shell, and runs three applications: Doom (shareware), a text editor with spell checking, and an alarm clock.
+**EASE** is a hobby operating system written in Rust for the Raspberry Pi Pico 2 (RP2350) running in RISC-V mode. It features dual-core support, a simple shell, and runs three applications: Doom (shareware), a text editor with spell checking, and an alarm clock.
 
 ### Design Philosophy
 - Minimal code size and maximum simplicity

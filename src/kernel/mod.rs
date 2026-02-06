@@ -6,4 +6,5 @@
 //! - Timer and scheduling
 
 pub mod alloc;
+pub mod collection;
 pub mod sync;

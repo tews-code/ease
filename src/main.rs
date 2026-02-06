@@ -34,9 +34,11 @@ mod arch;
 mod bench;
 mod drivers;
 mod hal;
+mod input;
 mod io;
 mod kernel;
 mod qemu;
+mod shell;
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -66,6 +68,10 @@ macro_rules! print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
         let _ = write!($crate::io::UartWriter, $($arg)*);
+        // Also console if available
+        if let Some(mut c) = $crate::drivers::console::CONSOLE.try_lock() {
+            let _ = write!(c, $($arg)*);
+        };
     }}
 }
 
@@ -75,8 +81,12 @@ macro_rules! print {
 /// In test mode, output is also captured for verification.
 #[macro_export]
 macro_rules! println {
-    () => { $crate::print!("\n") };
-    ($($arg:tt)*) => { $crate::print!("{}\n", format_args!($($arg)*)) };
+    () => { {
+        $crate::print!("\n");
+        }};
+    ($($arg:tt)*) => {{
+        $crate::print!("{}\n", format_args!($($arg)*));
+        }}
 }
 
 // =============================================================================
@@ -89,7 +99,10 @@ extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
     drivers::ramfb::init();
-    drivers::ramfb::clear(0x0000FF); // Blue screen
+    drivers::ramfb::clear(drivers::ramfb::Colour::BLUE); // Blue screen
+
+    // Start the shell
+    let mut shell = shell::Shell::new();
 
     test_main();
     loop {
@@ -103,7 +116,7 @@ extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
     drivers::ramfb::init();
-    drivers::ramfb::clear(0x0000FF); // Blue screen
+    drivers::ramfb::clear(drivers::ramfb::Colour::BLUE); // Blue screen
 
     print!("Hello ");
     println!("from EASE!");
@@ -112,9 +125,9 @@ extern "C" fn main() -> ! {
     arch::timer::sleep_ms(1000); // Sleep 1 second
     println!("Tick: {}", arch::timer::ticks_ms());
 
-    loop {
-        core::hint::spin_loop();
-    }
+    // Start the shell
+    let mut shell = shell::Shell::new();
+    shell.run(); // Never returns
 }
 
 // =============================================================================
