@@ -104,13 +104,19 @@ mod tests {
     #[test_case]
     fn test_backspace_del() {
         let mut p = EscapeParser::new();
-        assert!(matches!(p.parse(0x7F), ParseResult::Special(Key::Backspace)));
+        assert!(matches!(
+            p.parse(0x7F),
+            ParseResult::Special(Key::Backspace)
+        ));
     }
 
     #[test_case]
     fn test_backspace_bs() {
         let mut p = EscapeParser::new();
-        assert!(matches!(p.parse(0x08), ParseResult::Special(Key::Backspace)));
+        assert!(matches!(
+            p.parse(0x08),
+            ParseResult::Special(Key::Backspace)
+        ));
     }
 
     #[test_case]
@@ -126,7 +132,10 @@ mod tests {
         let mut p = EscapeParser::new();
         assert!(matches!(p.parse(0x1B), ParseResult::Pending));
         assert!(matches!(p.parse(b'['), ParseResult::Pending));
-        assert!(matches!(p.parse(b'B'), ParseResult::Special(Key::ArrowDown)));
+        assert!(matches!(
+            p.parse(b'B'),
+            ParseResult::Special(Key::ArrowDown)
+        ));
     }
 
     #[test_case]
@@ -134,7 +143,10 @@ mod tests {
         let mut p = EscapeParser::new();
         assert!(matches!(p.parse(0x1B), ParseResult::Pending));
         assert!(matches!(p.parse(b'['), ParseResult::Pending));
-        assert!(matches!(p.parse(b'C'), ParseResult::Special(Key::ArrowRight)));
+        assert!(matches!(
+            p.parse(b'C'),
+            ParseResult::Special(Key::ArrowRight)
+        ));
     }
 
     #[test_case]
@@ -142,7 +154,10 @@ mod tests {
         let mut p = EscapeParser::new();
         assert!(matches!(p.parse(0x1B), ParseResult::Pending));
         assert!(matches!(p.parse(b'['), ParseResult::Pending));
-        assert!(matches!(p.parse(b'D'), ParseResult::Special(Key::ArrowLeft)));
+        assert!(matches!(
+            p.parse(b'D'),
+            ParseResult::Special(Key::ArrowLeft)
+        ));
     }
 
     #[test_case]
@@ -203,7 +218,10 @@ mod tests {
 
         p.parse(0x1B);
         p.parse(b'[');
-        assert!(matches!(p.parse(b'B'), ParseResult::Special(Key::ArrowDown)));
+        assert!(matches!(
+            p.parse(b'B'),
+            ParseResult::Special(Key::ArrowDown)
+        ));
     }
 
     #[test_case]

@@ -2,6 +2,17 @@
 //!
 //! Defines HAL traits. Hardware-specific implementations are in submodules
 
+// ASCII chars that are used for console and serial control
+pub mod ascii {
+    pub const BELL: u8 = 0x07;
+    pub const BS: u8 = 0x08;
+    pub const TAB: u8 = 0x09;
+    pub const LF: u8 = 0x0A;
+    pub const FF: u8 = 0x0C;
+    pub const CR: u8 = 0x0D;
+    pub const DEL: u8 = 0x7F;
+}
+
 pub mod qemu_virt;
 
 /// Trait for byte-level output

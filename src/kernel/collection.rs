@@ -1,12 +1,15 @@
 //! Heapless Collections
 
+#![allow(dead_code)]
+
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
 /// Collection of N elements
 ///
 /// The elements must be Copy.
-#[derive(Clone, Copy)]
+/// All elements are held on the stack.
+#[derive(Clone, Copy, Debug)]
 pub struct Vec<T: Copy, const N: usize> {
     len: usize,
     buf: [MaybeUninit<T>; N],

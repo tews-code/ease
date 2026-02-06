@@ -1,5 +1,6 @@
 //! Line editor for EASE shell
 
+use crate::hal::ascii;
 use crate::input::escape::Key;
 use crate::input::keyboard::KeyEvent;
 use crate::kernel::collection::Vec;
@@ -8,23 +9,25 @@ pub const LINE_LEN: usize = 256;
 const HISTORY_SIZE: usize = 30;
 
 // Enum returned by the line editor to instruct display
+#[expect(dead_code)]
 pub enum LineDisplayAction<'a> {
     None,
-    Backspace { s: &'a [u8] },
+    Backspace { s: &'a str },
     Bell,
-    Echo(u8),                   // Simple append at end
+    Echo(u8), // Simple append at end
     Enter,
-    Redraw { s: &'a [u8]},      // Redraw from position to end, reposition cursor
-    RedrawLine { s: &'a [u8]},  // Redraw from start, reposition cursor
-    ClearLine(usize),           // Clear line sharing the number of chars in that line
+    Redraw { s: &'a str, n: usize }, //Blank `n` chars at current position, redraw `s` at current position, reposition cursor
+    RedrawLine { s: &'a str, n: usize }, // Redraw from start, cursor at end
+    ClearLine(usize),                // Clear line sharing the number of chars in that line
     CursorLeft,
     CursorRight(u8),
 }
 
 pub struct LineEditor {
     pub line: Vec<u8, LINE_LEN>,
-    cursor: usize,      // Cursor position
-    history_row: usize, // History row currently being used.
+    saved_line: Vec<u8, LINE_LEN>, // Stores current line when browsing history
+    cursor: usize,                 // Cursor position
+    history_index: Option<usize>,  // History row currently being used.
     history: Vec<Vec<u8, LINE_LEN>, HISTORY_SIZE>,
 }
 
@@ -32,8 +35,9 @@ impl LineEditor {
     pub const fn new() -> Self {
         Self {
             line: Vec::new(),
+            saved_line: Vec::new(),
             cursor: 0,
-            history_row: 0,
+            history_index: None,
             history: Vec::new(),
         }
     }
@@ -43,24 +47,35 @@ impl LineEditor {
     /// - Takes a KeyEvent from your keyboard module
     /// - Returns Some(line) when Enter is pressed
     /// - Returns None otherwise (still editing)
-    pub fn process(&mut self, event: KeyEvent) -> (Option<&str>, LineDisplayAction) {
+    pub fn process(&mut self, event: KeyEvent) -> (Option<&str>, LineDisplayAction<'_>) {
         match event {
+            KeyEvent::Byte(ascii::TAB) => {
+                (None, LineDisplayAction::Bell)
+            } // Discard tab
             KeyEvent::Byte(ch) => {
                 if self.line.is_full() {
-                    return (None, LineDisplayAction::None);
+                    return (None, LineDisplayAction::Bell);
                 };
                 let at_end = self.cursor == self.line.len();
                 if at_end {
+                    // Adding a single char at end
                     let _ = self.line.push(ch);
                     self.cursor += 1;
                     (None, LineDisplayAction::Echo(ch))
                 } else {
+                    // Print the char and reprint rest of string
                     let _ = self.line.insert(self.cursor, ch);
                     self.cursor += 1;
-                    (None,
-                     LineDisplayAction::Redraw {
-                         s: &self.line.as_slice()[self.cursor - 1..self.line.len()]
-                     })
+                    (
+                        None,
+                        LineDisplayAction::Redraw {
+                            s: str::from_utf8(
+                                &self.line.as_slice()[self.cursor - 1..self.line.len()],
+                            )
+                            .expect("should be utf-8"),
+                            n: 0, // No underlining chars to blank
+                        },
+                    )
                 }
             }
             KeyEvent::Special(key) => {
@@ -73,75 +88,102 @@ impl LineEditor {
                         let _ = self.history.insert(0, self.line);
                         self.line.clear();
                         self.cursor = 0;
-                        // Set history current row to 0
-                        self.history_row = 0;
+                        self.history_index = None; // Not browsing history
+                        self.saved_line.clear();
                         // Return the line (using command history store)
-                        (Some(
-                            self.history[0]
-                                .as_str()
-                                .expect("should only have UTF-8-valid bytes"),
-                        ), LineDisplayAction::Enter)
-                    },
+                        (
+                            Some(
+                                self.history[0]
+                                    .as_str()
+                                    .expect("should only have UTF-8-valid bytes"),
+                            ),
+                            LineDisplayAction::Enter,
+                        )
+                    }
                     Key::Backspace => {
                         if self.cursor > 0 {
                             // Remove the character at the cursor
                             self.line.remove(self.cursor - 1);
                             self.cursor -= 1;
-                            (None, LineDisplayAction::Backspace {
-                                s: &self.line.as_slice()[self.cursor..self.line.len()]
-                            })
+                            let s =
+                                str::from_utf8(&self.line.as_slice()[self.cursor..self.line.len()])
+                                    .expect("should be valid UTF-8");
+                            (None, LineDisplayAction::Backspace { s })
                         } else {
                             // Already at start, bell
                             (None, LineDisplayAction::Bell)
                         }
-                    },
+                    }
                     Key::Esc => {
+                        let prev_len = self.line.len();
                         self.line.clear();
                         self.cursor = 0;
-                        self.history_row = 0;
-                        (None, LineDisplayAction::ClearLine(self.line.len()))
+                        self.history_index = None;
+                        (None, LineDisplayAction::ClearLine(prev_len))
                     }
                     Key::ArrowUp => {
-                       if self.history_row == 0 {
-                           // Save current line and step into history
-                           let _ = self.history.insert(0, self.line);
-                           self.history_row = 1;
-                       } else if self.history_row + 1 < self.history.len() {
-                           // Move further back in history
-                           self.history_row += 1;
-                       } else {
-                           // Already at oldest entry
-                            if self.history.is_empty() {
-                                return (None, LineDisplayAction::Bell);
-                            };
-                       }
-                        self.line = self.history[self.history_row];
+                        if self.history.is_empty()
+                            || self.history_index == Some(self.history.len() - 1)
+                        {
+                            return (None, LineDisplayAction::Bell);
+                        };
+                        if self.history_index.is_none() {
+                            // Store current line
+                            self.saved_line = self.line;
+                        };
+                        let prev_len = match self.history_index {
+                            None => self.line.len(),
+                            Some(i) => self.history[i].len(),
+                        };
+                        // Update history index
+                        let index = self.history_index.map_or(0, |i| i + 1);
+                        self.history_index = Some(index);
+                        self.line = self.history[index];
                         self.cursor = self.line.len();
-                        (None, LineDisplayAction::RedrawLine {
-                            s: &self.line.as_slice()
-                        })
-                    },
+                        (
+                            None,
+                            LineDisplayAction::RedrawLine {
+                                s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
+                                n: prev_len,
+                            },
+                        )
+                    }
                     Key::ArrowDown => {
-                        if self.history_row == 0 {
-                            (None, LineDisplayAction::Bell)
+                        let Some(index) = self.history_index else {
+                            return (None, LineDisplayAction::Bell);
+                        };
+                        if self.history.is_empty() {
+                            return (None, LineDisplayAction::Bell);
+                        };
+                        let prev_len = self.line.len();
+                        if index == 0 {
+                            self.history_index = None;
+                            self.line = self.saved_line;
                         } else {
-                            self.history_row -= 1;
-                            self.line = self.history[self.history_row];
-                            self.cursor = self.line.len();
-                            (None, LineDisplayAction::RedrawLine {
-                                s: &self.line.as_slice()
-                            })
-                        }
-                    },
+                            self.history_index = Some(index - 1);
+                            self.line = self.history[index - 1];
+                        };
+                        self.cursor = self.line.len();
+                        (
+                            None,
+                            LineDisplayAction::RedrawLine {
+                                s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
+                                n: prev_len,
+                            },
+                        )
+                    }
                     Key::ArrowRight => {
                         if self.cursor < self.line.len() {
                             self.cursor += 1;
-                            (None, LineDisplayAction::CursorRight(self.line[self.cursor-1]))
+                            (
+                                None,
+                                LineDisplayAction::CursorRight(self.line[self.cursor - 1]),
+                            )
                         } else {
                             // Already at end of line, bell
                             (None, LineDisplayAction::Bell)
                         }
-                    },
+                    }
                     Key::ArrowLeft => {
                         if self.cursor > 0 {
                             self.cursor -= 1;
@@ -150,7 +192,7 @@ impl LineEditor {
                             // Already at prompt, bell
                             (None, LineDisplayAction::Bell)
                         }
-                    },
+                    }
                 }
             }
         }
@@ -192,6 +234,14 @@ mod tests {
     }
 
     #[test_case]
+    fn test_tab_rejected() {
+        let mut ed = LineEditor::new();
+        let (result, action) = ed.process(byte(ascii::TAB));
+        assert!(result.is_none());
+        assert!(matches!(action, LineDisplayAction::Bell));
+    }
+
+    #[test_case]
     fn test_enter_returns_line() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "echo hi");
@@ -205,7 +255,6 @@ mod tests {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "test");
         ed.process(key(Key::Enter));
-        // Line should be cleared after Enter
         assert_eq!(ed.line.len(), 0);
     }
 
@@ -241,9 +290,9 @@ mod tests {
         type_str(&mut ed, "abc");
         let (_, action) = ed.process(key(Key::ArrowLeft));
         assert!(matches!(action, LineDisplayAction::CursorLeft));
-        // Now insert — should go into middle position
+        // Insert in middle — should produce Redraw with n=0
         let (_, action) = ed.process(byte(b'X'));
-        assert!(matches!(action, LineDisplayAction::Redraw { .. }));
+        assert!(matches!(action, LineDisplayAction::Redraw { n: 0, .. }));
         assert_eq!(ed.line.as_str(), Ok("abXc"));
     }
 
@@ -266,10 +315,8 @@ mod tests {
     fn test_arrow_right_moves_cursor() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "abc");
-        // Move left twice
         ed.process(key(Key::ArrowLeft));
         ed.process(key(Key::ArrowLeft));
-        // Move right once
         let (_, action) = ed.process(key(Key::ArrowRight));
         assert!(matches!(action, LineDisplayAction::CursorRight(b'b')));
     }
@@ -278,8 +325,8 @@ mod tests {
     fn test_insert_in_middle() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "ac");
-        ed.process(key(Key::ArrowLeft)); // cursor before 'c'
-        ed.process(byte(b'b')); // insert 'b' between a and c
+        ed.process(key(Key::ArrowLeft));
+        ed.process(byte(b'b'));
         assert_eq!(ed.line.as_str(), Ok("abc"));
     }
 
@@ -287,8 +334,8 @@ mod tests {
     fn test_backspace_in_middle() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "abcd");
-        ed.process(key(Key::ArrowLeft)); // cursor before 'd'
-        ed.process(key(Key::Backspace)); // delete 'c'
+        ed.process(key(Key::ArrowLeft));
+        ed.process(key(Key::Backspace));
         assert_eq!(ed.line.as_str(), Ok("abd"));
     }
 
@@ -297,8 +344,20 @@ mod tests {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "something");
         let (_, action) = ed.process(key(Key::Esc));
-        assert!(matches!(action, LineDisplayAction::ClearLine(_)));
+        assert!(matches!(action, LineDisplayAction::ClearLine(9))); // "something" = 9 chars
         assert_eq!(ed.line.len(), 0);
+    }
+
+    #[test_case]
+    fn test_esc_resets_history_browsing() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "first");
+        ed.process(key(Key::Enter));
+        ed.process(key(Key::ArrowUp)); // browsing history
+        ed.process(key(Key::Esc));     // should reset
+        // ArrowDown should bell (not browsing anymore)
+        let (_, action) = ed.process(key(Key::ArrowDown));
+        assert!(matches!(action, LineDisplayAction::Bell));
     }
 
     #[test_case]
@@ -321,15 +380,29 @@ mod tests {
         ed.process(key(Key::Enter));
         type_str(&mut ed, "second");
         ed.process(key(Key::Enter));
-        // Up once → "second"
+        // Up once -> "second"
         ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line.as_str(), Ok("second"));
-        // Up again → "first"
+        // Up again -> "first"
         ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line.as_str(), Ok("first"));
-        // Down → back to "second"
+        // Down -> back to "second"
         ed.process(key(Key::ArrowDown));
         assert_eq!(ed.line.as_str(), Ok("second"));
+    }
+
+    #[test_case]
+    fn test_history_down_restores_current_line() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "old");
+        ed.process(key(Key::Enter));
+        type_str(&mut ed, "current");
+        // Browse into history
+        ed.process(key(Key::ArrowUp));
+        assert_eq!(ed.line.as_str(), Ok("old"));
+        // Come back — should restore "current"
+        ed.process(key(Key::ArrowDown));
+        assert_eq!(ed.line.as_str(), Ok("current"));
     }
 
     #[test_case]
@@ -343,16 +416,44 @@ mod tests {
     }
 
     #[test_case]
+    fn test_history_up_empty_bells() {
+        let mut ed = LineEditor::new();
+        // No history — up should bell
+        let (_, action) = ed.process(key(Key::ArrowUp));
+        assert!(matches!(action, LineDisplayAction::Bell));
+    }
+
+    #[test_case]
+    fn test_history_up_at_oldest_bells() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "only");
+        ed.process(key(Key::Enter));
+        ed.process(key(Key::ArrowUp)); // "only"
+        // Already at oldest — should bell
+        let (_, action) = ed.process(key(Key::ArrowUp));
+        assert!(matches!(action, LineDisplayAction::Bell));
+    }
+
+    #[test_case]
+    fn test_history_redrawline_has_prev_len() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "long command");
+        ed.process(key(Key::Enter));
+        type_str(&mut ed, "hi");
+        // ArrowUp from "hi" (2 chars) to "long command" — n should be 2
+        let (_, action) = ed.process(key(Key::ArrowUp));
+        assert!(matches!(action, LineDisplayAction::RedrawLine { n: 2, .. }));
+    }
+
+    #[test_case]
     fn test_full_line_rejects_input() {
         let mut ed = LineEditor::new();
-        // Fill the line buffer
         for _ in 0..LINE_LEN {
             ed.process(byte(b'x'));
         }
         assert!(ed.line.is_full());
-        // One more should be rejected silently
         let (_, action) = ed.process(byte(b'y'));
-        assert!(matches!(action, LineDisplayAction::None));
+        assert!(matches!(action, LineDisplayAction::Bell));
         assert_eq!(ed.line.len(), LINE_LEN);
     }
 }

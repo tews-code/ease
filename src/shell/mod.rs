@@ -3,21 +3,14 @@
 pub mod commands;
 pub mod line_editor;
 
-use crate::shell::line_editor::LineDisplayAction;
-use crate::{drivers::console::CONSOLE, input::keyboard::KeyEvent};
-use crate::hal::Writer;
-use crate::input::escape::Key;
+use crate::hal::ascii;
 use crate::input::keyboard::{Keyboard, UartKeyboard};
-use crate::io::UartWriter;
-use crate::kernel::collection::Vec;
+use crate::shell::line_editor::LineDisplayAction;
 use crate::{print, println};
 
 use line_editor::LineEditor;
 
 static PROMPT: &str = "ease> ";
-
-pub const ASCII_BELL: u8 = 0x07;
-pub const ASCII_BS: u8 = 0x08;
 
 pub struct Shell {
     keyboard: UartKeyboard,
@@ -53,65 +46,47 @@ impl Shell {
 
     fn handle_display(action: LineDisplayAction) {
         match action {
-            LineDisplayAction::None => {},
+            LineDisplayAction::None => {}
             LineDisplayAction::Echo(b) => print!("{}", b as char),
             LineDisplayAction::Enter => println!(),
-            LineDisplayAction::Bell => CONSOLE.lock().write_char(ASCII_BELL), // Serial does not support bell. So console print only
+            LineDisplayAction::Bell => print!("{}", ascii::BELL as char),
             LineDisplayAction::Backspace { s } => {
-                // Serial device
-                UartWriter.write_byte(ASCII_BS); // Backspace - move cursor left
-                UartWriter.write_byte(b' '); // Space - erase character
-                UartWriter.write_byte(ASCII_BS); // Backspace - move cursor left again
-
-                // Console
-                let mut console = CONSOLE.lock();
-                console.write_char(ASCII_BS);
-                console.write_char(b' ');
-                console.write_char(ASCII_BS);
-
-                if !s.is_empty() {
-                    Self::handle_display(LineDisplayAction::Redraw{ s })
+                print!("{}{} {}", ascii::BS as char, s, ascii::BS as char);
+                // Move cursor back by length of str
+                for _ in 0..s.len() {
+                    print!("{}", ascii::BS as char);
                 }
-            },
-            LineDisplayAction::Redraw { s } => {
-                for &b in s {
-                    print!("{}", b as char);
+            }
+            LineDisplayAction::Redraw { s, n } => {
+                print!("{s}");
+                let spaces = n.saturating_sub(s.len());
+                for _ in 0..spaces {
+                    print!(" ");
                 }
-                // Move cursor back to correct position
-                for _ in 0..s.len() - 1 {
-                    print!("\x08");  // Or use console.write_char
+                // Return the cursor back to after the new string
+                for _ in 0..(s.len() + spaces).saturating_sub(1) {
+                    print!("{}", ascii::BS as char);
                 }
-
-            },
-            LineDisplayAction::RedrawLine { s } => {
-                Self::handle_display(LineDisplayAction::ClearLine(s.len()));
-                print!("{PROMPT}");
-                for &b in s {
-                    print!("{}", b as char);
-                }
-            },
+            }
+            LineDisplayAction::RedrawLine { s, n } => {
+                Self::handle_display(LineDisplayAction::ClearLine(n));
+                print!("{s}");
+            }
             LineDisplayAction::ClearLine(n) => {
-                print!("\r{PROMPT}");
-                for _ in 0..n { print!(" "); }
-                // Move to start of line and re-prompt
-                print!("\r");
-            },
-            LineDisplayAction::CursorLeft => {
-                let ( cursor_x, _ ) = CONSOLE.lock().cursor_position();
-                if cursor_x > PROMPT.len() {
-                    // Serial device
-                    UartWriter.write_byte(ASCII_BS);
-                    // Console
-                    let mut console = CONSOLE.lock();
-                    console.write_char(ASCII_BS);
+                print!("{}", ascii::CR as char);
+                for _ in 0..n + PROMPT.len() {
+                    print!(" ");
                 }
-            },
+                // Move to start of line and re-prompt
+                print!("{}{}", ascii::CR as char, PROMPT);
+            }
+            LineDisplayAction::CursorLeft => {
+                print!("{}", ascii::BS as char);
+            }
             LineDisplayAction::CursorRight(ch) => {
                 // Line editor would not ask this if there was nowhere to go right
-                UartWriter.write_byte(ch); // Rewrite ch to move cursor right
-                let mut console = CONSOLE.lock();
-                console.write_char(ch)
-            },
+                print!("{}", ch as char);
+            }
         }
     }
 
@@ -127,14 +102,12 @@ impl Shell {
             None => (line, ""),
         };
 
-        let mut console = CONSOLE.lock();
-
         match cmd {
-            "help" => commands::help(&mut console),
-            "clear" => commands::clear(&mut console),
-            "echo" => commands::echo(&mut console, args),
-            "time" => commands::time(&mut console),
-            _ => commands::unknown(&mut console, cmd),
+            "help" => commands::help(),
+            "clear" => commands::clear(),
+            "echo" => commands::echo(args),
+            "time" => commands::time(),
+            _ => commands::unknown(cmd),
         }
     }
 }
