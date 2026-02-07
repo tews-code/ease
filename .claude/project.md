@@ -54,7 +54,7 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 
 **Phase 6: Complete** (Input & Shell)
 - UART RX keyboard input with escape sequence parser (`src/input/`)
-- `KeyEvent` enum: `Char`, `Backspace`, `Enter`, `Escape`, arrow keys
+- `KeyEvent` enum: `Byte(u8)` for ASCII, `Special(Key)` for Backspace, Enter, Esc, arrow keys
 - Line editor: 256-char buffer, cursor movement, 30-entry history (`src/shell/line_editor.rs`)
 - Interactive shell with prompt and command dispatch (`src/shell/mod.rs`)
 - Built-in commands: `help`, `clear`, `echo`, `time`
