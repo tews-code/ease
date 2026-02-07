@@ -3,8 +3,6 @@
 //! Configures QEMU's ramfb device to display a framebuffer.
 //! The framebuffer is a region of RAM that QEMU reads and displays.
 
-use core::ptr::{read_volatile, write_volatile};
-
 // Framebuffer settings
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 480;
@@ -71,12 +69,64 @@ fn write_fw_cfg_dma(config: &RamfbConfig) {
 
         // Write DMA descriptor address to fw_cfg (triggers transfer)
         let dma_addr = &mut dma as *mut DmaAccess as u64;
-        write_volatile(FW_CFG_DMA as *mut u32, ((dma_addr >> 32) as u32).to_be());
-        write_volatile((FW_CFG_DMA + 4) as *mut u32, (dma_addr as u32).to_be());
+        core::ptr::write_volatile(FW_CFG_DMA as *mut u32, ((dma_addr >> 32) as u32).to_be());
+        core::ptr::write_volatile((FW_CFG_DMA + 4) as *mut u32, (dma_addr as u32).to_be());
 
         // Wait for completion (QEMU sets control to 0)
-        while read_volatile(&dma.control as *const u32) != 0 {
+        while core::ptr::read_volatile(&dma.control as *const u32) != 0 {
             core::hint::spin_loop();
+        }
+    }
+}
+
+/// Set a pixel at (x, y) to colour (0xRRGGBB)
+pub unsafe fn set_pixel(fb_offset: usize, colour: Colour) {
+    unsafe {
+        // Safety: Caller must guarantee that fb_offset is valid for writes
+        core::ptr::write((FB_ADDR as *mut u32).add(fb_offset), colour.as_raw());
+    }
+}
+
+/// Set a row of pixels to the raw colours provided in a slice
+pub fn set_pixels(fb_offset: usize, pixels: &[u32]) {
+    if fb_offset + pixels.len() <= (WIDTH * HEIGHT) as usize {
+        unsafe {
+            // Safety: Bounds check ensures that safe to write
+            core::ptr::copy_nonoverlapping(
+                pixels.as_ptr(),
+                (FB_ADDR as *mut u32).add(fb_offset),
+                pixels.len(),
+            );
+        }
+    }
+}
+
+/// Scroll the frame buffer by `height` pixels
+pub fn scroll(font_height: usize, bg: Colour) {
+    let fb = FB_ADDR as *mut u32;
+    let row_pixels = WIDTH as usize;
+    let offset = font_height * row_pixels;
+    let total = (HEIGHT as usize) * row_pixels;
+
+    // Copy rows up: pixel[i] = pixel[i + offset]
+    for i in 0..total - offset {
+        unsafe {
+            let src = fb.add(i + offset);
+            let dst = fb.add(i);
+            core::ptr::write_volatile(dst, core::ptr::read_volatile(src));
+        }
+    }
+    clear_row(HEIGHT as usize - font_height, font_height as usize, bg);
+}
+
+/// Clear a row and height to Colour
+pub fn clear_row(row: usize, height: usize, colour: Colour) {
+    let fb = FB_ADDR as *mut u32;
+    let start = row * WIDTH as usize;
+    let count = height * WIDTH as usize;
+    unsafe {
+        for i in 0..count {
+            core::ptr::write_volatile(fb.add(start + i), colour.as_raw());
         }
     }
 }
@@ -86,16 +136,8 @@ pub fn clear(colour: Colour) {
     unsafe {
         let fb = FB_ADDR as *mut u32;
         for i in 0..((WIDTH * HEIGHT) as usize) {
-            write_volatile(fb.add(i), colour.as_raw());
+            core::ptr::write_volatile(fb.add(i), colour.as_raw());
         }
-    }
-}
-
-/// Set a pixel at (x, y) to colour (0xRRGGBB)
-pub unsafe fn set_pixel(fb_offset: usize, colour: Colour) {
-    unsafe {
-        // Safety: Caller must guarantee that fb_offset is valid for writes
-        write_volatile((FB_ADDR as *mut u32).add(fb_offset), colour.as_raw());
     }
 }
 

@@ -9,7 +9,7 @@ pub struct Font {
 }
 
 // Font data is 16 bytes per glyph
-pub const FONT: Font = Font {
+const FONT: Font = Font {
     data: include_bytes!("../../resources/VGA8.F16"),
 };
 
@@ -33,16 +33,14 @@ impl Font {
     pub fn draw_char(x: usize, y: usize, ch: u8, fg: Colour, bg: Colour) {
         if (x <= ramfb::width() - Self::WIDTH) && (y <= ramfb::height() - Self::HEIGHT) {
             let glyph_data = &FONT[ch];
-            for (row, byte) in glyph_data.iter().enumerate().take(Self::HEIGHT) {
-                let row_offset = (y + row) * ramfb::width() as usize;
+            for (row, byte) in glyph_data.iter().enumerate() {
+                let row_offset = (y + row) * ramfb::width();
+                let mut pixels = [0u32; Self::WIDTH];
                 for column in 0..Self::WIDTH {
                     let bit_set = (byte >> (7 - column)) & 1 != 0;
-                    let fb_offset = row_offset + x + column;
-                    unsafe {
-                        // Safety: Checked x and y within bounds above
-                        ramfb::set_pixel(fb_offset, if bit_set { fg } else { bg });
-                    }
+                    pixels[column] = if bit_set { fg.as_raw() } else { bg.as_raw() };
                 }
+                ramfb::set_pixels(row_offset + x, &pixels);
             }
         }
     }
@@ -50,6 +48,7 @@ impl Font {
     /// Draw a string in FONT
     ///
     /// # Each element of `s` is treated as a byte
+    #[expect(dead_code)]
     pub fn draw_string(x: usize, y: usize, s: &[u8], fg: Colour, bg: Colour) {
         for (i, b) in s.iter().enumerate() {
             Self::draw_char(x + i * Self::WIDTH, y, *b, fg, bg);
@@ -57,12 +56,12 @@ impl Font {
     }
 
     /// Width of the font
-    pub fn width() -> usize {
+    pub const fn width() -> usize {
         Self::WIDTH
     }
 
     /// Height of the font
-    pub fn height() -> usize {
+    pub const fn height() -> usize {
         Self::HEIGHT
     }
 }

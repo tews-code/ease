@@ -142,33 +142,47 @@ mod baselines {
     // Console reset before benchmarks to avoid scroll cost
     // Each char draws 8x16 glyph + cursor hide/show = ~384 pixel writes
     // Baselines set with wide margin for QEMU timing variance
-    pub const PRINT_HELLO: u64 = 4_000_000;
-    pub const PRINTLN_HELLO: u64 = 4_000_000;
-    pub const PRINTLN_FORMATTED: u64 = 5_000_000;
-    pub const PRINTLN_LONG: u64 = 16_000_000;
+    pub const PRINT_HELLO: u64 = 1_000_000;
+    pub const PRINTLN_HELLO: u64 = 900_000;
+    pub const PRINTLN_FORMATTED: u64 = 3_000_000;
+    pub const PRINTLN_LONG: u64 = 3_500_000;
 }
 
 #[cfg(test)]
 mod profile {
-    use core::fmt::Write;
     use crate::bench;
+    use crate::drivers::console::CONSOLE;
+    use crate::hal::ascii;
+    use crate::println;
+    use core::fmt::Write;
 
     const ITER_LARGE: u32 = 100;
     const ITER_SMALL: u32 = 10;
 
     #[test_case]
     fn profile_console_print() {
-        use crate::drivers::console::CONSOLE;
         use crate::drivers::font::Font;
-        use crate::drivers::ramfb::{Colour, set_pixel};
-        use crate::hal::ascii;
-        use crate::println;
+        use crate::drivers::ramfb::{Colour, set_pixels};
 
         println!("\n=== Console Print Path Profile ===");
 
         let mut c = CONSOLE.lock();
         c.clear();
-        bench::run_avg("set_pixel", ITER_LARGE, || unsafe {set_pixel(0, Colour::RED)});
+        bench::run_avg("set_pixels", ITER_LARGE, || {
+            set_pixels(
+                0,
+                &[
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                ],
+            )
+        });
         c.clear();
         bench::run_avg("Font::draw_char", ITER_LARGE, || {
             Font::draw_char(0, 0, b'X', Colour::WHITE, Colour::BLUE)
@@ -184,6 +198,17 @@ mod profile {
             let _ = c.write_str("hello\n");
         });
         println!("==================================");
+    }
+
+    #[test_case]
+    fn profile_console_scroll() {
+        println!("\n=== Console Scroll Path Profile ===");
+        let mut c = CONSOLE.lock();
+        c.clear();
+        bench::run_avg("Console::scroll()", ITER_LARGE, || {
+            c.scroll();
+        });
+        println!("====================================");
     }
 }
 

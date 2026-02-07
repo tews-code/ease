@@ -98,7 +98,7 @@ pub fn check_regression<F: Fn()>(
 
     if avg > max_allowed {
         let regression_pct = (avg - baseline) * 100 / baseline;
-        crate::println!(
+        crate::print!(
             "  REGRESSION {}: {} cycles (baseline: {}, +{}%)",
             name,
             avg,
@@ -108,7 +108,7 @@ pub fn check_regression<F: Fn()>(
         panic!("Performance regression detected");
     } else if avg > baseline {
         let over_pct = (avg - baseline) * 100 / baseline;
-        crate::println!(
+        crate::print!(
             "  OK {}: {} cycles (baseline: {}, +{}%)",
             name,
             avg,
@@ -117,7 +117,7 @@ pub fn check_regression<F: Fn()>(
         );
     } else {
         let under_pct = (baseline - avg) * 100 / baseline;
-        crate::println!(
+        crate::print!(
             "  OK {}: {} cycles (baseline: {}, -{}%)",
             name,
             avg,

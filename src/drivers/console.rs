@@ -125,15 +125,7 @@ impl Console {
             self.buffer[row] = self.buffer[row + 1];
         }
         self.buffer[ROWS - 1] = [b' '; COLUMNS];
-        for row in 0..ROWS {
-            Font::draw_string(
-                0,
-                row * Font::height(),
-                self.buffer[row].as_slice(),
-                self.fg,
-                self.bg,
-            );
-        }
+        ramfb::scroll(Font::height(), self.bg);
         self.cursor.x = 0;
         self.cursor.y = ROWS - 1;
     }
@@ -194,7 +186,7 @@ impl core::fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> Result<(), core::fmt::Error> {
         for b in s.bytes() {
             self.put_char(b);
-        };
+        }
         self.show_cursor();
         Ok(())
     }
