@@ -80,6 +80,7 @@ fn write_fw_cfg_dma(config: &RamfbConfig) {
 }
 
 /// Set a pixel at (x, y) to colour (0xRRGGBB)
+#[expect(dead_code)]
 pub unsafe fn set_pixel(fb_offset: usize, colour: Colour) {
     unsafe {
         // Safety: Caller must guarantee that fb_offset is valid for writes
@@ -116,7 +117,7 @@ pub fn scroll(font_height: usize, bg: Colour) {
             core::ptr::write_volatile(dst, core::ptr::read_volatile(src));
         }
     }
-    clear_row(HEIGHT as usize - font_height, font_height as usize, bg);
+    clear_row(HEIGHT as usize - font_height, font_height, bg);
 }
 
 /// Clear a row and height to Colour

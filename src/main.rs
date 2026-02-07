@@ -102,7 +102,7 @@ extern "C" fn main() -> ! {
     drivers::ramfb::clear(drivers::ramfb::Colour::BLUE); // Blue screen
 
     // Start the shell
-    let mut shell = shell::Shell::new();
+    let _shell = shell::Shell::new();
 
     test_main();
     loop {

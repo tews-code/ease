@@ -49,9 +49,7 @@ impl LineEditor {
     /// - Returns None otherwise (still editing)
     pub fn process(&mut self, event: KeyEvent) -> (Option<&str>, LineDisplayAction<'_>) {
         match event {
-            KeyEvent::Byte(ascii::TAB) => {
-                (None, LineDisplayAction::Bell)
-            } // Discard tab
+            KeyEvent::Byte(ascii::TAB) => (None, LineDisplayAction::Bell), // Discard tab
             KeyEvent::Byte(ch) => {
                 if self.line.is_full() {
                     return (None, LineDisplayAction::Bell);
@@ -354,7 +352,7 @@ mod tests {
         type_str(&mut ed, "first");
         ed.process(key(Key::Enter));
         ed.process(key(Key::ArrowUp)); // browsing history
-        ed.process(key(Key::Esc));     // should reset
+        ed.process(key(Key::Esc)); // should reset
         // ArrowDown should bell (not browsing anymore)
         let (_, action) = ed.process(key(Key::ArrowDown));
         assert!(matches!(action, LineDisplayAction::Bell));

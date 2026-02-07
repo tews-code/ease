@@ -1,5 +1,7 @@
 //! Shell commands
 
+#![allow(dead_code)]
+
 use crate::arch::timer;
 use crate::hal::ascii;
 use crate::{print, println};

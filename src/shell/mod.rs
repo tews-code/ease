@@ -1,5 +1,7 @@
 //! EASE Simple Shell
 
+#![allow(dead_code)]
+
 pub mod commands;
 pub mod line_editor;
 

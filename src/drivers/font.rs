@@ -36,9 +36,9 @@ impl Font {
             for (row, byte) in glyph_data.iter().enumerate() {
                 let row_offset = (y + row) * ramfb::width();
                 let mut pixels = [0u32; Self::WIDTH];
-                for column in 0..Self::WIDTH {
+                for (column, pixel) in pixels.iter_mut().enumerate() {
                     let bit_set = (byte >> (7 - column)) & 1 != 0;
-                    pixels[column] = if bit_set { fg.as_raw() } else { bg.as_raw() };
+                    *pixel = if bit_set { fg.as_raw() } else { bg.as_raw() }
                 }
                 ramfb::set_pixels(row_offset + x, &pixels);
             }

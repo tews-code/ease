@@ -110,6 +110,7 @@ impl Console {
     /// Write a character using the font at the current cursor position and advance cursor
     ///
     /// # `ch` is a byte
+    #[allow(dead_code)]
     pub fn write_char(&mut self, ch: u8) {
         self.put_char(ch);
         self.show_cursor();
