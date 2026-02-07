@@ -8,6 +8,7 @@ pub struct Font {
     data: &'static [u8],
 }
 
+// Font data is 16 bytes per glyph
 pub const FONT: Font = Font {
     data: include_bytes!("../../resources/VGA8.F16"),
 };
@@ -33,9 +34,14 @@ impl Font {
         if (x <= ramfb::width() - Self::WIDTH) && (y <= ramfb::height() - Self::HEIGHT) {
             let glyph_data = &FONT[ch];
             for (row, byte) in glyph_data.iter().enumerate().take(Self::HEIGHT) {
+                let row_offset = (y + row) * ramfb::width() as usize;
                 for column in 0..Self::WIDTH {
                     let bit_set = (byte >> (7 - column)) & 1 != 0;
-                    ramfb::set_pixel(x + column, y + row, if bit_set { fg } else { bg });
+                    let fb_offset = row_offset + x + column;
+                    unsafe {
+                        // Safety: Checked x and y within bounds above
+                        ramfb::set_pixel(fb_offset, if bit_set { fg } else { bg });
+                    }
                 }
             }
         }

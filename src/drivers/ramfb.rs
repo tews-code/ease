@@ -92,12 +92,10 @@ pub fn clear(colour: Colour) {
 }
 
 /// Set a pixel at (x, y) to colour (0xRRGGBB)
-pub fn set_pixel(x: usize, y: usize, colour: Colour) {
-    if x < WIDTH as usize && y < HEIGHT as usize {
-        let offset = y * WIDTH as usize + x;
-        unsafe {
-            write_volatile((FB_ADDR as *mut u32).add(offset), colour.as_raw());
-        }
+pub unsafe fn set_pixel(fb_offset: usize, colour: Colour) {
+    unsafe {
+        // Safety: Caller must guarantee that fb_offset is valid for writes
+        write_volatile((FB_ADDR as *mut u32).add(fb_offset), colour.as_raw());
     }
 }
 

@@ -168,7 +168,7 @@ mod profile {
 
         let mut c = CONSOLE.lock();
         c.clear();
-        bench::run_avg("set_pixel", ITER_LARGE, || set_pixel(0, 0, Colour::RED));
+        bench::run_avg("set_pixel", ITER_LARGE, || unsafe {set_pixel(0, Colour::RED)});
         c.clear();
         bench::run_avg("Font::draw_char", ITER_LARGE, || {
             Font::draw_char(0, 0, b'X', Colour::WHITE, Colour::BLUE)
