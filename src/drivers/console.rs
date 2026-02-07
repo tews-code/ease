@@ -91,7 +91,6 @@ impl Console {
                 // Writeable char
                 self.buffer[self.cursor_y][self.cursor_x] = ch; // Save the byte
                 self.draw_char(ch);
-                self.hide_cursor();
                 self.cursor_x += 1;
                 if self.cursor_x >= COLUMNS {
                     self.cursor_x = 0;

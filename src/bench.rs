@@ -49,13 +49,13 @@ pub fn run<F: FnOnce()>(name: &str, f: F) {
 ///
 /// Useful for reducing noise in measurements.
 #[expect(dead_code)]
-pub fn run_avg<F: Fn()>(name: &str, iterations: u32, f: F) {
+pub fn run_avg<F: FnMut()>(name: &str, iterations: u32, mut f: F) {
     // Warm-up run (not counted)
     f();
 
     let mut total: u64 = 0;
     for _ in 0..iterations {
-        total += measure(&f);
+        total += measure(|| f());
     }
     let avg = total / iterations as u64;
     crate::println!("  {}: {} cycles (avg of {})", name, avg, iterations);

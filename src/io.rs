@@ -149,6 +149,45 @@ mod baselines {
 }
 
 #[cfg(test)]
+mod profile {
+    use core::fmt::Write;
+    use crate::bench;
+
+    const ITER_LARGE: u32 = 100;
+    const ITER_SMALL: u32 = 10;
+
+    #[test_case]
+    fn profile_console_print() {
+        use crate::drivers::console::CONSOLE;
+        use crate::drivers::font::Font;
+        use crate::drivers::ramfb::{Colour, set_pixel};
+        use crate::hal::ascii;
+        use crate::println;
+
+        println!("\n=== Console Print Path Profile ===");
+
+        let mut c = CONSOLE.lock();
+        c.clear();
+        bench::run_avg("set_pixel", ITER_LARGE, || set_pixel(0, 0, Colour::RED));
+        c.clear();
+        bench::run_avg("Font::draw_char", ITER_LARGE, || {
+            Font::draw_char(0, 0, b'X', Colour::WHITE, Colour::BLUE)
+        });
+        c.clear();
+        bench::run_avg("Console::write_char(ch)", ITER_SMALL, || c.write_char(b'X'));
+        c.clear();
+        bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
+            c.write_char(ascii::LF)
+        });
+        c.clear();
+        bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
+            let _ = c.write_str("hello\n");
+        });
+        println!("==================================");
+    }
+}
+
+#[cfg(test)]
 mod benchmarks {
     use super::baselines;
     use crate::bench;
