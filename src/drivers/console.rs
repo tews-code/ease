@@ -14,10 +14,15 @@ const ROWS: usize = 30;
 const COLUMNS: usize = 80;
 const TAB_SIZE: usize = 8;
 
+struct Cursor {
+    x: usize,
+    y: usize,
+    visible: bool,
+}
+
 pub struct Console {
     buffer: [[u8; COLUMNS]; ROWS],
-    cursor_x: usize,
-    cursor_y: usize,
+    cursor: Cursor,
     fg: Colour,
     bg: Colour,
 }
@@ -26,20 +31,23 @@ impl Console {
     pub const fn new() -> Self {
         Self {
             buffer: [[b' '; COLUMNS]; ROWS],
-            cursor_x: 0,
-            cursor_y: 0,
+            cursor: Cursor {
+                x: 0,
+                y: 0,
+                visible: false,
+            },
             fg: Colour::WHITE,
             bg: Colour::BLACK,
         }
     }
 
-    /// Write a character using the font at the current cursor position
+    /// Write a character using the font at the current cursor position but do not advance cursor
     ///
     /// # `ch` is a byte
-    pub fn write_char(&mut self, ch: u8) {
+    pub fn put_char(&mut self, ch: u8) {
         match ch {
             ascii::BELL => {
-                let current_ch = self.buffer[self.cursor_y][self.cursor_x];
+                let current_ch = self.buffer[self.cursor.y][self.cursor.x];
                 // Flash an asterisc at the cursor
                 for _ in 0..2 {
                     self.draw_char(b'*');
@@ -47,61 +55,64 @@ impl Console {
                     self.draw_char(b' ');
                 }
                 self.draw_char(current_ch);
-                self.show_cursor();
+                self.cursor.visible = false;
             }
             ascii::BS | ascii::DEL => {
-                if self.cursor_x > 0 {
+                if self.cursor.x > 0 {
                     self.hide_cursor();
-                    self.cursor_x -= 1; // Note - shell responsibility to print space
-                    self.show_cursor();
+                    self.cursor.x -= 1; // Note - shell responsibility to print space
                 }
             }
             ascii::TAB => {
                 self.hide_cursor();
-                let next_tab = ((self.cursor_x / TAB_SIZE) + 1) * TAB_SIZE;
+                let next_tab = ((self.cursor.x / TAB_SIZE) + 1) * TAB_SIZE;
                 let next_tab = next_tab.min(COLUMNS - 1);
-                while self.cursor_x < next_tab {
-                    self.buffer[self.cursor_y][self.cursor_x] = b' ';
+                while self.cursor.x < next_tab {
+                    self.buffer[self.cursor.y][self.cursor.x] = b' ';
                     self.draw_char(b' ');
-                    self.cursor_x += 1;
+                    self.cursor.x += 1;
                 }
-                self.show_cursor();
             }
             ascii::CR => {
                 self.hide_cursor();
-                self.cursor_x = 0;
-                self.show_cursor();
+                self.cursor.x = 0;
             }
             ascii::FF => {
                 self.hide_cursor();
                 self.clear();
-                self.show_cursor();
             }
             ascii::LF => {
                 self.hide_cursor();
-                self.cursor_x = 0;
-                if self.cursor_y < ROWS - 1 {
-                    self.cursor_y += 1;
+                self.cursor.x = 0;
+                if self.cursor.y < ROWS - 1 {
+                    self.cursor.y += 1;
                 } else {
                     self.scroll();
                 }
-                self.show_cursor();
             }
             _ => {
                 // Writeable char
-                self.buffer[self.cursor_y][self.cursor_x] = ch; // Save the byte
+                self.buffer[self.cursor.y][self.cursor.x] = ch; // Draw char overwriting cursor
                 self.draw_char(ch);
-                self.cursor_x += 1;
-                if self.cursor_x >= COLUMNS {
-                    self.cursor_x = 0;
-                    self.cursor_y += 1;
-                    if self.cursor_y >= ROWS {
+                self.cursor.visible = false;
+                self.cursor.x += 1;
+                if self.cursor.x >= COLUMNS {
+                    self.cursor.x = 0;
+                    self.cursor.y += 1;
+                    if self.cursor.y >= ROWS {
                         self.scroll();
                     }
                 }
-                self.show_cursor();
             }
         }
+    }
+
+    /// Write a character using the font at the current cursor position and advance cursor
+    ///
+    /// # `ch` is a byte
+    pub fn write_char(&mut self, ch: u8) {
+        self.put_char(ch);
+        self.show_cursor();
     }
 
     /// Scrolls console by one line
@@ -123,8 +134,8 @@ impl Console {
                 self.bg,
             );
         }
-        self.cursor_x = 0;
-        self.cursor_y = ROWS - 1;
+        self.cursor.x = 0;
+        self.cursor.y = ROWS - 1;
     }
 
     // Clear the screen
@@ -135,15 +146,15 @@ impl Console {
     pub fn clear(&mut self) {
         self.buffer = [[b' '; COLUMNS]; ROWS];
         ramfb::clear(self.bg);
-        self.cursor_x = 0;
-        self.cursor_y = 0;
+        self.cursor.x = 0;
+        self.cursor.y = 0;
     }
 
     // Draw char at current position
     fn draw_char(&self, ch: u8) {
         Font::draw_char(
-            self.cursor_x * Font::width(),
-            self.cursor_y * Font::height(),
+            self.cursor.x * Font::width(),
+            self.cursor.y * Font::height(),
             ch,
             self.fg,
             self.bg,
@@ -151,33 +162,40 @@ impl Console {
     }
 
     // Hide the cursor at current position
-    pub fn hide_cursor(&self) {
-        Font::draw_char(
-            self.cursor_x * Font::width(),
-            self.cursor_y * Font::height(),
-            self.buffer[self.cursor_y][self.cursor_x],
-            self.fg,
-            self.bg,
-        );
+    pub fn hide_cursor(&mut self) {
+        if self.cursor.visible {
+            Font::draw_char(
+                self.cursor.x * Font::width(),
+                self.cursor.y * Font::height(),
+                self.buffer[self.cursor.y][self.cursor.x],
+                self.fg,
+                self.bg,
+            );
+            self.cursor.visible = false;
+        }
     }
 
     // Show the cursor at current position
-    pub fn show_cursor(&self) {
-        Font::draw_char(
-            self.cursor_x * Font::width(),
-            self.cursor_y * Font::height(),
-            self.buffer[self.cursor_y][self.cursor_x],
-            self.bg,
-            self.fg,
-        );
+    pub fn show_cursor(&mut self) {
+        if !self.cursor.visible {
+            Font::draw_char(
+                self.cursor.x * Font::width(),
+                self.cursor.y * Font::height(),
+                self.buffer[self.cursor.y][self.cursor.x],
+                self.bg,
+                self.fg,
+            );
+            self.cursor.visible = true;
+        };
     }
 }
 
 impl core::fmt::Write for Console {
     fn write_str(&mut self, s: &str) -> Result<(), core::fmt::Error> {
         for b in s.bytes() {
-            self.write_char(b);
-        }
+            self.put_char(b);
+        };
+        self.show_cursor();
         Ok(())
     }
 }
