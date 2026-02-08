@@ -15,7 +15,8 @@
 - **User/kernel separation** — applications run in RISC-V User mode
 - **Test-driven development** — each feature requires tests before commit
   - Tests run via `cargo test` (QEMU for hardware, host for pure logic)
-  - Commit workflow: implement → test → commit → update status → push
+  - Commit workflow: implement → test → **`./ci.sh`** → commit → update status → push
+  - **`./ci.sh` is mandatory before every commit.** This is not optional. Only skip with explicit human approval and a stated reason. Claude must never skip CI on its own judgement.
   - **Status tracking:** Update `.claude/project.md` "Current Status" section when completing phase milestones
 - **Rust 2024 Edition** — uses latest language features including:
   - New `unsafe` attribute syntax (`#[unsafe(no_mangle)]`, `#[unsafe(link_section)]`)
@@ -598,7 +599,7 @@ Complete this before Week 1 starts. This is setup, not development.
 
 #### Commit Checklist
 Before each commit:
-1. Run `./ci.sh` — all checks must pass
+1. **Run `./ci.sh` — all checks must pass.** This is a hard requirement, not a suggestion. Never commit without a passing CI run. The only exception is an explicit human override with a stated reason (e.g., CI infrastructure is broken). Claude must never decide to skip this step independently.
 2. If completing a phase milestone, update `.claude/project.md` "Current Status" section
 3. Commit with descriptive message
 4. Push to remote

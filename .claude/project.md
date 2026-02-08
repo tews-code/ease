@@ -65,6 +65,10 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 - FAT16 filesystem
 - Shell commands: `ls`, `cat`, `cd`, `hexdump`
 
+## Commit Rules
+
+**`./ci.sh` must pass before every commit. No exceptions without explicit human approval.** Claude must never skip CI on its own judgement — always run it before committing, and fix any failures before proceeding.
+
 ## Working Branch
 
 Use `develop` branch for day-to-day work. Merge to `main` when stable.
