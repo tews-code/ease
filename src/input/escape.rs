@@ -79,6 +79,10 @@ impl EscapeParser {
             }
         }
     }
+
+    pub fn reset(&mut self) {
+        self.state = State::Normal;
+    }
 }
 
 #[cfg(test)]
@@ -222,6 +226,24 @@ mod tests {
             p.parse(b'B'),
             ParseResult::Special(Key::ArrowDown)
         ));
+    }
+
+    #[test_case]
+    fn test_reset_after_partial_sequence() {
+        let mut p = EscapeParser::new();
+        p.parse(0x1B); // ESC → GotEscape, Pending
+        p.reset(); // Simulate timeout
+        // Parser is back to Normal — next byte is not consumed by escape logic
+        assert!(matches!(p.parse(b'a'), ParseResult::Byte(b'a')));
+    }
+
+    #[test_case]
+    fn test_reset_after_got_bracket() {
+        let mut p = EscapeParser::new();
+        p.parse(0x1B);
+        p.parse(b'['); // GotBracket, Pending
+        p.reset();
+        assert!(matches!(p.parse(b'a'), ParseResult::Byte(b'a')));
     }
 
     #[test_case]

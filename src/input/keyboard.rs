@@ -29,15 +29,27 @@ impl UartKeyboard {
 
 impl Keyboard for UartKeyboard {
     fn poll(&mut self) -> Option<KeyEvent> {
-        match self.reader.read_byte() {
-            None => None,
-            Some(byte) => {
-                match self.parser.parse(byte) {
-                    ParseResult::InvalidSequence => None,
-                    ParseResult::Special(special_key) => Some(KeyEvent::Special(special_key)),
-                    ParseResult::Byte(byte) => Some(KeyEvent::Byte(byte)),
-                    ParseResult::Pending => self.poll(), // Keep reading until we get a result
+        let byte = self.reader.read_byte()?; // If no byte return None immediately
+        match self.parser.parse(byte) {
+            ParseResult::Byte(b) => Some(KeyEvent::Byte(b)),
+            ParseResult::Special(k) => Some(KeyEvent::Special(k)),
+            ParseResult::InvalidSequence => None,
+            ParseResult::Pending => {
+                // Try at most 100 times to get next char in escape sequence - give UART time
+                for _ in 0..100 {
+                    if let Some(next) = self.reader.read_byte() {
+                        match self.parser.parse(next) {
+                            ParseResult::Byte(b) => return Some(KeyEvent::Byte(b)), // Fallen out of sequence with ordinary byte
+                            ParseResult::Special(k) => return Some(KeyEvent::Special(k)), // Fallen out of sequence with special char
+                            ParseResult::InvalidSequence => return None,
+                            ParseResult::Pending => continue, // still in sequence get next
+                        }
+                    }
+                    core::hint::spin_loop();
                 }
+                // Timed out - standalone Esc
+                self.parser.reset();
+                Some(KeyEvent::Special(Key::Esc))
             }
         }
     }
