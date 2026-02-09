@@ -34,6 +34,7 @@ extern crate alloc;
 mod arch;
 mod bench;
 mod drivers;
+mod fs;
 mod hal;
 mod input;
 mod io;
