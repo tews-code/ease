@@ -65,6 +65,7 @@ pub(super) struct VirtqUsed {
     ring: [VirtqUsedElem; VIRTQ_ENTRY_NUM],
 }
 
+// The Used Ring starts at a 4096-byte boundary relative to the virtqueue start
 // Page-aligned VirtqUsed
 #[repr(C, align(4096))]
 #[derive(Debug)]
@@ -146,8 +147,8 @@ pub(super) fn virtq_init(index: usize) -> Box<VirtioVirtq> {
     virtio_reg_write32(VIRTIO_REG_QUEUE_SEL, index as u32);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM as u32);
-    // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 0);
+    // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Align to 4096;
+    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 4096);
     // 7. Write the physical number of the first page of the queue to the QueuePFN register.
     virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, &*vq as *const _ as u32); // In our OS the virtual address matches the physical address
 
