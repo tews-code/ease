@@ -865,8 +865,7 @@ Interrupts are fundamental to the system design. Core 1 will be interrupt-driven
 - [x] Set up `mtvec` to point to trap vector
 - [x] Test with illegal instruction exception (verify handler runs)
 - [x] **Learn:** Why we save/restore registers (context preservation)
-- [ ] Implement `Mutex<T>` wrapper using `Spinlock` from Phase 3 (deferred)
-  - Disables interrupts while held (critical section)
+- [ ] ~~Implement `Mutex<T>`~~ — deferred to Phase 12A
 
 #### Week 8: Timer Interrupt
 - [x] **Learn:** CLINT timer (mtime, mtimecmp registers)
@@ -914,8 +913,6 @@ This phase provides **visual feedback**, making subsequent development more sati
 - [x] Implement: clear screen, set pixel
 
 #### Week 10: Display Abstraction & Text (deferred to Phase 6)
-- [ ] Create `Display` trait: `width()`, `height()`, `set_pixel(x, y, color)`, `clear(color)`
-- [ ] Implement `QemuDisplay` using ramfb/virtio-gpu
 - [ ] **Learn:** Bitmap fonts (each character is a small pixel grid)
 - [ ] Find or create 8×16 bitmap font (common size, good readability)
 - [ ] Implement `draw_char(x, y, char, color)` - copy font bitmap to framebuffer
@@ -1276,9 +1273,11 @@ Doom needs the largest stack due to C calling conventions and recursion in the r
 - [ ] **Learn:** Context switching theory (save/restore CPU state)
 - [ ] **Learn:** RISC-V register set for context save (x1-x31, mepc, mstatus)
 - [ ] Update linker script with thread stack pool (static allocation)
-- [ ] Implement interrupt-safe `SpinLock`:
-  - Must disable interrupts while held to prevent deadlock
-  - Save `mstatus.MIE` on lock, restore on unlock
+- [ ] Implement interrupt-disabling `Mutex<T>` (deferred from Phase 4):
+  - Wraps data with interrupt disable/restore around lock acquire/release
+  - Prevents deadlock when preemptive timer interrupt fires while lock is held
+  - Handle nesting correctly (only re-enable interrupts when outermost lock drops)
+  - Keep `SpinLock` as-is for data not accessed from interrupt context
   ```rust
   impl<T> SpinLock<T> {
       pub fn lock(&self) -> SpinLockGuard<T> {
@@ -1546,8 +1545,11 @@ This proves your OS works on real hardware. Everything from here adds peripheral
 - [ ] Implement refresh command (full refresh first)
 - [ ] Display test pattern (checkerboard or gradient)
 
-#### Week 42: Display Integration
-- [ ] Port `Display` trait to IT8951
+#### Week 42: Display Trait & Integration
+- [ ] **Design `Display` trait** with knowledge of both ramfb and IT8951 backends — consider pixel format differences (32-bit color vs grayscale), immediate vs batched rendering, partial refresh regions
+- [ ] Implement `Display` for ramfb (retrofit existing `FrameBuffer`)
+- [ ] Implement `Display` for IT8951
+- [ ] Refactor `Console` and `Font` to use `Display` trait instead of concrete `FrameBuffer`
 - [ ] Implement partial refresh for faster updates
 - [ ] Test text console on e-ink
 - [ ] Test Doom rendering (accept low fps and ghosting)
