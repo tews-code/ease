@@ -1,7 +1,6 @@
 //! Keyboard event reader
 
 use crate::hal::Reader;
-use crate::hal::qemu_virt::UartReader;
 use crate::input::escape::{EscapeParser, Key, ParseResult};
 
 pub enum KeyEvent {
@@ -13,21 +12,21 @@ pub trait Keyboard {
     fn poll(&mut self) -> Option<KeyEvent>;
 }
 
-pub struct UartKeyboard {
-    reader: UartReader,
+pub struct KeyboardInput<R: Reader> {
+    reader: R,
     parser: EscapeParser,
 }
 
-impl UartKeyboard {
-    pub const fn new() -> Self {
+impl<R: Reader> KeyboardInput<R> {
+    pub const fn new(reader: R) -> Self {
         Self {
-            reader: UartReader,
+            reader,
             parser: EscapeParser::new(),
         }
     }
 }
 
-impl Keyboard for UartKeyboard {
+impl<R: Reader> Keyboard for KeyboardInput<R> {
     fn poll(&mut self) -> Option<KeyEvent> {
         let byte = self.reader.read_byte()?; // If no byte return None immediately
         match self.parser.parse(byte) {

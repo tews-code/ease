@@ -5,8 +5,9 @@
 pub mod commands;
 pub mod line_editor;
 
+use crate::drivers::uart::UartReader;
 use crate::hal::ascii;
-use crate::input::keyboard::{Keyboard, UartKeyboard};
+use crate::input::keyboard::{Keyboard, KeyboardInput};
 use crate::shell::line_editor::LineDisplayAction;
 use crate::{print, println};
 
@@ -15,14 +16,14 @@ use line_editor::LineEditor;
 static PROMPT: &str = "ease> ";
 
 pub struct Shell {
-    keyboard: UartKeyboard,
+    keyboard: KeyboardInput<UartReader>,
     line_editor: LineEditor,
 }
 
 impl Shell {
     pub const fn new() -> Self {
         Self {
-            keyboard: UartKeyboard::new(),
+            keyboard: KeyboardInput::new(UartReader),
             line_editor: LineEditor::new(),
         }
     }

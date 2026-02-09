@@ -1,4 +1,4 @@
-//! QEMU Implementation
+//! QEMU UART Implementation
 //!
 //! Using QEMU virt board
 
@@ -10,7 +10,7 @@ const UART_ADDRESS: usize = 0x10000000;
 /// UART writer for QEMU
 pub struct UartWriter;
 
-impl super::Writer for UartWriter {
+impl crate::hal::Writer for UartWriter {
     fn write_byte(&self, byte: u8) {
         unsafe {
             write_volatile(UART_ADDRESS as *mut u8, byte);
@@ -23,7 +23,7 @@ impl super::Writer for UartWriter {
 
 impl core::fmt::Write for UartWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        super::Writer::write_str(self, s);
+        crate::hal::Writer::write_str(self, s);
         Ok(())
     }
 }
@@ -31,7 +31,7 @@ impl core::fmt::Write for UartWriter {
 /// UART reader for QEMU
 pub struct UartReader;
 
-impl super::Reader for UartReader {
+impl crate::hal::Reader for UartReader {
     fn read_byte(&self) -> Option<u8> {
         const LSR: usize = 5;
         const BYTE_READY: u8 = 1;

@@ -3,7 +3,7 @@
 //! Provides traits and implementations for byte-level I/O.
 //! In test mode, output is captured to a buffer for verification.
 
-pub use crate::hal::qemu_virt::UartWriter;
+pub use crate::drivers::uart::UartWriter;
 
 /// Print to Console and UART
 ///

@@ -13,8 +13,6 @@ pub mod ascii {
     pub const DEL: u8 = 0x7F;
 }
 
-pub mod qemu_virt;
-
 /// Trait for byte-level output
 ///
 /// Implemenation can write to UART or capture output for testing
