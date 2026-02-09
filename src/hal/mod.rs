@@ -32,3 +32,18 @@ pub trait Writer {
 pub trait Reader {
     fn read_byte(&self) -> Option<u8>;
 }
+
+pub const BLOCK_SIZE: usize = 512;
+
+/// Trait for block devices
+#[allow(dead_code)]
+pub trait BlockDevice {
+    /// Block device errors
+    type BlkError;
+
+    fn read_block(&self, block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Self::BlkError>;
+
+    fn write_block(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), Self::BlkError>;
+
+    fn block_count(&self) -> u32;
+}
