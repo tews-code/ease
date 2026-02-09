@@ -4,6 +4,11 @@
 
 set -e  # Exit immediately on any failure
 
+echo ""
+echo "=== Disk Image ==="
+./scripts/mkdisk.sh
+
+
 echo "=== Format Check ==="
 cargo fmt --check
 

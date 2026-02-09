@@ -69,6 +69,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
+    drivers::virtio::virtio_blk_init();
     let fb = drivers::ramfb::FrameBuffer::init();
     CONSOLE.lock().attach_fb(fb);
 
@@ -86,6 +87,7 @@ extern "C" fn main() -> ! {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
+    drivers::virtio::virtio_blk_init();
     let fb = drivers::ramfb::FrameBuffer::init();
     CONSOLE.lock().attach_fb(fb);
 
