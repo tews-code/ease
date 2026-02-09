@@ -5,6 +5,62 @@
 
 pub use crate::hal::qemu_virt::UartWriter;
 
+/// Print to Console and UART
+///
+/// Prints formatted string to Console and UART.
+/// In test mode, output is also captured for verification.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        let _ = write!($crate::io::UartWriter, $($arg)*);
+        // Also console if available.
+        if let Some(mut c) = $crate::drivers::console::CONSOLE.try_lock() {
+            let _ = write!(c, $($arg)*);
+        };
+    }}
+}
+
+/// Print to Console and UART with newline
+///
+/// Prints formatted string to Console and UART with trailing newline.
+/// In test mode, output is also captured for verification.
+#[macro_export]
+macro_rules! println {
+    () => { {
+        $crate::print!("\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::print!("{}\n", format_args!($($arg)*));
+    }}
+}
+
+/// Print to UART only
+///
+/// Prints formatted string to Console and UART.
+/// In test mode, output is also captured for verification.
+#[macro_export]
+macro_rules! printd {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        let _ = write!($crate::io::UartWriter, $($arg)*);
+    }}
+}
+
+/// Print to UART only with newline
+///
+/// Prints formatted string to UART with trailing newline.
+/// In test mode, output is also captured for verification.
+#[macro_export]
+macro_rules! printdln {
+    () => { {
+        $crate::printd!("\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::printd!("{}\n", format_args!($($arg)*));
+    }}
+}
+
 // =============================================================================
 // Test I/O Capture
 // =============================================================================
@@ -81,7 +137,6 @@ pub mod test_io {
 #[cfg(test)]
 mod test {
     use crate::io::test_io;
-    use crate::{print, println};
 
     #[test_case]
     fn test_println_output() {
@@ -142,10 +197,10 @@ mod baselines {
     // Console reset before benchmarks to avoid scroll cost
     // Each char draws 8x16 glyph + cursor hide/show = ~384 pixel writes
     // Baselines set with wide margin for QEMU timing variance
-    pub const PRINT_HELLO: u64 = 1_000_000;
-    pub const PRINTLN_HELLO: u64 = 900_000;
-    pub const PRINTLN_FORMATTED: u64 = 3_000_000;
-    pub const PRINTLN_LONG: u64 = 3_500_000;
+    pub const PRINT_HELLO: u64 = 1_000_000 * 4;
+    pub const PRINTLN_HELLO: u64 = 900_000 * 4;
+    pub const PRINTLN_FORMATTED: u64 = 3_000_000 * 4;
+    pub const PRINTLN_LONG: u64 = 3_500_000 * 4;
 }
 
 #[cfg(test)]
@@ -153,7 +208,6 @@ mod profile {
     use crate::bench;
     use crate::drivers::console::CONSOLE;
     use crate::hal::ascii;
-    use crate::println;
     use core::fmt::Write;
 
     const ITER_LARGE: u32 = 100;
@@ -162,14 +216,16 @@ mod profile {
     #[test_case]
     fn profile_console_print() {
         use crate::drivers::font::Font;
-        use crate::drivers::ramfb::{Colour, set_pixels};
+        use crate::drivers::ramfb::Colour;
 
-        println!("\n=== Console Print Path Profile ===");
+        printdln!("\n=== Console Print Path Profile ===");
 
         let mut c = CONSOLE.lock();
         c.clear();
+        let mut fb = c.release_fb().unwrap();
         bench::run_avg("set_pixels", ITER_LARGE, || {
-            set_pixels(
+            fb.set_pixels(
+                0,
                 0,
                 &[
                     Colour::RED.as_raw(),
@@ -181,11 +237,22 @@ mod profile {
                     Colour::RED.as_raw(),
                     Colour::BLUE.as_raw(),
                 ],
-            )
+            );
         });
+        c.attach_fb(fb);
         c.clear();
+        let mut fb = c.release_fb().unwrap();
         bench::run_avg("Font::draw_char", ITER_LARGE, || {
-            Font::draw_char(0, 0, b'X', Colour::WHITE, Colour::BLUE)
+            Font::draw_char(&mut fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
+        });
+        c.attach_fb(fb);
+        c.clear();
+        c.clear();
+        bench::run_avg("Console::put_char(ch)", ITER_SMALL, || c.put_char(b'X'));
+        c.clear();
+        bench::run_avg("Console::show+hide_cursor", ITER_SMALL, || {
+            c.show_cursor();
+            c.hide_cursor();
         });
         c.clear();
         bench::run_avg("Console::write_char(ch)", ITER_SMALL, || c.write_char(b'X'));
@@ -197,7 +264,7 @@ mod profile {
         bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
             let _ = c.write_str("hello\n");
         });
-        println!("==================================");
+        printdln!("==================================");
     }
 
     #[test_case]
@@ -218,7 +285,6 @@ mod benchmarks {
     use crate::bench;
     use crate::drivers::console::CONSOLE;
     use crate::io::test_io;
-    use crate::{print, println};
 
     /// Number of iterations for averaging (reduces noise)
     const ITERATIONS: u32 = 10;

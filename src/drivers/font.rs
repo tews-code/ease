@@ -2,7 +2,7 @@
 
 use core::ops::Index;
 
-use crate::drivers::ramfb::{self, Colour};
+use crate::drivers::ramfb::{Colour, FrameBuffer};
 
 pub struct Font {
     data: &'static [u8],
@@ -30,17 +30,16 @@ impl Font {
     /// Draw a glyph in VGA 8x16 font. (x, y) are coordinates of top left of the glyph
     ///
     /// # ch is a byte
-    pub fn draw_char(x: usize, y: usize, ch: u8, fg: Colour, bg: Colour) {
-        if (x <= ramfb::width() - Self::WIDTH) && (y <= ramfb::height() - Self::HEIGHT) {
+    pub fn draw_char(fb: &mut FrameBuffer, x: usize, y: usize, ch: u8, fg: Colour, bg: Colour) {
+        if x + Self::WIDTH <= fb.width() && (y <= fb.height() - Self::HEIGHT) {
             let glyph_data = &FONT[ch];
             for (row, byte) in glyph_data.iter().enumerate() {
-                let row_offset = (y + row) * ramfb::width();
                 let mut pixels = [0u32; Self::WIDTH];
                 for (column, pixel) in pixels.iter_mut().enumerate() {
                     let bit_set = (byte >> (7 - column)) & 1 != 0;
                     *pixel = if bit_set { fg.as_raw() } else { bg.as_raw() }
                 }
-                ramfb::set_pixels(row_offset + x, &pixels);
+                fb.set_pixels(x, y + row, &pixels);
             }
         }
     }
@@ -49,9 +48,9 @@ impl Font {
     ///
     /// # Each element of `s` is treated as a byte
     #[expect(dead_code)]
-    pub fn draw_string(x: usize, y: usize, s: &[u8], fg: Colour, bg: Colour) {
+    pub fn draw_string(fb: &mut FrameBuffer, x: usize, y: usize, s: &[u8], fg: Colour, bg: Colour) {
         for (i, b) in s.iter().enumerate() {
-            Self::draw_char(x + i * Self::WIDTH, y, *b, fg, bg);
+            Self::draw_char(fb, x + i * Self::WIDTH, y, *b, fg, bg);
         }
     }
 

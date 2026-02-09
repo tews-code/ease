@@ -4,7 +4,7 @@
 
 use crate::arch::timer::sleep_ms;
 use crate::drivers::font::Font;
-use crate::drivers::ramfb::{self, Colour};
+use crate::drivers::ramfb::{Colour, FrameBuffer};
 use crate::hal::ascii;
 use crate::kernel::sync::SpinLock;
 
@@ -21,6 +21,7 @@ struct Cursor {
 }
 
 pub struct Console {
+    fb: Option<FrameBuffer>,
     buffer: [[u8; COLUMNS]; ROWS],
     cursor: Cursor,
     fg: Colour,
@@ -30,6 +31,7 @@ pub struct Console {
 impl Console {
     pub const fn new() -> Self {
         Self {
+            fb: None,
             buffer: [[b' '; COLUMNS]; ROWS],
             cursor: Cursor {
                 x: 0,
@@ -39,6 +41,17 @@ impl Console {
             fg: Colour::WHITE,
             bg: Colour::BLACK,
         }
+    }
+
+    /// Release the framebuffer to other user
+    #[allow(dead_code)]
+    pub fn release_fb(&mut self) -> Option<FrameBuffer> {
+        self.fb.take()
+    }
+
+    /// Attach a framebuffer passed from other user
+    pub fn attach_fb(&mut self, fb: FrameBuffer) {
+        self.fb = Some(fb)
     }
 
     /// Write a character using the font at the current cursor position but do not advance cursor
@@ -83,9 +96,9 @@ impl Console {
             }
             ascii::LF => {
                 self.hide_cursor();
-                self.cursor.x = 0;
                 if self.cursor.y < ROWS - 1 {
                     self.cursor.y += 1;
+                    self.cursor.x = 0;
                 } else {
                     self.scroll();
                 }
@@ -94,6 +107,7 @@ impl Console {
                 // Writeable char
                 self.buffer[self.cursor.y][self.cursor.x] = ch; // Draw char overwriting cursor
                 self.draw_char(ch);
+                // Drawing a char means cursor is now hidden
                 self.cursor.visible = false;
                 self.cursor.x += 1;
                 if self.cursor.x >= COLUMNS {
@@ -126,9 +140,12 @@ impl Console {
             self.buffer[row] = self.buffer[row + 1];
         }
         self.buffer[ROWS - 1] = [b' '; COLUMNS];
-        ramfb::scroll(Font::height(), self.bg);
         self.cursor.x = 0;
         self.cursor.y = ROWS - 1;
+
+        if let Some(ref mut fb) = self.fb {
+            fb.scroll(Font::height(), self.bg);
+        }
     }
 
     // Clear the screen
@@ -138,32 +155,40 @@ impl Console {
     //     - Reset cursor to (0, 0)
     pub fn clear(&mut self) {
         self.buffer = [[b' '; COLUMNS]; ROWS];
-        ramfb::clear(self.bg);
         self.cursor.x = 0;
         self.cursor.y = 0;
+        if let Some(ref mut fb) = self.fb {
+            fb.fill(self.bg);
+        }
     }
 
     // Draw char at current position
-    fn draw_char(&self, ch: u8) {
-        Font::draw_char(
-            self.cursor.x * Font::width(),
-            self.cursor.y * Font::height(),
-            ch,
-            self.fg,
-            self.bg,
-        );
+    fn draw_char(&mut self, ch: u8) {
+        if let Some(ref mut fb) = self.fb {
+            Font::draw_char(
+                fb,
+                self.cursor.x * Font::width(),
+                self.cursor.y * Font::height(),
+                ch,
+                self.fg,
+                self.bg,
+            );
+        }
     }
 
     // Hide the cursor at current position
     pub fn hide_cursor(&mut self) {
         if self.cursor.visible {
-            Font::draw_char(
-                self.cursor.x * Font::width(),
-                self.cursor.y * Font::height(),
-                self.buffer[self.cursor.y][self.cursor.x],
-                self.fg,
-                self.bg,
-            );
+            if let Some(ref mut fb) = self.fb {
+                Font::draw_char(
+                    fb,
+                    self.cursor.x * Font::width(),
+                    self.cursor.y * Font::height(),
+                    self.buffer[self.cursor.y][self.cursor.x],
+                    self.fg,
+                    self.bg,
+                );
+            }
             self.cursor.visible = false;
         }
     }
@@ -171,13 +196,16 @@ impl Console {
     // Show the cursor at current position
     pub fn show_cursor(&mut self) {
         if !self.cursor.visible {
-            Font::draw_char(
-                self.cursor.x * Font::width(),
-                self.cursor.y * Font::height(),
-                self.buffer[self.cursor.y][self.cursor.x],
-                self.bg,
-                self.fg,
-            );
+            if let Some(ref mut fb) = self.fb {
+                Font::draw_char(
+                    fb,
+                    self.cursor.x * Font::width(),
+                    self.cursor.y * Font::height(),
+                    self.buffer[self.cursor.y][self.cursor.x],
+                    self.bg,
+                    self.fg,
+                );
+            }
             self.cursor.visible = true;
         };
     }

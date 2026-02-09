@@ -42,7 +42,7 @@ pub fn measure<F: FnOnce()>(f: F) -> u64 {
 #[expect(dead_code)]
 pub fn run<F: FnOnce()>(name: &str, f: F) {
     let elapsed = measure(f);
-    crate::println!("  {}: {} cycles", name, elapsed);
+    crate::printdln!("  {}: {} cycles", name, elapsed);
 }
 
 /// Run a benchmark multiple times and print average
@@ -57,7 +57,7 @@ pub fn run_avg<F: FnMut()>(name: &str, iterations: u32, mut f: F) {
         total += measure(|| f());
     }
     let avg = total / iterations as u64;
-    crate::println!("  {}: {} cycles (avg of {})", name, avg, iterations);
+    crate::printdln!("  {}: {} cycles (avg of {})", name, avg, iterations);
 }
 
 /// Default tolerance for regression detection (20%)
@@ -97,7 +97,7 @@ pub fn check_regression<F: Fn()>(
 
     if avg > max_allowed {
         let regression_pct = (avg - baseline) * 100 / baseline;
-        crate::print!(
+        crate::printd!(
             "  REGRESSION {}: {} cycles (baseline: {}, +{}%)",
             name,
             avg,
@@ -107,7 +107,7 @@ pub fn check_regression<F: Fn()>(
         panic!("Performance regression detected");
     } else if avg > baseline {
         let over_pct = (avg - baseline) * 100 / baseline;
-        crate::print!(
+        crate::printd!(
             "  OK {}: {} cycles (baseline: {}, +{}%)",
             name,
             avg,
@@ -116,7 +116,7 @@ pub fn check_regression<F: Fn()>(
         );
     } else {
         let under_pct = (baseline - avg) * 100 / baseline;
-        crate::print!(
+        crate::printd!(
             "  OK {}: {} cycles (baseline: {}, -{}%)",
             name,
             avg,

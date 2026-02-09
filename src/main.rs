@@ -28,6 +28,7 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
+use crate::drivers::console::CONSOLE;
 extern crate alloc;
 
 mod arch;
@@ -59,36 +60,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     qemu::exit_failure();
 }
 
-/// Print to UART
-///
-/// Prints formatted string to UART.
-/// In test mode, output is also captured for verification.
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = write!($crate::io::UartWriter, $($arg)*);
-        // Also console if available
-        if let Some(mut c) = $crate::drivers::console::CONSOLE.try_lock() {
-            let _ = write!(c, $($arg)*);
-        };
-    }}
-}
-
-/// Print to UART with newline
-///
-/// Prints formatted string to UART with trailing newline.
-/// In test mode, output is also captured for verification.
-#[macro_export]
-macro_rules! println {
-    () => { {
-        $crate::print!("\n");
-        }};
-    ($($arg:tt)*) => {{
-        $crate::print!("{}\n", format_args!($($arg)*));
-        }}
-}
-
 // =============================================================================
 // Entry Points
 // =============================================================================
@@ -98,8 +69,8 @@ macro_rules! println {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
-    drivers::ramfb::init();
-    drivers::ramfb::clear(drivers::ramfb::Colour::BLUE); // Blue screen
+    let fb = drivers::ramfb::FrameBuffer::init();
+    CONSOLE.lock().attach_fb(fb);
 
     // Start the shell
     let _shell = shell::Shell::new();
@@ -115,8 +86,8 @@ extern "C" fn main() -> ! {
 extern "C" fn main() -> ! {
     kernel::alloc::init();
     arch::timer::init();
-    drivers::ramfb::init();
-    drivers::ramfb::clear(drivers::ramfb::Colour::BLUE); // Blue screen
+    let fb = drivers::ramfb::FrameBuffer::init();
+    CONSOLE.lock().attach_fb(fb);
 
     print!("Hello ");
     println!("from EASE!");
