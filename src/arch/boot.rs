@@ -10,6 +10,7 @@ const MSTATUS_MIE: u32 = 0x8;
 // # Safety
 // Symbols are always defined in the linker script and hence aligned
 unsafe extern "C" {
+    static __stack_top: u8;
     static __bss_start: u8;
     static __bss_end: u8;
 }
@@ -19,7 +20,7 @@ unsafe extern "C" {
 #[unsafe(no_mangle)]
 extern "C" fn _start() -> ! {
     naked_asm!(
-        "li sp, 0x80100000",
+        "la sp, {stack_top}",
 
         // Zero BSS segment
         "la t0, {bss_start}",
@@ -40,6 +41,7 @@ extern "C" fn _start() -> ! {
 
         "j main",
         "unimp",
+        stack_top = sym __stack_top,
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
         mstatus_mie = const MSTATUS_MIE,

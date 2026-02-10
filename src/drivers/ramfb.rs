@@ -3,6 +3,10 @@
 //! Configures QEMU's ramfb device to display a framebuffer.
 //! The framebuffer is a region of RAM that QEMU reads and displays.
 
+unsafe extern "C" {
+    static __fb_addr: u8;
+}
+
 pub struct FrameBuffer;
 
 impl FrameBuffer {
@@ -11,11 +15,12 @@ impl FrameBuffer {
     const HEIGHT: usize = 480;
     const STRIDE: usize = Self::WIDTH * 4; // 4 bytes per pixel
 
-    // Framebuffer address (after stack at 0x80100000)
+    // Framebuffer address (after stack at 0x80100000) must match linker
     const FB_ADDR: usize = 0x80200000;
 
     // Initialize the framebuffer
     pub fn init() -> Self {
+        debug_assert_eq!(Self::FB_ADDR, &raw const __fb_addr as usize);
         // Configuration sent to QEMU (all fields big-endian)
         #[repr(C, packed)]
         struct RamfbConfig {
