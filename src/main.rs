@@ -66,6 +66,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // =============================================================================
 
 fn kernel_init() {
+    kernel::stack_guard::init();
     kernel::alloc::init();
     arch::timer::init();
     drivers::virtio::virtio_blk_init();

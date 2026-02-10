@@ -30,6 +30,11 @@ SECTIONS {
     __heap_start = .;
     . = . + 64K;
     __heap_end = .;
+
+    /* Add stack guard with 4 bytes reserved */
+    __stack_guard = .;
+    . = . + 4;
+
 }
 
 ASSERT(__heap_end <= __stack_top, "heap overlaps stack region")

@@ -2,6 +2,8 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::kernel::stack_guard;
+
 const CLINT_BASE: usize = 0x2000000;
 const MTIME: usize = CLINT_BASE + 0xBFF8;
 const MTIMECMP: usize = CLINT_BASE + 0x4000;
@@ -49,6 +51,9 @@ pub fn init() {
 
 /// Handle interrupt called by trap vector
 pub fn handle_interrupt() {
+    if !stack_guard::check() {
+        panic!("Stack has grown into heap");
+    }
     TICKS.fetch_add(1, Ordering::Relaxed);
     set_mtimecmp(get_mtime() + TIMER_INTERVAL);
 }
