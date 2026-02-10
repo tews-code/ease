@@ -46,15 +46,9 @@ Resolved in `896f13b`. `print!` macro now uses `lock()` instead of `try_lock()`,
 
 ---
 
-## 7. Shell Busy-Polls With No wfi [LOW]
+## ~~7. Shell Busy-Polls With No wfi [LOW]~~ DONE
 
-**Problem**: The shell inner loop tight-polls `keyboard.poll()` with no backoff, burning 100% CPU.
-
-**Files**: `src/shell/mod.rs`
-
-**Fix**: Add `core::arch::asm!("wfi")` between poll attempts. The timer interrupt already fires every 1ms, giving 1ms polling granularity with near-zero idle power.
-
-**When**: Before real hardware bring-up.
+Resolved in `d3c9e50`. Added `wfi` in the `else` branch of the shell poll loop. CPU sleeps until the next interrupt (1ms timer tick) instead of busy-polling.
 
 ---
 
