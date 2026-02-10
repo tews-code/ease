@@ -80,7 +80,9 @@ The ASSERT prevents heap from overlapping the stack *region*, but there's no gua
 
 ---
 
-## 6. `print!` Macro Formats Twice (Minor/Design)
+## 6. `print!` Macro Formats Twice (Minor/Design) — DEFERRED
+
+Cost is negligible vs framebuffer rendering. No clean fix that preserves lock-free UART.
 
 **File:** `src/io.rs:13-20`
 
