@@ -68,6 +68,14 @@ pub fn sleep_ms(ms: usize) {
     }
 }
 
+/// Busy wait for given ms
+pub fn busy_wait_ms(ms: usize) {
+    let count_start = get_mtime();
+    while get_mtime() - count_start < ms as u64 * TIMER_INTERVAL {
+        core::hint::spin_loop();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

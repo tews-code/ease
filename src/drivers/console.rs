@@ -2,7 +2,7 @@
 //!
 //! Classic 80 columns x 30 rows dumb terminal
 
-use crate::arch::timer::sleep_ms;
+use crate::arch::timer::busy_wait_ms;
 use crate::drivers::font::Font;
 use crate::drivers::ramfb::{Colour, FrameBuffer};
 use crate::hal::ascii;
@@ -64,7 +64,7 @@ impl Console {
                 // Flash an asterisc at the cursor
                 for _ in 0..2 {
                     self.draw_char(b'*');
-                    sleep_ms(25);
+                    busy_wait_ms(25);
                     self.draw_char(b' ');
                 }
                 self.draw_char(current_ch);
