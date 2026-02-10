@@ -202,6 +202,7 @@ See `docs/COMPLETED_PHASES.md` for detailed checklists.
   - `DG_GetKey()` — map key events to Doom key codes
 - [ ] Load WAD from filesystem (or embed in binary)
 - [ ] Add `doom` shell command
+- [ ] Review shell history memory (~8.5KB stack) — consider heap allocation if allocator supports dealloc by this phase
 
 **Milestone 10:** Doom runs, displays, and accepts input
 
