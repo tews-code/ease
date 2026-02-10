@@ -2,6 +2,9 @@
 //!
 //! Defines HAL traits. Hardware-specific implementations are in submodules
 
+pub const BLOCK_SIZE: usize = 512;
+pub const PAGE_SIZE: usize = 4096;
+
 // ASCII chars that are used for console and serial control
 pub mod ascii {
     pub const BELL: u8 = 0x07;
@@ -32,8 +35,6 @@ pub trait Writer {
 pub trait Reader {
     fn read_byte(&self) -> Option<u8>;
 }
-
-pub const BLOCK_SIZE: usize = 512;
 
 /// Trait for block devices
 #[allow(dead_code)]

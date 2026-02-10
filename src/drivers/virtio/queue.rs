@@ -3,6 +3,9 @@
 use alloc::boxed::Box;
 use core::ptr;
 
+use crate::hal::PAGE_SIZE;
+
+const VIRTIO_REG_GUEST_PAGE_SIZE: u32 = 0x28;
 pub(super) const VIRTQ_ENTRY_NUM: usize = 16;
 pub(super) const VIRTIO_DEVICE_BLK: u32 = 2;
 pub(super) const VIRTIO_BLK_PADDR: u32 = 0x10001000;
@@ -162,9 +165,16 @@ pub(super) fn virtq_init(index: usize) -> Box<VirtioVirtq> {
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM as u32);
     // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Align to 4096;
-    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, 4096);
-    // 7. Write the physical number of the first page of the queue to the QueuePFN register.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, &*vq as *const _ as u32); // In our OS the virtual address matches the physical address
+    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE as u32);
+    // 7. Notify the device about the guest page size
+    virtio_reg_write32(VIRTIO_REG_GUEST_PAGE_SIZE, PAGE_SIZE as u32);
+    // 8. Write the physical number of the first page of the queue to the QueuePFN register.
+    let addr = &*vq as *const _ as u32;
+    debug_assert!(
+        addr.is_multiple_of(PAGE_SIZE as u32),
+        "virtqueue not page-aligned"
+    );
+    virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, addr / PAGE_SIZE as u32); // In our OS the virtual address matches the physical address
 
     vq
 }
