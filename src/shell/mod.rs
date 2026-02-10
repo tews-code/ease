@@ -42,6 +42,11 @@ impl Shell {
                         Self::execute(line);
                         break;
                     }
+                } else {
+                    // Sleep until next tick
+                    unsafe {
+                        core::arch::asm!("wfi");
+                    }
                 }
             }
         }
