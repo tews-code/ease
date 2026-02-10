@@ -98,7 +98,9 @@ There's also a consistency gap: UART output and Console output are not atomic. B
 
 ---
 
-## 7. Virtio: Fixed Descriptor Index (Minor, Limits Future)
+## 7. Virtio: Fixed Descriptor Index (Minor, Limits Future) — DEFERRED
+
+Only relevant with concurrent I/O (Phase 12A+ multi-tasking).
 
 **File:** `src/drivers/virtio/mod.rs:109-141`
 
