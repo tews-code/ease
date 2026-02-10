@@ -1,6 +1,6 @@
 # Critical Architectural Review of EASE
 
-## 1. Panic-While-Locked Deadlock (Severe)
+## 1. ~~Panic-While-Locked Deadlock (Severe)~~ DONE
 
 **Files:** `src/io.rs:13-20`, `src/main.rs:47-53`, `src/kernel/sync.rs`
 
@@ -19,7 +19,7 @@ The panic handler should write directly to UART (volatile writes, no lock needed
 
 ---
 
-## 2. Disk I/O Freezes the Entire System (Significant)
+## 2. ~~Disk I/O Freezes the Entire System (Significant)~~ DONE
 
 **File:** `src/drivers/virtio/mod.rs:149-181`
 
