@@ -28,15 +28,9 @@ Resolved in `860faed`. Linker symbols (`__stack_top`, `__fb_addr`, `__fb_size`) 
 
 ---
 
-## 4. FAT16 Not Connected to BlockDevice Trait [MEDIUM]
+## ~~4. FAT16 Not Connected to BlockDevice Trait [MEDIUM]~~ PARTIALLY DONE
 
-**Problem**: The BPB parser calls `crate::drivers::virtio::read_disk()` directly in tests. The filesystem layer has no reference to a `BlockDevice`. The `BlockDevice` trait is implemented on `VirtioBlk` but never used polymorphically — `VirtioBlk` is a unit struct and callers use free functions.
-
-**Files**: `src/fs/fat16.rs`, `src/hal/mod.rs`, `src/drivers/virtio/mod.rs`
-
-**Fix**: Design decision needed for Phase 7: the FS layer should accept a `&dyn BlockDevice` (or generic `B: BlockDevice`) so it can be tested against mock block devices and isn't hardwired to virtio.
-
-**When**: Phase 7 design phase.
+Tests migrated to use `BlockDevice` trait in `ba94748`. Decision made: `Fat16` will be generic over `B: BlockDevice` (zero-cost, enables mock block devices for host tests). Will be fully resolved when `Fat16` struct is implemented in Phase 7 Step 5.
 
 ---
 
