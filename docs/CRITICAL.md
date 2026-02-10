@@ -22,19 +22,9 @@ Resolved in `ba94748`. Three globals consolidated into `BLK: SpinLock<Option<Vir
 
 ---
 
-## 3. Memory Layout Has No Collision Detection [MEDIUM]
+## ~~3. Memory Layout Has No Collision Detection [MEDIUM]~~ DONE
 
-**Problem**: Stack (`0x80100000` hardcoded in `boot.rs`), heap (placed by linker after `.bss`), and framebuffer (`0x80200000` hardcoded in `ramfb.rs`) are not validated against each other. If `.bss` + heap grows past the stack base, or the stack grows into heap, corruption occurs silently.
-
-**Files**: `memory-qemu.x`, `src/arch/boot.rs`, `src/drivers/ramfb.rs`
-
-**Fix**: Add linker script assertions:
-```
-ASSERT(__heap_end <= 0x80100000, "heap overlaps stack")
-```
-Consider defining stack base and framebuffer address as linker symbols rather than hardcoded constants in Rust source, so there is a single source of truth.
-
-**When**: Before the kernel grows significantly.
+Resolved in `860faed`. Linker symbols (`__stack_top`, `__fb_addr`, `__fb_size`) defined in `memory-qemu.x` with three `ASSERT` statements. `boot.rs` loads SP from linker symbol. `ramfb.rs` validates `FB_ADDR` matches linker symbol via `debug_assert`. Runtime stack overflow detection deferred to Phase 12A (PMP guard pages).
 
 ---
 
