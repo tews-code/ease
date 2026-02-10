@@ -29,6 +29,20 @@ pub(super) const VIRTQ_DESC_F_WRITE: u32 = 2;
 #[expect(dead_code)]
 pub(super) const VIRTQ_AVAIL_F_NO_INTERRUPT: u32 = 1;
 
+pub(super) struct VirtqToken {
+    used_index: *const u16,
+    last_used_index: u16,
+}
+
+impl VirtqToken {
+    pub fn is_complete(&self) -> bool {
+        unsafe {
+            // Safety: Caller must ensure virtio queue remains in memory (bump allocator)
+            core::ptr::read_volatile(self.used_index) == self.last_used_index
+        }
+    }
+}
+
 // Virtqueue Descriptor area entry.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug)]
@@ -156,7 +170,7 @@ pub(super) fn virtq_init(index: usize) -> Box<VirtioVirtq> {
 }
 
 // Notifies the device that there is a new request. `desc_index` is the index of the head descriptor of the new request
-pub(super) fn virtq_kick(vq: &mut VirtioVirtq, desc_index: u16) {
+pub(super) fn virtq_kick(vq: &mut VirtioVirtq, desc_index: u16) -> VirtqToken {
     let index = vq.avail.index as usize % VIRTQ_ENTRY_NUM;
     vq.avail.ring[index] = desc_index;
     vq.avail.index += 1;
@@ -165,6 +179,11 @@ pub(super) fn virtq_kick(vq: &mut VirtioVirtq, desc_index: u16) {
 
     virtio_reg_write32(VIRTIO_REG_QUEUE_NOTIFY, vq.queue_index.into()); // converting `u16` to `u32` cannot fail
     vq.last_used_index += 1;
+
+    VirtqToken {
+        used_index: vq.used_index,
+        last_used_index: vq.last_used_index,
+    }
 }
 
 // Returns whether there are requests being processed by the device.

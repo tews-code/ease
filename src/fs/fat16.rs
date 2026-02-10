@@ -155,7 +155,7 @@ mod test {
     fn parse_disk_image_bpb() {
         // Read block 0 from the real disk image via virtio
         let mut buf = [0u8; BLOCK_SIZE];
-        crate::drivers::virtio::VirtioBlk
+        crate::drivers::virtio::VirtioBlkDev
             .read_block(0, &mut buf)
             .unwrap();
         let bpb = Bpb::parse(&buf).unwrap();

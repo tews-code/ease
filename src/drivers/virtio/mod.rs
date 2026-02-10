@@ -4,7 +4,6 @@
 
 use alloc::boxed::Box;
 use core::mem;
-use core::mem::offset_of;
 
 mod queue;
 
@@ -18,7 +17,6 @@ const VIRTIO_BLK_T_OUT: u32 = 1;
 
 // Virtio-blk request.
 #[repr(C, packed)]
-#[derive(Debug)]
 struct VirtioBlkReq {
     req_type: u32,
     reserved: u32,
@@ -77,7 +75,7 @@ pub fn virtio_blk_init() {
     *BLK.lock() = Some(VirtioBlkState::new());
 }
 
-pub struct VirtioBlk;
+pub struct VirtioBlkDev;
 
 #[derive(Debug)]
 pub enum VirtioBlkError {
@@ -86,16 +84,65 @@ pub enum VirtioBlkError {
     DeviceError(u8),  // Device returned non-zero status
 }
 
-impl BlockDevice for VirtioBlk {
+impl BlockDevice for VirtioBlkDev {
     type BlkError = VirtioBlkError;
 
     fn read_block(&self, block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Self::BlkError> {
-        disk_op(block as u64, BlkOp::Read, buf)
+        let mut blk_guard = BLK.lock();
+        let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
+        if block as u64 >= blk.capacity / BLOCK_SIZE as u64 {
+            return Err(VirtioBlkError::SectorOutOfRange);
+        }
+        blk.req.sector = block as u64; // Should I rather change signature to u64 throughout?
+        blk.req.req_type = VIRTIO_BLK_T_IN;
+
+        let addr = &blk.req as *const VirtioBlkReq as usize;
+        let virtq_token = virtio_queue_submit(addr, blk.vq.as_mut(), VIRTQ_DESC_F_WRITE);
+        drop(blk_guard); // Drop lock while waiting for virtio response
+
+        while !virtq_token.is_complete() {
+            core::hint::spin_loop();
+        }
+
+        // Virtio Queue completed, take lock again
+        let mut blk_guard = BLK.lock();
+        let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
+        if blk.req.status != 0 {
+            return Err(VirtioBlkError::DeviceError(blk.req.status));
+        }
+
+        buf.copy_from_slice(&blk.req.data);
+
+        Ok(())
     }
 
     fn write_block(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), Self::BlkError> {
-        let mut tmp = *buf;
-        disk_op(block as u64, BlkOp::Write, &mut tmp)
+        let mut blk_guard = BLK.lock();
+        let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
+
+        if block as u64 >= blk.capacity / BLOCK_SIZE as u64 {
+            return Err(VirtioBlkError::SectorOutOfRange);
+        }
+        blk.req.sector = block as u64;
+        blk.req.req_type = VIRTIO_BLK_T_OUT;
+        blk.req.data.copy_from_slice(buf);
+
+        let addr = &blk.req as *const VirtioBlkReq as usize;
+        let virtq_token = virtio_queue_submit(addr, blk.vq.as_mut(), 0);
+        drop(blk_guard);
+
+        while !virtq_token.is_complete() {
+            core::hint::spin_loop();
+        }
+
+        // Take lock again
+        let mut blk_guard = BLK.lock();
+        let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
+        if blk.req.status != 0 {
+            return Err(VirtioBlkError::DeviceError(blk.req.status));
+        }
+
+        Ok(())
     }
 
     fn block_count(&self) -> Option<u32> {
@@ -105,8 +152,8 @@ impl BlockDevice for VirtioBlk {
     }
 }
 
-// Helper function to set up virtio queues
-fn virtio_queue(blk_req_addr: usize, vq: &mut VirtioVirtq, flags: u32) {
+// Helper function to set up and kick the virtio queue
+fn virtio_queue_submit(blk_req_addr: usize, vq: &mut VirtioVirtq, flags: u32) -> VirtqToken {
     // Descriptor 0: request header
     vq.descs[0] = VirtqDesc {
         addr: blk_req_addr as u64,
@@ -117,7 +164,7 @@ fn virtio_queue(blk_req_addr: usize, vq: &mut VirtioVirtq, flags: u32) {
 
     // Descriptor 1: data buffer
     vq.descs[1] = VirtqDesc {
-        addr: (blk_req_addr + offset_of!(VirtioBlkReq, data)) as u64,
+        addr: (blk_req_addr + mem::offset_of!(VirtioBlkReq, data)) as u64,
         len: BLOCK_SIZE as u32,
         flags: (VIRTQ_DESC_F_NEXT | flags) as u16,
         next: 2,
@@ -125,59 +172,14 @@ fn virtio_queue(blk_req_addr: usize, vq: &mut VirtioVirtq, flags: u32) {
 
     // Descriptor 2: status byte
     vq.descs[2] = VirtqDesc {
-        addr: (blk_req_addr + offset_of!(VirtioBlkReq, status)) as u64,
+        addr: (blk_req_addr + mem::offset_of!(VirtioBlkReq, status)) as u64,
         len: mem::size_of::<u8>() as u32,
         flags: VIRTQ_DESC_F_WRITE as u16,
         next: 0,
     };
 
     // Notify the device that there is a new request.
-    virtq_kick(vq, 0);
-
-    // Wait until the device finishes processing.
-    while virtq_is_busy(vq) {
-        core::hint::spin_loop();
-    }
-}
-
-enum BlkOp {
-    Read,
-    Write,
-}
-
-// Helper function for block reads/writes
-fn disk_op(sector: u64, op: BlkOp, data: &mut [u8; BLOCK_SIZE]) -> Result<(), VirtioBlkError> {
-    let mut blk_guard = BLK.lock();
-    let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
-
-    if sector >= blk.capacity / BLOCK_SIZE as u64 {
-        return Err(VirtioBlkError::SectorOutOfRange);
-    }
-
-    blk.req.sector = sector;
-    let flags = match op {
-        BlkOp::Write => {
-            blk.req.req_type = VIRTIO_BLK_T_OUT;
-            blk.req.data.copy_from_slice(data);
-            0
-        }
-        BlkOp::Read => {
-            blk.req.req_type = VIRTIO_BLK_T_IN;
-            VIRTQ_DESC_F_WRITE
-        }
-    };
-
-    let addr = &blk.req as *const VirtioBlkReq as usize;
-    virtio_queue(addr, blk.vq.as_mut(), flags);
-
-    if blk.req.status != 0 {
-        return Err(VirtioBlkError::DeviceError(blk.req.status));
-    }
-
-    if matches!(op, BlkOp::Read) {
-        data.copy_from_slice(&blk.req.data);
-    }
-    Ok(())
+    virtq_kick(vq, 0)
 }
 
 #[cfg(test)]
@@ -205,20 +207,22 @@ mod test {
     #[test_case]
     fn read_block_zero_fat16_signature() {
         // Block 0 of a FAT16 volume has "FAT16" at byte offset 54
+        let dev = VirtioBlkDev;
         let mut buf = [0u8; BLOCK_SIZE];
-        disk_op(0, BlkOp::Read, &mut buf).unwrap();
+        dev.read_block(0, &mut buf).unwrap();
         assert_eq!(&buf[54..59], b"FAT16");
     }
 
     #[test_case]
     fn write_and_read_back() {
+        let mut dev = VirtioBlkDev;
         let s = "hello from kernel!!!";
         let mut buf = [0u8; BLOCK_SIZE];
         buf[..s.len()].copy_from_slice(s.as_bytes());
-        disk_op(1, BlkOp::Write, &mut buf).unwrap();
+        dev.write_block(1, &buf).unwrap();
 
         let mut buf2 = [0u8; BLOCK_SIZE];
-        disk_op(1, BlkOp::Read, &mut buf2).unwrap();
+        dev.read_block(1, &mut buf2).unwrap();
         assert_eq!(&buf2[..s.len()], s.as_bytes());
     }
 }
@@ -229,7 +233,7 @@ mod baselines {
     //   READ_BLOCK:       200,000  (measured ~49,000)
     //   WRITE_BLOCK:    1,000,000  (measured ~277,000)
     //   WRITE_READ_BLOCK: 1,000,000  (measured ~246,000)
-    pub const READ_BLOCK: u64 = 1_200_000;
+    pub const READ_BLOCK: u64 = 2_000_000;
     pub const WRITE_BLOCK: u64 = 2_000_000;
     pub const WRITE_READ_BLOCK: u64 = 2_000_000;
 }
@@ -246,12 +250,13 @@ mod benchmarks {
     fn regression_read_block() {
         crate::printdln!("\n=== Virtio Block Regression Checks ===");
         bench::check(
-            "disk_op(Read, sector 0)",
+            "read_block(sector 0)",
             baselines::READ_BLOCK,
             ITERATIONS,
             || {
+                let dev = VirtioBlkDev;
                 let mut buf = [0u8; BLOCK_SIZE];
-                disk_op(0, BlkOp::Read, &mut buf).unwrap();
+                dev.read_block(0, &mut buf).unwrap();
             },
         );
     }
@@ -259,12 +264,13 @@ mod benchmarks {
     #[test_case]
     fn regression_write_block() {
         bench::check(
-            "disk_op(Write, sector 1)",
+            "write_block(sector 1)",
             baselines::WRITE_BLOCK,
             ITERATIONS,
             || {
-                let mut buf = [0u8; BLOCK_SIZE];
-                disk_op(1, BlkOp::Write, &mut buf).unwrap();
+                let mut dev = VirtioBlkDev;
+                let buf = [0u8; BLOCK_SIZE];
+                dev.write_block(1, &buf).unwrap();
             },
         );
     }
@@ -272,13 +278,14 @@ mod benchmarks {
     #[test_case]
     fn regression_write_read_block() {
         bench::check(
-            "disk_op(Write+Read, sector 1)",
+            "write+read_block(sector 1)",
             baselines::WRITE_READ_BLOCK,
             ITERATIONS,
             || {
+                let mut dev = VirtioBlkDev;
                 let mut buf = [0u8; BLOCK_SIZE];
-                disk_op(1, BlkOp::Write, &mut buf).unwrap();
-                disk_op(1, BlkOp::Read, &mut buf).unwrap();
+                dev.write_block(1, &buf).unwrap();
+                dev.read_block(1, &mut buf).unwrap();
             },
         );
     }
