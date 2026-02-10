@@ -34,8 +34,9 @@ impl<R: Reader> Keyboard for KeyboardInput<R> {
             ParseResult::Special(k) => Some(KeyEvent::Special(k)),
             ParseResult::InvalidSequence => None,
             ParseResult::Pending => {
-                // Try at most 100 times to get next char in escape sequence - give UART time
-                for _ in 0..100 {
+                // Wait for 10ms for rest of escape key sequence
+                let deadline = crate::arch::timer::ticks_ms() + 10;
+                loop {
                     if let Some(next) = self.reader.read_byte() {
                         match self.parser.parse(next) {
                             ParseResult::Byte(b) => return Some(KeyEvent::Byte(b)), // Fallen out of sequence with ordinary byte
@@ -43,6 +44,9 @@ impl<R: Reader> Keyboard for KeyboardInput<R> {
                             ParseResult::InvalidSequence => return None,
                             ParseResult::Pending => continue, // still in sequence get next
                         }
+                    }
+                    if crate::arch::timer::ticks_ms() >= deadline {
+                        break;
                     }
                     core::hint::spin_loop();
                 }
