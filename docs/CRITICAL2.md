@@ -108,7 +108,9 @@ Only relevant with concurrent I/O (Phase 12A+ multi-tasking).
 
 ---
 
-## 8. Console Framebuffer Ownership Ceremony (Design Smell)
+## 8. Console Framebuffer Ownership Ceremony (Design Smell) — DEFERRED
+
+Only used in benchmark code. Revisit if production code needs direct FB access.
 
 **File:** `src/drivers/console.rs:48-55`, `src/io.rs:222-266`
 
