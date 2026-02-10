@@ -7,7 +7,7 @@ unsafe extern "C" {
     static __fb_addr: u8;
 }
 
-pub struct FrameBuffer;
+pub struct FrameBuffer(()); // Private field to prevent external code writing to FrameBuffer
 
 impl FrameBuffer {
     // Screen settings
@@ -95,7 +95,8 @@ impl FrameBuffer {
             }
         }
 
-        Self // Return FrameBuffer on init to be held by device using RAM fb
+        // Held by device using RAM Framebuffer, must be passed between users
+        Self(())
     }
 
     // Helper function to create a slice over the framebuffer
