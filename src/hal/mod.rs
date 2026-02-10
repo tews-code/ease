@@ -45,5 +45,5 @@ pub trait BlockDevice {
 
     fn write_block(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), Self::BlkError>;
 
-    fn block_count(&self) -> u32;
+    fn block_count(&self) -> Option<u32>;
 }

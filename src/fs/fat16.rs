@@ -65,6 +65,7 @@ impl Bpb {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::hal::BlockDevice;
 
     /// Build a minimal valid FAT16 BPB sector with known values
     fn make_test_bpb() -> [u8; BLOCK_SIZE] {
@@ -154,7 +155,9 @@ mod test {
     fn parse_disk_image_bpb() {
         // Read block 0 from the real disk image via virtio
         let mut buf = [0u8; BLOCK_SIZE];
-        crate::drivers::virtio::read_disk(&mut buf, 0).unwrap();
+        crate::drivers::virtio::VirtioBlk
+            .read_block(0, &mut buf)
+            .unwrap();
         let bpb = Bpb::parse(&buf).unwrap();
         // Values from the 16MB mkdisk.sh image
         assert_eq!(bpb.sector_size, 512);

@@ -16,6 +16,67 @@ use queue::*;
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
 
+// Virtio-blk request.
+#[repr(C, packed)]
+#[derive(Debug)]
+struct VirtioBlkReq {
+    req_type: u32,
+    reserved: u32,
+    sector: u64,
+    data: [u8; BLOCK_SIZE],
+    status: u8,
+}
+
+struct VirtioBlkState {
+    capacity: u64,
+    req: VirtioBlkReq,
+    vq: Box<VirtioVirtq>,
+}
+
+impl VirtioBlkState {
+    #[allow(clippy::identity_op)]
+    fn new() -> Self {
+        if virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976 {
+            panic!("virtio: invalid magic value");
+        }
+        if virtio_reg_read32(VIRTIO_REG_VERSION) != 1 {
+            panic!("virtio: invalid version");
+        }
+        if virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK {
+            panic!("virtio: invalid version");
+        }
+
+        // 1. Reset the device
+        virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
+        // 2. Set the ACKNOWLEDGE status bit: the guest OS has noticed the device
+        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
+        // 3. Set the DRIVER status bit.
+        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
+        // 5. Set the FEATURES_OK status bit
+        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FEAT_OK);
+        // 7. Perform device-specific setup, including discovery of virtqueues for the device
+        let vq = virtq_init(0);
+        // 8. Set the DRIVER_OK status bit.
+        virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
+
+        // Get the disk capacity.
+        let capacity = virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * BLOCK_SIZE as u64;
+
+        println!("virtio-blk: capacity is {} bytes", capacity);
+
+        // Allocate a region to store requests to the device.
+        let req: VirtioBlkReq = unsafe { core::mem::zeroed() };
+
+        Self { capacity, req, vq }
+    }
+}
+
+static BLK: SpinLock<Option<VirtioBlkState>> = SpinLock::new(None);
+
+pub fn virtio_blk_init() {
+    *BLK.lock() = Some(VirtioBlkState::new());
+}
+
 pub struct VirtioBlk;
 
 #[derive(Debug)]
@@ -29,97 +90,26 @@ impl BlockDevice for VirtioBlk {
     type BlkError = VirtioBlkError;
 
     fn read_block(&self, block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Self::BlkError> {
-        read_disk(buf, block as u64)?;
-        Ok(())
+        disk_op(block as u64, BlkOp::Read, buf)
     }
 
     fn write_block(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), Self::BlkError> {
-        write_disk(buf, block as u64)?;
-        Ok(())
+        let mut tmp = *buf;
+        disk_op(block as u64, BlkOp::Write, &mut tmp)
     }
 
-    fn block_count(&self) -> u32 {
-        let guard = BLK_CAPACITY.lock();
-        let Some(cap) = *guard else {
-            return 0;
-        };
-        (cap / BLOCK_SIZE as u64) as u32
+    fn block_count(&self) -> Option<u32> {
+        let blk_guard = BLK.lock();
+        let blk = blk_guard.as_ref()?;
+        Some((blk.capacity / BLOCK_SIZE as u64) as u32)
     }
-}
-
-// Virtio-blk request.
-#[repr(C, packed)]
-#[derive(Debug)]
-struct VirtioBlkReq {
-    req_type: u32,
-    reserved: u32,
-    sector: u64,
-    data: [u8; 512],
-    status: u8,
-}
-
-impl VirtioBlkReq {
-    fn zeroed() -> Self {
-        // SAFETY: VirtioBlkReq is a packed C struct with only integer/array fields.
-        // All-zero bytes is a valid representation for this type.
-        unsafe { core::mem::MaybeUninit::zeroed().assume_init() }
-    }
-}
-
-static BLK_REQUEST_VQ: SpinLock<Option<Box<VirtioVirtq>>> = SpinLock::new(None);
-
-static BLK_REQ: SpinLock<Option<Box<VirtioBlkReq>>> = SpinLock::new(None);
-
-static BLK_CAPACITY: SpinLock<Option<u64>> = SpinLock::new(None);
-
-#[allow(clippy::identity_op)]
-pub fn virtio_blk_init() {
-    if virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976 {
-        panic!("virtio: invalid magic value");
-    };
-    if virtio_reg_read32(VIRTIO_REG_VERSION) != 1 {
-        panic!("virtio: invalid version");
-    };
-
-    if virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK {
-        panic!("virtio: invalid version");
-    };
-
-    // 1. Reset the device
-    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
-    // 2. Set the ACKNOWLEDGE status bit: the guest OS has noticed the device
-    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
-    // 3. Set the DRIVER status bit.
-    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
-    // 5. Set the FEATURES_OK status bit
-    virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FEAT_OK);
-    // 7. Perform device-specific setup, including discovery of virtqueues for the device
-    *BLK_REQUEST_VQ.lock() = Some(virtq_init(0));
-    // 8. Set the DRIVER_OK status bit.
-    virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
-
-    // Get the disk capacity.
-    *BLK_CAPACITY.lock() =
-        Some(virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * BLOCK_SIZE as u64);
-
-    match *BLK_CAPACITY.lock() {
-        Some(capacity) => println!("virtio-blk: capacity is {} bytes", capacity),
-        None => println!("virtio-blk: capacity is not initialized yet"),
-    }
-
-    // Allocate a region to store requests to the device.
-    *BLK_REQ.lock() = Some(Box::new(VirtioBlkReq::zeroed()));
 }
 
 // Helper function to set up virtio queues
-fn virtio_queue(
-    blk_req_paddr: usize,
-    vq: &mut VirtioVirtq,
-    flags: u32,
-) -> Result<(), VirtioBlkError> {
+fn virtio_queue(blk_req_addr: usize, vq: &mut VirtioVirtq, flags: u32) {
     // Descriptor 0: request header
     vq.descs[0] = VirtqDesc {
-        addr: blk_req_paddr as u64,
+        addr: blk_req_addr as u64,
         len: (mem::size_of::<u32>() * 2 + mem::size_of::<u64>()) as u32,
         flags: VIRTQ_DESC_F_NEXT as u16,
         next: 1,
@@ -127,7 +117,7 @@ fn virtio_queue(
 
     // Descriptor 1: data buffer
     vq.descs[1] = VirtqDesc {
-        addr: (blk_req_paddr + offset_of!(VirtioBlkReq, data)) as u64,
+        addr: (blk_req_addr + offset_of!(VirtioBlkReq, data)) as u64,
         len: BLOCK_SIZE as u32,
         flags: (VIRTQ_DESC_F_NEXT | flags) as u16,
         next: 2,
@@ -135,7 +125,7 @@ fn virtio_queue(
 
     // Descriptor 2: status byte
     vq.descs[2] = VirtqDesc {
-        addr: (blk_req_paddr + offset_of!(VirtioBlkReq, status)) as u64,
+        addr: (blk_req_addr + offset_of!(VirtioBlkReq, status)) as u64,
         len: mem::size_of::<u8>() as u32,
         flags: VIRTQ_DESC_F_WRITE as u16,
         next: 0,
@@ -148,108 +138,45 @@ fn virtio_queue(
     while virtq_is_busy(vq) {
         core::hint::spin_loop();
     }
-
-    Ok(())
 }
 
-// Writes to virtio-blk device.
-pub fn write_disk(buf: &[u8], sector: u64) -> Result<(), VirtioBlkError> {
-    let blk_capacity = {
-        let guard = BLK_CAPACITY.lock();
-        let Some(cap) = *guard else {
-            return Err(VirtioBlkError::NotInitialized);
-        };
-        cap
-    };
-
-    if sector >= (blk_capacity / BLOCK_SIZE as u64) {
-        println!(
-            "virtio: tried to read/write sector={}, but capacity is {}",
-            sector,
-            blk_capacity / BLOCK_SIZE as u64
-        );
-        return Err(VirtioBlkError::SectorOutOfRange);
-    };
-
-    let mut br_guard = BLK_REQ.lock();
-    let Some(br) = br_guard.as_mut() else {
-        return Err(VirtioBlkError::NotInitialized);
-    };
-
-    br.sector = sector;
-    br.req_type = VIRTIO_BLK_T_OUT;
-    br.data.copy_from_slice(buf);
-
-    // Construct the virtqueue descriptors (using 3 descriptors).
-    let mut vq_guard = BLK_REQUEST_VQ.lock();
-    let Some(vq) = vq_guard.as_mut() else {
-        return Err(VirtioBlkError::NotInitialized);
-    };
-
-    let blk_req_paddr = &**br as *const VirtioBlkReq as usize; // Double deference to get address from heap, not of the Box
-
-    virtio_queue(blk_req_paddr, vq, 0)?;
-
-    // virtio-blk: If a non-zero value is returned, it's an error.
-    if br.status != 0 {
-        println!(
-            "virtio: warn: failed to read/write sector={} status={}",
-            sector, br.status
-        );
-        return Err(VirtioBlkError::DeviceError(br.status));
-    }
-    Ok(())
+enum BlkOp {
+    Read,
+    Write,
 }
 
-// Reads from virtio-blk device.
-pub fn read_disk(buf: &mut [u8], sector: u64) -> Result<(), VirtioBlkError> {
-    let blk_capacity = {
-        let guard = BLK_CAPACITY.lock();
-        let Some(cap) = *guard else {
-            return Err(VirtioBlkError::NotInitialized);
-        };
-        cap
-    };
+// Helper function for block reads/writes
+fn disk_op(sector: u64, op: BlkOp, data: &mut [u8; BLOCK_SIZE]) -> Result<(), VirtioBlkError> {
+    let mut blk_guard = BLK.lock();
+    let blk = blk_guard.as_mut().ok_or(VirtioBlkError::NotInitialized)?;
 
-    if sector >= (blk_capacity / BLOCK_SIZE as u64) {
-        println!(
-            "virtio: tried to read/write sector={}, but capacity is {}",
-            sector,
-            blk_capacity / BLOCK_SIZE as u64
-        );
+    if sector >= blk.capacity / BLOCK_SIZE as u64 {
         return Err(VirtioBlkError::SectorOutOfRange);
-    };
-
-    let mut br_guard = BLK_REQ.lock();
-    let Some(br) = br_guard.as_mut() else {
-        return Err(VirtioBlkError::NotInitialized);
-    };
-
-    br.sector = sector;
-    br.req_type = VIRTIO_BLK_T_IN;
-
-    // Construct the virtqueue descriptors (using 3 descriptors).
-    let mut vq_guard = BLK_REQUEST_VQ.lock();
-    let Some(vq) = vq_guard.as_mut() else {
-        return Err(VirtioBlkError::NotInitialized);
-    };
-
-    let blk_req_paddr = &**br as *const VirtioBlkReq as usize; // Double deference to get address from heap, not of the Box
-
-    virtio_queue(blk_req_paddr, vq, VIRTQ_DESC_F_WRITE)?;
-
-    // virtio-blk: If a non-zero value is returned, it's an error.
-    if br.status != 0 {
-        println!(
-            "virtio: warn: failed to read/write sector={} status={}",
-            sector, br.status
-        );
-        return Err(VirtioBlkError::DeviceError(br.status));
     }
 
-    // For read operations, copy the data into the buffer.
-    buf.copy_from_slice(&br.data);
+    blk.req.sector = sector;
+    let flags = match op {
+        BlkOp::Write => {
+            blk.req.req_type = VIRTIO_BLK_T_OUT;
+            blk.req.data.copy_from_slice(data);
+            0
+        }
+        BlkOp::Read => {
+            blk.req.req_type = VIRTIO_BLK_T_IN;
+            VIRTQ_DESC_F_WRITE
+        }
+    };
 
+    let addr = &blk.req as *const VirtioBlkReq as usize;
+    virtio_queue(addr, blk.vq.as_mut(), flags);
+
+    if blk.req.status != 0 {
+        return Err(VirtioBlkError::DeviceError(blk.req.status));
+    }
+
+    if matches!(op, BlkOp::Read) {
+        data.copy_from_slice(&blk.req.data);
+    }
     Ok(())
 }
 
@@ -267,7 +194,11 @@ mod test {
     #[test_case]
     fn capacity_matches_disk_image() {
         // 16MB disk image = 32768 sectors of 512 bytes
-        let capacity = BLK_CAPACITY.lock().expect("capacity should be initialized");
+        let capacity = BLK
+            .lock()
+            .as_ref()
+            .expect("capacity should be initialized")
+            .capacity;
         assert_eq!(capacity, 32768 * BLOCK_SIZE as u64);
     }
 
@@ -275,7 +206,7 @@ mod test {
     fn read_block_zero_fat16_signature() {
         // Block 0 of a FAT16 volume has "FAT16" at byte offset 54
         let mut buf = [0u8; BLOCK_SIZE];
-        read_disk(&mut buf, 0).unwrap();
+        disk_op(0, BlkOp::Read, &mut buf).unwrap();
         assert_eq!(&buf[54..59], b"FAT16");
     }
 
@@ -284,10 +215,10 @@ mod test {
         let s = "hello from kernel!!!";
         let mut buf = [0u8; BLOCK_SIZE];
         buf[..s.len()].copy_from_slice(s.as_bytes());
-        write_disk(&buf, 1).unwrap();
+        disk_op(1, BlkOp::Write, &mut buf).unwrap();
 
         let mut buf2 = [0u8; BLOCK_SIZE];
-        read_disk(&mut buf2, 1).unwrap();
+        disk_op(1, BlkOp::Read, &mut buf2).unwrap();
         assert_eq!(&buf2[..s.len()], s.as_bytes());
     }
 }
@@ -295,12 +226,12 @@ mod test {
 #[cfg(test)]
 mod baselines {
     // Measured on QEMU virt, set with wide margin for variance
-    //   READ_BLOCK:     2,000,000  (measured ~37,000-1,600,000)
-    //   WRITE_BLOCK:     5,000,000  (measured ~1,300,000-3,400,000)
-    //   WRITE_READ_BLOCK: 3,000,000  (measured ~308,000-1,600,000)
-    pub const READ_BLOCK: u64 = 2_000_000;
-    pub const WRITE_BLOCK: u64 = 5_000_000;
-    pub const WRITE_READ_BLOCK: u64 = 3_000_000;
+    //   READ_BLOCK:       200,000  (measured ~49,000)
+    //   WRITE_BLOCK:    1,000,000  (measured ~277,000)
+    //   WRITE_READ_BLOCK: 1,000,000  (measured ~246,000)
+    pub const READ_BLOCK: u64 = 400_000;
+    pub const WRITE_BLOCK: u64 = 2_000_000;
+    pub const WRITE_READ_BLOCK: u64 = 2_000_000;
 }
 
 #[cfg(test)]
@@ -315,25 +246,25 @@ mod benchmarks {
     fn regression_read_block() {
         crate::printdln!("\n=== Virtio Block Regression Checks ===");
         bench::check(
-            "read_disk(sector 0)",
+            "disk_op(Read, sector 0)",
             baselines::READ_BLOCK,
             ITERATIONS,
             || {
                 let mut buf = [0u8; BLOCK_SIZE];
-                read_disk(&mut buf, 0).unwrap();
+                disk_op(0, BlkOp::Read, &mut buf).unwrap();
             },
         );
     }
 
     #[test_case]
     fn regression_write_block() {
-        let buf = [0u8; BLOCK_SIZE];
         bench::check(
-            "write_disk(sector 1)",
+            "disk_op(Write, sector 1)",
             baselines::WRITE_BLOCK,
             ITERATIONS,
             || {
-                write_disk(&buf, 1).unwrap();
+                let mut buf = [0u8; BLOCK_SIZE];
+                disk_op(1, BlkOp::Write, &mut buf).unwrap();
             },
         );
     }
@@ -341,13 +272,13 @@ mod benchmarks {
     #[test_case]
     fn regression_write_read_block() {
         bench::check(
-            "write+read(sector 1)",
+            "disk_op(Write+Read, sector 1)",
             baselines::WRITE_READ_BLOCK,
             ITERATIONS,
             || {
                 let mut buf = [0u8; BLOCK_SIZE];
-                write_disk(&buf, 1).unwrap();
-                read_disk(&mut buf, 1).unwrap();
+                disk_op(1, BlkOp::Write, &mut buf).unwrap();
+                disk_op(1, BlkOp::Read, &mut buf).unwrap();
             },
         );
     }
