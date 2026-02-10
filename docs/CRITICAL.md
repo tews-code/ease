@@ -16,23 +16,9 @@ Identified during full codebase review, February 2025. Ordered by severity.
 
 ---
 
-## 2. Virtio State Split Across Three Independent Locks [MEDIUM]
+## ~~2. Virtio State Split Across Three Independent Locks [MEDIUM]~~ DONE
 
-**Problem**: `BLK_REQUEST_VQ`, `BLK_REQ`, and `BLK_CAPACITY` are three separate `SpinLock<Option<...>>` globals. Every read/write acquires multiple locks in sequence, creating inconsistency windows, implicit lock ordering requirements, and redundant `Option` checks.
-
-**Files**: `src/drivers/virtio/mod.rs`
-
-**Fix**: Combine into a single struct behind one lock:
-```rust
-struct VirtioBlkState {
-    capacity: u64,
-    request: VirtioBlkReq,
-    virtq: VirtioVirtq,
-}
-static BLK: SpinLock<Option<VirtioBlkState>> = ...;
-```
-
-**When**: Before Phase 7 (many sequential block reads).
+Resolved in `ba94748`. Three globals consolidated into `BLK: SpinLock<Option<VirtioBlkState>>`. Also merged `read_disk`/`write_disk` into unified `disk_op` helper.
 
 ---
 
