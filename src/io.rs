@@ -15,9 +15,8 @@ macro_rules! print {
         use core::fmt::Write;
         let _ = write!($crate::io::UartWriter, $($arg)*);
         // Also console if available.
-        if let Some(mut c) = $crate::drivers::console::CONSOLE.try_lock() {
-            let _ = write!(c, $($arg)*);
-        };
+        let mut c = $crate::drivers::console::CONSOLE.lock();
+        let _ = write!(c, $($arg)*);
     }}
 }
 
@@ -275,6 +274,7 @@ mod profile {
         bench::run_avg("Console::scroll()", ITER_LARGE, || {
             c.scroll();
         });
+        drop(c);
         println!("====================================");
     }
 }
