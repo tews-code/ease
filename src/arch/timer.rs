@@ -53,7 +53,7 @@ pub fn handle_interrupt() {
     set_mtimecmp(get_mtime() + TIMER_INTERVAL);
 }
 
-/// Get current ticks (ms)
+/// Get current tick count (TIMER_INTERVAL is 1ms)
 pub fn ticks_ms() -> usize {
     TICKS.load(Ordering::Relaxed)
 }

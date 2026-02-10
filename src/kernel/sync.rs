@@ -48,6 +48,7 @@ impl<T> SpinLock<T> {
         }
     }
 
+    #[expect(dead_code)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Disable interrupts before taking the lock
         let prev_mstatus = disable_interrupts();
