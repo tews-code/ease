@@ -53,7 +53,7 @@ A free-list or arena allocator is needed before Phase 7 adds file I/O with data 
 
 ---
 
-## 4. Virtio QUEUE_PFN Works by Accident (Moderate)
+## 4. ~~Virtio QUEUE_PFN Works by Accident (Moderate)~~ DONE
 
 **File:** `src/drivers/virtio/queue.rs:153`
 
@@ -138,7 +138,7 @@ In standard Unix terminals, `\n` (LF) only moves the cursor down; `\r` (CR) move
 
 ---
 
-## 10. Virtio Read Benchmark Flaky — Investigate (Moderate)
+## 10. ~~Virtio Read Benchmark Flaky — Investigate (Moderate)~~ DONE
 
 **File:** `src/drivers/virtio/mod.rs:232`
 
