@@ -40,15 +40,9 @@ Resolved in `21146f3`. Extracted `kernel_init()` called by both test and non-tes
 
 ---
 
-## 6. `print!` Silently Drops Console Output [LOW]
+## ~~6. `print!` Silently Drops Console Output [LOW]~~ DONE
 
-**Problem**: The `print!` macro uses `try_lock()` for the console. If the lock is held, framebuffer output is silently discarded. Additionally, arguments are formatted twice (once for UART, once for Console), doubling formatting cost.
-
-**Files**: `src/io.rs`
-
-**Fix**: Will be largely resolved by the interrupt-disabling SpinLock (item 1), which makes `lock()` safe to use from `print!`. The double-format issue could be addressed by writing to a small intermediate buffer, but is low priority.
-
-**When**: After item 1.
+Resolved in `896f13b`. `print!` macro now uses `lock()` instead of `try_lock()`, safe because SpinLock disables interrupts (item 1). Double-format issue remains but is low priority.
 
 ---
 
