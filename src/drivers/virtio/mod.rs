@@ -229,7 +229,7 @@ mod baselines {
     //   READ_BLOCK:       200,000  (measured ~49,000)
     //   WRITE_BLOCK:    1,000,000  (measured ~277,000)
     //   WRITE_READ_BLOCK: 1,000,000  (measured ~246,000)
-    pub const READ_BLOCK: u64 = 400_000;
+    pub const READ_BLOCK: u64 = 1_200_000;
     pub const WRITE_BLOCK: u64 = 2_000_000;
     pub const WRITE_READ_BLOCK: u64 = 2_000_000;
 }

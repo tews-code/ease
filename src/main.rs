@@ -45,7 +45,7 @@ mod shell;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("⚠️ PANIC! {info}");
+    printdln!("PANIC! {info}");
     loop {
         unsafe {
             core::arch::asm!("wfi");
@@ -56,8 +56,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("\x1b[31mfailed\x1b[0m");
-    println!("Error: {}", info);
+    printdln!("\x1b[31mfailed\x1b[0m");
+    printdln!("Error: {}", info);
     qemu::exit_failure();
 }
 
@@ -146,5 +146,16 @@ mod tests {
     #[test_case]
     fn test_bss_zeroed() {
         assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
+    }
+
+    /// Verify UART output works while CONSOLE lock is held.
+    /// Before the fix, this scenario would deadlock in the panic handler
+    /// (and any printdln! while CONSOLE was locked would also deadlock
+    /// if it had used println! instead).
+    #[test_case]
+    fn test_printdln_while_console_locked() {
+        let _guard = crate::drivers::console::CONSOLE.lock();
+        crate::printdln!("UART works while CONSOLE is locked");
+        // If we reach here, no deadlock occurred
     }
 }
