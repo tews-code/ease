@@ -67,7 +67,7 @@ This is undocumented behavior. A QEMU update or different virtio implementation 
 
 ---
 
-## 5. No Stack/Heap Guard Region (Moderate)
+## 5. ~~No Stack/Heap Guard Region (Moderate)~~ DONE
 
 **File:** `memory-qemu.x`
 
