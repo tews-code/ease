@@ -52,15 +52,9 @@ Resolved in `d3c9e50`. Added `wfi` in the `else` branch of the shell poll loop. 
 
 ---
 
-## 8. Escape Sequence Timeout Is Not Time-Based [LOW]
+## ~~8. Escape Sequence Timeout Is Not Time-Based [LOW]~~ DONE
 
-**Problem**: Keyboard escape sequence timeout is `for _ in 0..100 { spin_loop() }` — a CPU-speed-dependent iteration count, not a real time measurement.
-
-**Files**: `src/input/keyboard.rs`
-
-**Fix**: Use `arch::timer::ticks_ms()` to implement a real timeout (e.g., 10ms).
-
-**When**: Before real hardware bring-up.
+Resolved in `39b912d`. Replaced iteration-based loop with `ticks_ms()` deadline of 10ms.
 
 ---
 
