@@ -34,15 +34,9 @@ Tests migrated to use `BlockDevice` trait in `ba94748`. Decision made: `Fat16` w
 
 ---
 
-## 5. Duplicated Init Sequence [LOW]
+## ~~5. Duplicated Init Sequence [LOW]~~ DONE
 
-**Problem**: The `#[cfg(test)]` and `#[cfg(not(test))]` versions of `main()` duplicate the entire init sequence (alloc, timer, virtio, framebuffer, console). Changes must be made in both places.
-
-**Files**: `src/main.rs`
-
-**Fix**: Extract a shared `kernel_init()` function called by both paths.
-
-**When**: Next time init changes.
+Resolved in `21146f3`. Extracted `kernel_init()` called by both test and non-test `main()`.
 
 ---
 
