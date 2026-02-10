@@ -106,4 +106,13 @@ mod tests {
         let elapsed = ticks_ms() - start;
         assert!(elapsed <= 5, "sleep(0) took too long: {}ms", elapsed);
     }
+
+    #[test_case]
+    fn test_busy_wait_ms() {
+        let start = get_mtime();
+        busy_wait_ms(100);
+        let elapsed = (get_mtime() - start) / TIMER_INTERVAL;
+        assert!(elapsed >= 90, "busy_wait too short: {}ms", elapsed);
+        assert!(elapsed <= 150, "busy_wait too long: {}ms", elapsed);
+    }
 }
