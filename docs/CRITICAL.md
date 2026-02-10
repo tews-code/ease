@@ -58,15 +58,9 @@ Resolved in `39b912d`. Replaced iteration-based loop with `ticks_ms()` deadline 
 
 ---
 
-## 9. FrameBuffer Ownership Not Enforced by Types [LOW]
+## ~~9. FrameBuffer Ownership Not Enforced by Types [LOW]~~ DONE
 
-**Problem**: `FrameBuffer` is a zero-sized type. The `attach_fb`/`release_fb` pattern moves a ZST to enforce single ownership, but anyone can create another `FrameBuffer` and write to the same memory. The type system doesn't enforce the invariant.
-
-**Files**: `src/drivers/ramfb.rs`, `src/drivers/console.rs`
-
-**Fix**: Make the `FrameBuffer` constructor private or use a marker to ensure only one instance exists. Even just making `init()` set a flag and panic on double-init would catch mistakes.
-
-**When**: If multiple framebuffer consumers are added.
+Resolved in `9650684`. Made `FrameBuffer` a tuple struct with private field (`FrameBuffer(())`), preventing external construction. Only `init()` can create an instance.
 
 ---
 
