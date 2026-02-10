@@ -65,14 +65,18 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // Entry Points
 // =============================================================================
 
-#[cfg(test)]
-#[unsafe(no_mangle)]
-extern "C" fn main() -> ! {
+fn kernel_init() {
     kernel::alloc::init();
     arch::timer::init();
     drivers::virtio::virtio_blk_init();
     let fb = drivers::ramfb::FrameBuffer::init();
     CONSOLE.lock().attach_fb(fb);
+}
+
+#[cfg(test)]
+#[unsafe(no_mangle)]
+extern "C" fn main() -> ! {
+    kernel_init();
 
     // Start the shell
     let _shell = shell::Shell::new();
@@ -86,19 +90,9 @@ extern "C" fn main() -> ! {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    kernel::alloc::init();
-    arch::timer::init();
-    drivers::virtio::virtio_blk_init();
-    let fb = drivers::ramfb::FrameBuffer::init();
-    CONSOLE.lock().attach_fb(fb);
+    kernel_init();
 
-    print!("Hello ");
-    println!("from EASE!");
-
-    println!("Tick: {}", arch::timer::ticks_ms());
-    arch::timer::sleep_ms(1000); // Sleep 1 second
-    println!("Tick: {}", arch::timer::ticks_ms());
-
+    println!("Hello from EASE!");
     // Start the shell
     let mut shell = shell::Shell::new();
     shell.run(); // Never returns
