@@ -37,7 +37,9 @@ This is a fundamental design conflict: SpinLock disables interrupts for mutual e
 
 ---
 
-## 3. Bump Allocator Never Frees (Significant for Phase 7+)
+## 3. Bump Allocator Never Frees (Significant for Phase 7+) — DEFERRED
+
+Design documented in `docs/FREE_LIST_AND_BUMP.md`.
 
 **File:** `src/kernel/alloc.rs:55`
 
