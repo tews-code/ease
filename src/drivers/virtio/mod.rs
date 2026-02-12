@@ -9,7 +9,6 @@ mod queue;
 
 use crate::hal::{BLOCK_SIZE, BlockDevice};
 use crate::kernel::sync::SpinLock;
-use crate::println;
 use queue::*;
 
 const VIRTIO_BLK_T_IN: u32 = 0;
@@ -60,7 +59,7 @@ impl VirtioBlkState {
         // Get the disk capacity.
         let capacity = virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * BLOCK_SIZE as u64;
 
-        println!("virtio-blk: capacity is {} bytes", capacity);
+        crate::printdln!("virtio-blk: capacity is {} bytes", capacity);
 
         // Allocate a region to store requests to the device.
         let req: VirtioBlkReq = unsafe { core::mem::zeroed() };

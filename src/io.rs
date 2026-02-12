@@ -26,9 +26,7 @@ macro_rules! print {
 /// In test mode, output is also captured for verification.
 #[macro_export]
 macro_rules! println {
-    () => { {
-        $crate::print!("\n");
-    }};
+    () => {{ $crate::print!("\n"); }};
     ($($arg:tt)*) => {{
         $crate::print!("{}\n", format_args!($($arg)*));
     }}
@@ -187,19 +185,12 @@ mod test {
 /// Baselines set ~20% above measured values to allow for variance.
 #[cfg(test)]
 mod baselines {
-    // Original UART-only baselines (Phase 1-4):
-    //   PRINT_HELLO:      180,000  (measured ~31,000)
-    //   PRINTLN_HELLO:    240,000  (measured ~25,000)
-    //   PRINTLN_FORMATTED:320,000  (measured ~30,000)
-    //   PRINTLN_LONG:     750,000  (measured ~138,000)
-    // Updated: print! now writes to UART + framebuffer console (Phase 5-6)
-    // Console reset before benchmarks to avoid scroll cost
-    // Each char draws 8x16 glyph + cursor hide/show = ~384 pixel writes
-    // Baselines set with wide margin for QEMU timing variance
-    pub const PRINT_HELLO: u64 = 1_000_000 * 4;
-    pub const PRINTLN_HELLO: u64 = 900_000 * 4;
-    pub const PRINTLN_FORMATTED: u64 = 3_000_000 * 4;
-    pub const PRINTLN_LONG: u64 = 3_500_000 * 4;
+    // Baselines measured with profile.test opt-level = 1
+    // Set at ~2x measured values for QEMU timing variance
+    pub const PRINT_HELLO: u64 = 300_000;
+    pub const PRINTLN_HELLO: u64 = 2_500_000;
+    pub const PRINTLN_FORMATTED: u64 = 500_000;
+    pub const PRINTLN_LONG: u64 = 4_000_000;
 }
 
 #[cfg(test)]
@@ -220,10 +211,10 @@ mod profile {
         printdln!("\n=== Console Print Path Profile ===");
 
         let mut c = CONSOLE.lock();
-        c.clear();
-        let mut fb = c.release_fb().unwrap();
+        c.put_char(ascii::FF);
+        let mut renderer = c.release_renderer().unwrap();
         bench::run_avg("set_pixels", ITER_LARGE, || {
-            fb.set_pixels(
+            renderer.fb.set_pixels(
                 0,
                 0,
                 &[
@@ -238,28 +229,32 @@ mod profile {
                 ],
             );
         });
-        c.attach_fb(fb);
-        c.clear();
-        let mut fb = c.release_fb().unwrap();
+        c.attach_renderer(renderer);
+        c.put_char(ascii::FF);
+        let mut renderer = c.release_renderer().unwrap();
         bench::run_avg("Font::draw_char", ITER_LARGE, || {
-            Font::draw_char(&mut fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
+            Font::draw_char(&mut renderer.fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
         });
-        c.attach_fb(fb);
-        c.clear();
-        c.clear();
+        c.attach_renderer(renderer);
+        c.put_char(ascii::FF);
+        c.put_char(ascii::FF);
         bench::run_avg("Console::put_char(ch)", ITER_SMALL, || c.put_char(b'X'));
-        c.clear();
+        c.put_char(ascii::FF);
         bench::run_avg("Console::show+hide_cursor", ITER_SMALL, || {
             c.show_cursor();
             c.hide_cursor();
         });
-        c.clear();
-        bench::run_avg("Console::write_char(ch)", ITER_SMALL, || c.write_char(b'X'));
-        c.clear();
-        bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
-            c.write_char(ascii::LF)
+        c.put_char(ascii::FF);
+        bench::run_avg("Console::write_char(ch)", ITER_SMALL, || {
+            c.write_char(b'X' as char)
+                .expect("should be able to write char")
         });
-        c.clear();
+        c.put_char(ascii::FF);
+        bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
+            c.write_char(ascii::LF as char)
+                .expect("should be able to write line feed")
+        });
+        c.put_char(ascii::FF);
         bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
             let _ = c.write_str("hello\n");
         });
@@ -270,9 +265,13 @@ mod profile {
     fn profile_console_scroll() {
         println!("\n=== Console Scroll Path Profile ===");
         let mut c = CONSOLE.lock();
-        c.clear();
-        bench::run_avg("Console::scroll()", ITER_LARGE, || {
-            c.scroll();
+        c.put_char(ascii::FF);
+        // Position cursor at last row so each LF triggers a scroll
+        for _ in 0..29 {
+            c.put_char(ascii::LF);
+        }
+        bench::run_avg("Console::write_char(LF) with scroll", ITER_LARGE, || {
+            c.write_char(ascii::LF as char).unwrap();
         });
         drop(c);
         println!("====================================");
@@ -284,6 +283,7 @@ mod benchmarks {
     use super::baselines;
     use crate::bench;
     use crate::drivers::console::CONSOLE;
+    use crate::hal::ascii;
     use crate::io::test_io;
 
     /// Number of iterations for averaging (reduces noise)
@@ -291,7 +291,7 @@ mod benchmarks {
 
     /// Reset console before benchmarks to avoid scroll cost dominating measurements
     fn reset_console() {
-        CONSOLE.lock().clear();
+        CONSOLE.lock().put_char(ascii::FF);
     }
 
     #[test_case]

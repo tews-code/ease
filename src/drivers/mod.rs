@@ -3,5 +3,6 @@
 pub mod console;
 pub mod font;
 pub mod ramfb;
+pub mod render;
 pub mod uart;
 pub mod virtio;

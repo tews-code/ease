@@ -17,8 +17,8 @@ pub enum LineDisplayAction<'a> {
     Echo(u8), // Simple append at end
     Enter,
     Redraw { s: &'a str, n: usize }, //Blank `n` chars at current position, redraw `s` at current position, reposition cursor
-    RedrawLine { s: &'a str, n: usize }, // Redraw from start, cursor at end
-    ClearLine(usize),                // Clear line sharing the number of chars in that line
+    RedrawLine { s: &'a str, n: usize, c: usize }, // Redraw string `s` from start of line, leave cursor at end. `n` is current line size, `c` is current cursor position
+    ClearLine { n: usize, c: usize }, // Clear line sharing the number of chars in that line `n` and the cursor starting position within that line `c`
     CursorLeft,
     CursorRight(u8),
 }
@@ -117,7 +117,13 @@ impl LineEditor {
                         self.line.clear();
                         self.cursor = 0;
                         self.history_index = None;
-                        (None, LineDisplayAction::ClearLine(prev_len))
+                        (
+                            None,
+                            LineDisplayAction::ClearLine {
+                                n: prev_len,
+                                c: self.cursor,
+                            },
+                        )
                     }
                     Key::ArrowUp => {
                         if self.history.is_empty()
@@ -137,12 +143,14 @@ impl LineEditor {
                         let index = self.history_index.map_or(0, |i| i + 1);
                         self.history_index = Some(index);
                         self.line = self.history[index];
+                        let c = self.cursor;
                         self.cursor = self.line.len();
                         (
                             None,
                             LineDisplayAction::RedrawLine {
                                 s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
                                 n: prev_len,
+                                c,
                             },
                         )
                     }
@@ -161,12 +169,14 @@ impl LineEditor {
                             self.history_index = Some(index - 1);
                             self.line = self.history[index - 1];
                         };
+                        let c = self.cursor;
                         self.cursor = self.line.len();
                         (
                             None,
                             LineDisplayAction::RedrawLine {
                                 s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
                                 n: prev_len,
+                                c,
                             },
                         )
                     }
@@ -342,7 +352,10 @@ mod tests {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "something");
         let (_, action) = ed.process(key(Key::Esc));
-        assert!(matches!(action, LineDisplayAction::ClearLine(9))); // "something" = 9 chars
+        assert!(matches!(
+            action,
+            LineDisplayAction::ClearLine { n: 9, c: 0 }
+        )); // "something" = 9 chars
         assert_eq!(ed.line.len(), 0);
     }
 

@@ -71,7 +71,12 @@ fn kernel_init() {
     arch::timer::init();
     drivers::virtio::virtio_blk_init();
     let fb = drivers::ramfb::FrameBuffer::init();
-    CONSOLE.lock().attach_fb(fb);
+    let fbr = drivers::render::FrameBufferRenderer::new(
+        fb,
+        drivers::ramfb::Colour::WHITE,
+        drivers::ramfb::Colour::BLACK,
+    );
+    CONSOLE.lock().attach_renderer(fbr);
 }
 
 #[cfg(test)]

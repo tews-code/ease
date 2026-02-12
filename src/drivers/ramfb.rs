@@ -45,7 +45,7 @@ impl FrameBuffer {
         const _: () = assert!(core::mem::size_of::<RamfbConfig>() == 28);
 
         write_fw_cfg_dma(&config);
-        crate::println!(
+        crate::printdln!(
             "ramfb: {}x{} at {:#x}",
             Self::WIDTH,
             Self::HEIGHT,
@@ -118,7 +118,7 @@ impl FrameBuffer {
 
     /// Set a row of pixels at (x, y) to colours provided in slice
     pub fn set_pixels(&mut self, x: usize, y: usize, colours: &[u32]) {
-        if x + colours.len() < self.width() && y < self.height() {
+        if x + colours.len() <= self.width() && y < self.height() {
             let w = self.width();
             self.buffer()[y * w + x..y * w + x + colours.len()].copy_from_slice(colours);
         }

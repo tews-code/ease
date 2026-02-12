@@ -2,221 +2,479 @@
 //!
 //! Classic 80 columns x 30 rows dumb terminal
 
-use crate::arch::timer::busy_wait_ms;
-use crate::drivers::font::Font;
-use crate::drivers::ramfb::{Colour, FrameBuffer};
+use crate::drivers::render::{FrameBufferRenderer, Renderer};
 use crate::hal::ascii;
 use crate::kernel::sync::SpinLock;
 
-pub static CONSOLE: SpinLock<Console> = SpinLock::new(Console::new());
+pub static CONSOLE: SpinLock<Console<FrameBufferRenderer>> = SpinLock::new(Console::new());
 
 const ROWS: usize = 30;
 const COLUMNS: usize = 80;
-const TAB_SIZE: usize = 8;
 
-struct Cursor {
-    x: usize,
-    y: usize,
-    visible: bool,
+struct TextBuffer {
+    cells: [[u8; COLUMNS]; ROWS],
+    cx: usize,
+    cy: usize,
 }
 
-pub struct Console {
-    fb: Option<FrameBuffer>,
-    buffer: [[u8; COLUMNS]; ROWS],
-    cursor: Cursor,
-    fg: Colour,
-    bg: Colour,
+impl TextBuffer {
+    fn char_at(&self, row: usize, column: usize) -> u8 {
+        self.cells[row][column]
+    }
+
+    fn cursor_left(&mut self) {
+        if self.cx > 0 {
+            self.cx -= 1;
+        }
+    }
+
+    fn scroll(&mut self) {
+        for row in 0..ROWS - 1 {
+            self.cells[row] = self.cells[row + 1];
+        }
+        self.cx = 0;
+        self.cy = ROWS - 1;
+        self.cells[self.cy] = [b' '; COLUMNS];
+    }
+
+    fn clear(&mut self) {
+        self.cells = [[b' '; COLUMNS]; ROWS];
+        self.cx = 0;
+        self.cy = 0;
+    }
+
+    fn carriage_return(&mut self) {
+        self.cx = 0;
+    }
+
+    fn line_feed(&mut self) -> bool {
+        if self.cy < ROWS - 1 {
+            self.cy += 1;
+            self.cx = 0;
+        } else {
+            return true; // Flag to ask for scrolling
+        }
+        false
+    }
+
+    // Writeable char
+    fn writeable_char(&mut self, ch: u8) -> (usize, usize, bool) {
+        let old_cx = self.cx;
+        let old_cy = self.cy;
+        let mut scroll = false;
+
+        self.cells[self.cy][self.cx] = ch; // Draw char overwriting cursor
+
+        self.cx += 1;
+        if self.cx >= COLUMNS {
+            self.cx = 0;
+            self.cy += 1;
+            if self.cy >= ROWS {
+                scroll = true;
+            }
+        }
+        (old_cy, old_cx, scroll)
+    }
 }
 
-impl Console {
+#[derive(Clone, Copy, Debug)]
+enum RenderCommand {
+    Clear,
+    Scroll,
+    WriteChar(usize, usize, u8), // (row, column, ch)
+}
+
+struct TerminalEmulator {
+    buffer: TextBuffer,
+}
+
+impl TerminalEmulator {
+    fn cursor_pos(&self) -> (usize, usize) {
+        (self.buffer.cy, self.buffer.cx)
+    }
+
+    fn char_at_cursor(&self) -> u8 {
+        self.buffer.char_at(self.buffer.cy, self.buffer.cx)
+    }
+
+    fn process(&mut self, ch: u8, mut emit: impl FnMut(RenderCommand)) {
+        match ch {
+            ascii::BELL => {}
+            ascii::BS | ascii::DEL => {
+                self.buffer.cursor_left();
+            }
+            ascii::CR => {
+                self.buffer.carriage_return();
+            }
+            ascii::FF => {
+                self.buffer.clear(); // Sets cursor to origin
+                emit(RenderCommand::Clear);
+            }
+            ascii::LF => {
+                let scroll = self.buffer.line_feed();
+                if scroll {
+                    self.buffer.scroll();
+                    emit(RenderCommand::Scroll);
+                }
+            }
+            ascii::TAB => {}
+            _ => {
+                let (row, column, scroll) = self.buffer.writeable_char(ch);
+                emit(RenderCommand::WriteChar(row, column, ch));
+                if scroll {
+                    self.buffer.scroll();
+                    emit(RenderCommand::Scroll);
+                }
+            }
+        }
+    }
+}
+
+pub struct Console<R: Renderer> {
+    fb: Option<R>,
+    emulator: TerminalEmulator,
+    cursor_visible: bool,
+}
+
+impl<R: Renderer> Console<R> {
     pub const fn new() -> Self {
         Self {
             fb: None,
-            buffer: [[b' '; COLUMNS]; ROWS],
-            cursor: Cursor {
-                x: 0,
-                y: 0,
-                visible: false,
+            emulator: TerminalEmulator {
+                buffer: TextBuffer {
+                    cells: [[b' '; COLUMNS]; ROWS],
+                    cx: 0,
+                    cy: 0,
+                },
             },
-            fg: Colour::WHITE,
-            bg: Colour::BLACK,
+            cursor_visible: true,
         }
     }
 
     /// Release the framebuffer to other user
     #[allow(dead_code)]
-    pub fn release_fb(&mut self) -> Option<FrameBuffer> {
+    pub fn release_renderer(&mut self) -> Option<R> {
         self.fb.take()
     }
 
     /// Attach a framebuffer passed from other user
-    pub fn attach_fb(&mut self, fb: FrameBuffer) {
-        self.fb = Some(fb)
+    pub fn attach_renderer(&mut self, renderer: R) {
+        self.fb = Some(renderer)
     }
 
-    /// Write a character using the font at the current cursor position but do not advance cursor
-    ///
-    /// # `ch` is a byte
-    pub fn put_char(&mut self, ch: u8) {
-        match ch {
-            ascii::BELL => {
-                let current_ch = self.buffer[self.cursor.y][self.cursor.x];
-                // Flash an asterisc at the cursor
-                for _ in 0..2 {
-                    self.draw_char(b'*');
-                    busy_wait_ms(25);
-                    self.draw_char(b' ');
-                }
-                self.draw_char(current_ch);
-                self.cursor.visible = false;
-            }
-            ascii::BS | ascii::DEL => {
-                if self.cursor.x > 0 {
-                    self.hide_cursor();
-                    self.cursor.x -= 1; // Note - shell responsibility to print space
-                }
-            }
-            ascii::TAB => {
-                self.hide_cursor();
-                let next_tab = ((self.cursor.x / TAB_SIZE) + 1) * TAB_SIZE;
-                let next_tab = next_tab.min(COLUMNS - 1);
-                while self.cursor.x < next_tab {
-                    self.buffer[self.cursor.y][self.cursor.x] = b' ';
-                    self.draw_char(b' ');
-                    self.cursor.x += 1;
-                }
-            }
-            ascii::CR => {
-                self.hide_cursor();
-                self.cursor.x = 0;
-            }
-            ascii::FF => {
-                self.hide_cursor();
-                self.clear();
-            }
-            ascii::LF => {
-                self.hide_cursor();
-                if self.cursor.y < ROWS - 1 {
-                    self.cursor.y += 1;
-                    self.cursor.x = 0;
-                } else {
-                    self.scroll();
-                }
-            }
-            _ => {
-                // Writeable char
-                self.buffer[self.cursor.y][self.cursor.x] = ch; // Draw char overwriting cursor
-                self.draw_char(ch);
-                // Drawing a char means cursor is now hidden
-                self.cursor.visible = false;
-                self.cursor.x += 1;
-                if self.cursor.x >= COLUMNS {
-                    self.cursor.x = 0;
-                    self.cursor.y += 1;
-                    if self.cursor.y >= ROWS {
-                        self.scroll();
+    // Write a single character using the font at the current cursor position without cursor management
+    fn process_char(&mut self, ch: u8) {
+        let fb = &mut self.fb;
+        self.emulator.process(ch, |cmd| {
+            if let Some(renderer) = fb {
+                match cmd {
+                    RenderCommand::Clear => renderer.fill(),
+                    RenderCommand::Scroll => renderer.scroll(),
+                    RenderCommand::WriteChar(row, column, ch) => {
+                        renderer.draw_char(row, column, ch, false)
                     }
                 }
             }
-        }
+        });
     }
 
-    /// Write a character using the font at the current cursor position and advance cursor
+    /// Write a character using the font at the current cursor position
     ///
     /// # `ch` is a byte
     #[allow(dead_code)]
-    pub fn write_char(&mut self, ch: u8) {
-        self.put_char(ch);
+    pub fn put_char(&mut self, ch: u8) {
+        self.hide_cursor();
+        self.process_char(ch);
         self.show_cursor();
     }
 
-    /// Scrolls console by one line
-    //     scroll()
-    //     - Shift all rows up by one (row 1 → row 0, row 2 → row 1, etc.)
-    //     - Clear the bottom row
-    //     - Redraw the screen from the buffer
-    pub fn scroll(&mut self) {
-        for row in 0..ROWS - 1 {
-            self.buffer[row] = self.buffer[row + 1];
-        }
-        self.buffer[ROWS - 1] = [b' '; COLUMNS];
-        self.cursor.x = 0;
-        self.cursor.y = ROWS - 1;
-
-        if let Some(ref mut fb) = self.fb {
-            fb.scroll(Font::height(), self.bg);
-        }
-    }
-
-    // Clear the screen
-    //     clear()
-    //     - Fill buffer with spaces
-    //     - Clear framebuffer
-    //     - Reset cursor to (0, 0)
-    pub fn clear(&mut self) {
-        self.buffer = [[b' '; COLUMNS]; ROWS];
-        self.cursor.x = 0;
-        self.cursor.y = 0;
-        if let Some(ref mut fb) = self.fb {
-            fb.fill(self.bg);
-        }
-    }
-
     // Draw char at current position
-    fn draw_char(&mut self, ch: u8) {
+    fn draw_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
         if let Some(ref mut fb) = self.fb {
-            Font::draw_char(
-                fb,
-                self.cursor.x * Font::width(),
-                self.cursor.y * Font::height(),
-                ch,
-                self.fg,
-                self.bg,
-            );
+            fb.draw_char(row, column, ch, inverted);
         }
     }
 
     // Hide the cursor at current position
     pub fn hide_cursor(&mut self) {
-        if self.cursor.visible {
-            if let Some(ref mut fb) = self.fb {
-                Font::draw_char(
-                    fb,
-                    self.cursor.x * Font::width(),
-                    self.cursor.y * Font::height(),
-                    self.buffer[self.cursor.y][self.cursor.x],
-                    self.fg,
-                    self.bg,
-                );
-            }
-            self.cursor.visible = false;
+        if self.cursor_visible {
+            let (row, column) = self.emulator.cursor_pos();
+            let ch = self.emulator.char_at_cursor();
+            self.draw_char(row, column, ch, false);
+            self.cursor_visible = false;
         }
     }
 
     // Show the cursor at current position
     pub fn show_cursor(&mut self) {
-        if !self.cursor.visible {
-            if let Some(ref mut fb) = self.fb {
-                Font::draw_char(
-                    fb,
-                    self.cursor.x * Font::width(),
-                    self.cursor.y * Font::height(),
-                    self.buffer[self.cursor.y][self.cursor.x],
-                    self.bg,
-                    self.fg,
-                );
-            }
-            self.cursor.visible = true;
+        if !self.cursor_visible {
+            let (row, column) = self.emulator.cursor_pos();
+            let ch = self.emulator.char_at_cursor();
+            self.draw_char(row, column, ch, true);
+            self.cursor_visible = true;
         };
     }
 }
 
-impl core::fmt::Write for Console {
+impl<R: Renderer> core::fmt::Write for Console<R> {
     fn write_str(&mut self, s: &str) -> Result<(), core::fmt::Error> {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.hide_cursor();
         for b in s.bytes() {
-            self.put_char(b);
+            self.process_char(b);
         }
         self.show_cursor();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kernel::collection::Vec;
+
+    fn new_buffer() -> TextBuffer {
+        TextBuffer {
+            cells: [[b' '; COLUMNS]; ROWS],
+            cx: 0,
+            cy: 0,
+        }
+    }
+
+    fn new_emulator() -> TerminalEmulator {
+        TerminalEmulator {
+            buffer: new_buffer(),
+        }
+    }
+
+    fn collect_cmds(emu: &mut TerminalEmulator, ch: u8) -> Vec<RenderCommand, 8> {
+        let mut cmds: Vec<RenderCommand, 8> = Vec::new();
+        emu.process(ch, |cmd| {
+            cmds.push(cmd).unwrap();
+        });
+        cmds
+    }
+
+    // =========================================================================
+    // TextBuffer
+    // =========================================================================
+
+    #[test_case]
+    fn text_buffer_clear_resets_cursor_and_cells() {
+        let mut buf = new_buffer();
+        buf.writeable_char(b'X');
+        buf.writeable_char(b'Y');
+        buf.clear();
+        assert_eq!(buf.cx, 0);
+        assert_eq!(buf.cy, 0);
+        assert_eq!(buf.char_at(0, 0), b' ');
+        assert_eq!(buf.char_at(0, 1), b' ');
+    }
+
+    #[test_case]
+    fn text_buffer_writeable_char_advances_cursor() {
+        let mut buf = new_buffer();
+        let (row, col, scroll) = buf.writeable_char(b'A');
+        assert_eq!((row, col, scroll), (0, 0, false));
+        assert_eq!(buf.cx, 1);
+        assert_eq!(buf.cy, 0);
+        assert_eq!(buf.char_at(0, 0), b'A');
+    }
+
+    #[test_case]
+    fn text_buffer_writeable_char_wraps_at_column_end() {
+        let mut buf = new_buffer();
+        buf.cx = COLUMNS - 1;
+        let (row, col, scroll) = buf.writeable_char(b'Z');
+        assert_eq!((row, col), (0, COLUMNS - 1));
+        assert!(!scroll);
+        assert_eq!(buf.cx, 0);
+        assert_eq!(buf.cy, 1);
+    }
+
+    #[test_case]
+    fn text_buffer_writeable_char_signals_scroll() {
+        let mut buf = new_buffer();
+        buf.cy = ROWS - 1;
+        buf.cx = COLUMNS - 1;
+        let (_, _, scroll) = buf.writeable_char(b'!');
+        assert!(scroll);
+    }
+
+    #[test_case]
+    fn text_buffer_cursor_left_moves_back() {
+        let mut buf = new_buffer();
+        buf.cx = 5;
+        buf.cursor_left();
+        assert_eq!(buf.cx, 4);
+    }
+
+    #[test_case]
+    fn text_buffer_cursor_left_stops_at_zero() {
+        let mut buf = new_buffer();
+        buf.cursor_left();
+        assert_eq!(buf.cx, 0);
+    }
+
+    #[test_case]
+    fn text_buffer_carriage_return() {
+        let mut buf = new_buffer();
+        buf.cx = 40;
+        buf.carriage_return();
+        assert_eq!(buf.cx, 0);
+    }
+
+    #[test_case]
+    fn text_buffer_line_feed_advances_row() {
+        let mut buf = new_buffer();
+        buf.cx = 10;
+        let scroll = buf.line_feed();
+        assert!(!scroll);
+        assert_eq!(buf.cy, 1);
+        assert_eq!(buf.cx, 0);
+    }
+
+    #[test_case]
+    fn text_buffer_line_feed_at_bottom_signals_scroll() {
+        let mut buf = new_buffer();
+        buf.cy = ROWS - 1;
+        let scroll = buf.line_feed();
+        assert!(scroll);
+        assert_eq!(buf.cy, ROWS - 1);
+    }
+
+    #[test_case]
+    fn text_buffer_scroll_shifts_rows_up() {
+        let mut buf = new_buffer();
+        buf.cells[1][0] = b'A';
+        buf.cells[2][0] = b'B';
+        buf.scroll();
+        assert_eq!(buf.char_at(0, 0), b'A');
+        assert_eq!(buf.char_at(1, 0), b'B');
+        assert_eq!(buf.char_at(ROWS - 1, 0), b' ');
+    }
+
+    #[test_case]
+    fn text_buffer_scroll_resets_cursor() {
+        let mut buf = new_buffer();
+        buf.cx = 10;
+        buf.cy = 5;
+        buf.scroll();
+        assert_eq!(buf.cx, 0);
+        assert_eq!(buf.cy, ROWS - 1);
+    }
+
+    // =========================================================================
+    // TerminalEmulator
+    // =========================================================================
+
+    #[test_case]
+    fn emulator_printable_char_emits_write() {
+        let mut emu = new_emulator();
+        let cmds = collect_cmds(&mut emu, b'X');
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::WriteChar(0, 0, b'X')));
+        assert_eq!(emu.cursor_pos(), (0, 1));
+    }
+
+    #[test_case]
+    fn emulator_bell_emits_nothing() {
+        let mut emu = new_emulator();
+        let cmds = collect_cmds(&mut emu, ascii::BELL);
+        assert_eq!(cmds.len(), 0);
+    }
+
+    #[test_case]
+    fn emulator_tab_emits_nothing() {
+        let mut emu = new_emulator();
+        let cmds = collect_cmds(&mut emu, ascii::TAB);
+        assert_eq!(cmds.len(), 0);
+    }
+
+    #[test_case]
+    fn emulator_bs_moves_cursor_no_emit() {
+        let mut emu = new_emulator();
+        collect_cmds(&mut emu, b'A');
+        collect_cmds(&mut emu, b'B');
+        let cmds = collect_cmds(&mut emu, ascii::BS);
+        assert_eq!(cmds.len(), 0);
+        assert_eq!(emu.cursor_pos(), (0, 1));
+    }
+
+    #[test_case]
+    fn emulator_bs_preserves_cell() {
+        let mut emu = new_emulator();
+        collect_cmds(&mut emu, b'A');
+        collect_cmds(&mut emu, ascii::BS);
+        assert_eq!(emu.char_at_cursor(), b'A');
+    }
+
+    #[test_case]
+    fn emulator_cr_moves_cursor_no_emit() {
+        let mut emu = new_emulator();
+        collect_cmds(&mut emu, b'H');
+        collect_cmds(&mut emu, b'i');
+        let cmds = collect_cmds(&mut emu, ascii::CR);
+        assert_eq!(cmds.len(), 0);
+        assert_eq!(emu.cursor_pos(), (0, 0));
+    }
+
+    #[test_case]
+    fn emulator_lf_no_scroll() {
+        let mut emu = new_emulator();
+        let cmds = collect_cmds(&mut emu, ascii::LF);
+        assert_eq!(cmds.len(), 0);
+        assert_eq!(emu.cursor_pos(), (1, 0));
+    }
+
+    #[test_case]
+    fn emulator_lf_at_bottom_emits_scroll() {
+        let mut emu = new_emulator();
+        // Move to last row
+        for _ in 0..ROWS - 1 {
+            collect_cmds(&mut emu, ascii::LF);
+        }
+        assert_eq!(emu.cursor_pos(), (ROWS - 1, 0));
+        let cmds = collect_cmds(&mut emu, ascii::LF);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Scroll));
+        assert_eq!(emu.cursor_pos(), (ROWS - 1, 0));
+    }
+
+    #[test_case]
+    fn emulator_ff_emits_clear() {
+        let mut emu = new_emulator();
+        collect_cmds(&mut emu, b'X');
+        let cmds = collect_cmds(&mut emu, ascii::FF);
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(cmds[0], RenderCommand::Clear));
+        assert_eq!(emu.cursor_pos(), (0, 0));
+    }
+
+    #[test_case]
+    fn emulator_wrap_and_scroll() {
+        let mut emu = new_emulator();
+        emu.buffer.cy = ROWS - 1;
+        emu.buffer.cx = COLUMNS - 1;
+        let cmds = collect_cmds(&mut emu, b'!');
+        assert_eq!(cmds.len(), 2);
+        assert!(matches!(cmds[0], RenderCommand::WriteChar(_, _, b'!')));
+        assert!(matches!(cmds[1], RenderCommand::Scroll));
+    }
+
+    #[test_case]
+    fn emulator_string_builds_buffer() {
+        let mut emu = new_emulator();
+        for b in b"hello" {
+            collect_cmds(&mut emu, *b);
+        }
+        assert_eq!(emu.buffer.char_at(0, 0), b'h');
+        assert_eq!(emu.buffer.char_at(0, 1), b'e');
+        assert_eq!(emu.buffer.char_at(0, 2), b'l');
+        assert_eq!(emu.buffer.char_at(0, 3), b'l');
+        assert_eq!(emu.buffer.char_at(0, 4), b'o');
+        assert_eq!(emu.cursor_pos(), (0, 5));
     }
 }

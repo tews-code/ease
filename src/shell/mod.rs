@@ -72,21 +72,27 @@ impl Shell {
                     print!(" ");
                 }
                 // Return the cursor back to after the new string
-                for _ in 0..(s.len() + spaces).saturating_sub(1) {
+                for _ in 0..spaces {
                     print!("{}", ascii::BS as char);
                 }
             }
-            LineDisplayAction::RedrawLine { s, n } => {
-                Self::handle_display(LineDisplayAction::ClearLine(n));
-                print!("{s}");
-            }
-            LineDisplayAction::ClearLine(n) => {
-                print!("{}", ascii::CR as char);
-                for _ in 0..n + PROMPT.len() {
+            LineDisplayAction::ClearLine { n, c } => {
+                // Backspace to start of line
+                for _ in 0..c {
+                    print!("{}", ascii::BS as char);
+                }
+                // Clear n chars
+                for _ in 0..n {
                     print!(" ");
                 }
-                // Move to start of line and re-prompt
-                print!("{}{}", ascii::CR as char, PROMPT);
+                // Go back to prompt
+                for _ in 0..n {
+                    print!("{}", ascii::BS as char);
+                }
+            }
+            LineDisplayAction::RedrawLine { s, n, c } => {
+                Self::handle_display(LineDisplayAction::ClearLine { n, c });
+                Self::handle_display(LineDisplayAction::Redraw { s, n });
             }
             LineDisplayAction::CursorLeft => {
                 print!("{}", ascii::BS as char);

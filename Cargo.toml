@@ -16,5 +16,8 @@ path = "src/main.rs"
 default = []
 qemu = []  # For QEMU-specific code
 
+[profile.test]
+opt-level = 1
+
 [package.metadata.docs.rs]
 targets = ["riscv32imac-unknown-none-elf"]
