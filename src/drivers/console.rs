@@ -2,11 +2,8 @@
 //!
 //! Classic 80 columns x 30 rows dumb terminal
 
-use crate::drivers::render::{FrameBufferRenderer, Renderer};
+use crate::drivers::render::Renderer;
 use crate::hal::ascii;
-use crate::kernel::sync::SpinLock;
-
-pub static CONSOLE: SpinLock<Console<FrameBufferRenderer>> = SpinLock::new(Console::new());
 
 const ROWS: usize = 30;
 const COLUMNS: usize = 80;
@@ -131,15 +128,15 @@ impl TerminalEmulator {
 }
 
 pub struct Console<R: Renderer> {
-    fb: Option<R>,
+    fb: R,
     emulator: TerminalEmulator,
     cursor_visible: bool,
 }
 
 impl<R: Renderer> Console<R> {
-    pub const fn new() -> Self {
+    pub fn new(renderer: R) -> Self {
         Self {
-            fb: None,
+            fb: renderer,
             emulator: TerminalEmulator {
                 buffer: TextBuffer {
                     cells: [[b' '; COLUMNS]; ROWS],
@@ -151,30 +148,13 @@ impl<R: Renderer> Console<R> {
         }
     }
 
-    /// Release the framebuffer to other user
-    #[allow(dead_code)]
-    pub fn release_renderer(&mut self) -> Option<R> {
-        self.fb.take()
-    }
-
-    /// Attach a framebuffer passed from other user
-    pub fn attach_renderer(&mut self, renderer: R) {
-        self.fb = Some(renderer)
-    }
-
     // Write a single character using the font at the current cursor position without cursor management
-    fn process_char(&mut self, ch: u8) {
+    pub fn process_char(&mut self, ch: u8) {
         let fb = &mut self.fb;
-        self.emulator.process(ch, |cmd| {
-            if let Some(renderer) = fb {
-                match cmd {
-                    RenderCommand::Clear => renderer.fill(),
-                    RenderCommand::Scroll => renderer.scroll(),
-                    RenderCommand::WriteChar(row, column, ch) => {
-                        renderer.draw_char(row, column, ch, false)
-                    }
-                }
-            }
+        self.emulator.process(ch, |cmd| match cmd {
+            RenderCommand::Clear => fb.fill(),
+            RenderCommand::Scroll => fb.scroll(),
+            RenderCommand::WriteChar(row, column, ch) => fb.draw_char(row, column, ch, false),
         });
     }
 
@@ -190,9 +170,7 @@ impl<R: Renderer> Console<R> {
 
     // Draw char at current position
     fn draw_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
-        if let Some(ref mut fb) = self.fb {
-            fb.draw_char(row, column, ch, inverted);
-        }
+        self.fb.draw_char(row, column, ch, inverted);
     }
 
     // Hide the cursor at current position
@@ -214,19 +192,9 @@ impl<R: Renderer> Console<R> {
             self.cursor_visible = true;
         };
     }
-}
 
-impl<R: Renderer> core::fmt::Write for Console<R> {
-    fn write_str(&mut self, s: &str) -> Result<(), core::fmt::Error> {
-        if s.is_empty() {
-            return Ok(());
-        }
-        self.hide_cursor();
-        for b in s.bytes() {
-            self.process_char(b);
-        }
-        self.show_cursor();
-        Ok(())
+    pub fn into_renderer(self) -> R {
+        self.fb
     }
 }
 

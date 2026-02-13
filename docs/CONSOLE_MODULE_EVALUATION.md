@@ -45,39 +45,38 @@
 - **Item 4 → Items 13, 14**: Removing animations eliminates the need to refactor animation code.
 
 # Plan of Attack
+- [x] **Remove bell handling from `put_char`** — delete the `if ch == ascii::BELL` branch and the `stop_animation()` call. Bell is now ignored.
 
-      [x] **Remove bell handling from `put_char`** — delete the `if ch == ascii::BELL` branch and the `stop_animation()` call. Bell is now ignored.
-      [x] **Replace `Console::tick()` with simple blink** — new `tick()` toggles a `cursor_visible` bool on interval, calls `show_cursor`/`hide_cursor`. Old animation tick deleted.
-      [x] **Delete `CursorAnimation` struct**
-      [x] **Delete `Cursor` struct** — move `x`, `y`, `visible`, `blink_counter` as flat fields onto `Console`.
-      [x] **Consolidate `draw_char` and `draw_char_inverted` into `draw(col, row, ch, inverted)`**
-      [x] **Rewrite `hide_cursor` to call `draw()`**
-      [x] **Rewrite `show_cursor` to call `draw()`**
-      [x] **Extract `tab()` method from `put_char`**
-      [x] **Extract `backspace()` method from `put_char`**
-      [x] **Extract `carriage_return()` method from `put_char`**
-      [x] **Extract `line_feed()` method from `put_char`**
-      [x] **Extract `write_visible_char()` method from `put_char`** — `put_char` is now a small match dispatching to named methods.
-      [x]**Create `TextBuffer` struct** with `buffer`, `cx`, `cy`, and a `char_at(col, row)` accessor. Console owns a `TextBuffer` but still has all methods.
-      [x] **Move `scroll()` buffer logic to `TextBuffer::scroll()`** — Console calls it then scrolls the renderer.
-      [x]- **Move `clear()` buffer logic to `TextBuffer::clear()`**
-      [x]- **Move `backspace()` to `TextBuffer`** — Console calls it then redraws.
-      [x]- **Move `tab()` to `TextBuffer`** — returns range of columns to redraw. Console redraws them.
-      [x]- **Move `carriage_return()` to `TextBuffer`**
-      [x]- **Move `line_feed()` to `TextBuffer`**
-      [x]- **Move `write_visible_char()` to `TextBuffer`** — returns old position and new position. Console redraws.
+- [x] **Replace `Console::tick()` with simple blink** — new `tick()` toggles a `cursor_visible` bool on interval, calls `show_cursor`/`hide_cursor`. Old animation tick deleted.
+- [x] **Delete `CursorAnimation` struct**
+- [x] **Delete `Cursor` struct** — move `x`, `y`, `visible`, `blink_counter` as flat fields onto `Console`.
+- [x] **Consolidate `draw_char` and `draw_char_inverted` into `draw(col, row, ch, inverted)`**
+- [x] **Rewrite `hide_cursor` to call `draw()`**
+- [x] **Rewrite `show_cursor` to call `draw()`**
+- [x] **Extract `tab()` method from `put_char`**
+- [x] **Extract `backspace()` method from `put_char`**
+- [x] **Extract `carriage_return()` method from `put_char`**
+- [x] **Extract `line_feed()` method from `put_char`**
+- [x] **Extract `write_visible_char()` method from `put_char`** — `put_char` is now a small match dispatching to named methods.
+- [x] **Create `TextBuffer` struct** with `buffer`, `cx`, `cy`, and a `char_at(col, row)` accessor. Console owns a `TextBuffer` but still has all methods.
+- [x] **Move `scroll()` buffer logic to `TextBuffer::scroll()`** — Console calls it then scrolls the renderer.
+- [x] **Move `clear()` buffer logic to `TextBuffer::clear()`**
+- [x] **Move `backspace()` to `TextBuffer`** — Console calls it then redraws.
+- [x] **Move `tab()` to `TextBuffer`** — returns range of columns to redraw. Console redraws them.
+- [x] **Move `carriage_return()` to `TextBuffer`**
+- [x] **Move `line_feed()` to `TextBuffer`**
+- [x] **Move `write_visible_char()` to `TextBuffer`** — returns old position and new position. Console redraws. 
+- [x] **Introduce `Renderer` trait** with `draw()`, `scroll()`, `fill()`. Create `FrameBufferRenderer` implementing it. Console unchanged, just a new file.
+- [x] **Replace `Console`'s direct `Font`/`FrameBuffer` calls with `Renderer` trait** — Console now holds `Box<dyn Renderer>` (or generic `R: Renderer`).
       
-      [x]- **Introduce `Renderer` trait** with `draw()`, `scroll()`, `fill()`. Create `FrameBufferRenderer` implementing it. Console unchanged, just a new file.
-      [x]- **Replace `Console`'s direct `Font`/`FrameBuffer` calls with `Renderer` trait** — Console now holds `Box<dyn Renderer>` (or generic `R: Renderer`).
+- [x] **Create `TerminalEmulator` struct** — empty for now, holds a `TextBuffer`. Console still dispatches.
+- [x] **Move `put_char` dispatch logic into `TerminalEmulator::process()`** — returns a small vec/array of `RenderCommand`s. Console iterates them and calls the renderer.
+- [x] **Remove dispatching methods from Console** — Console is now just `TerminalEmulator` + `Renderer` + blink state.
       
-      [ ]- **Create `TerminalEmulator` struct** — empty for now, holds a `TextBuffer`. Console still dispatches.
-      [ ]- **Move `put_char` dispatch logic into `TerminalEmulator::process()`** — returns a small vec/array of `RenderCommand`s. Console iterates them and calls the renderer.
-      [ ]- **Remove dispatching methods from Console** — Console is now just `TerminalEmulator` + `Renderer` + blink state.
-      
-      [ ]- **Create `DisplayManager` struct** — wraps `Console`, forwards all calls. No behaviour change. Existing callers updated to go through `DisplayManager`.
-      [ ]- **Add `DisplayMode` enum to `DisplayManager`** — `Console(Console)` and `App(FrameBuffer)`.
-      [ ]- **Move `release_fb` / `attach_fb` to `DisplayManager`** as `release_to_app()` / `return_to_console()`.
-      [ ]- **Remove `Option<FrameBuffer>` from Console** — constructor now takes `FrameBuffer` (via `Renderer`). `DisplayManager` handles ownership transfer.
+- [ ] **Create `DisplayManager` struct** — wraps `Console`, forwards all calls. No behaviour change. Existing callers updated to go through `DisplayManager`.
+- [ ] **Add `DisplayMode` enum to `DisplayManager`** — `Console(Console)` and `App(FrameBuffer)`.
+- [ ] **Move `release_fb` / `attach_fb` to `DisplayManager`** as `release_to_app()` / `return_to_console()`.
+- [ ] **Remove `Option<FrameBuffer>` from Console** — constructor now takes `FrameBuffer` (via `Renderer`). `DisplayManager` handles ownership transfer.
 
 29 commits. Each one changes one method or moves one piece of data, and leaves the code compiling.
 

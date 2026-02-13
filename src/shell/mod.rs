@@ -8,10 +8,13 @@ pub mod line_editor;
 use crate::drivers::uart::UartReader;
 use crate::hal::ascii;
 use crate::input::keyboard::{Keyboard, KeyboardInput};
-use crate::shell::line_editor::LineDisplayAction;
+use crate::kernel::collection::Vec;
+use crate::shell::line_editor::{LINE_LEN, LineDisplayAction};
 use crate::{print, println};
 
 use line_editor::LineEditor;
+
+const DISPLAY_BUF_SIZE: usize = LINE_LEN * 4;
 
 static PROMPT: &str = "ease> ";
 
@@ -52,6 +55,30 @@ impl Shell {
         }
     }
 
+    fn fill_bs(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, count: usize) {
+        for _ in 0..count {
+            let _ = buf.push(ascii::BS);
+        }
+    }
+
+    fn fill_spaces(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, count: usize) {
+        for _ in 0..count {
+            let _ = buf.push(b' ');
+        }
+    }
+
+    fn fill_str(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, s: &str) {
+        for b in s.bytes() {
+            let _ = buf.push(b);
+        }
+    }
+
+    fn fill_clear_line(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, n: usize, c: usize) {
+        Self::fill_bs(buf, c);
+        Self::fill_spaces(buf, n);
+        Self::fill_bs(buf, n);
+    }
+
     fn handle_display(action: LineDisplayAction) {
         match action {
             LineDisplayAction::None => {}
@@ -59,46 +86,39 @@ impl Shell {
             LineDisplayAction::Enter => println!(),
             LineDisplayAction::Bell => print!("{}", ascii::BELL as char),
             LineDisplayAction::Backspace { s } => {
-                print!("{}{} {}", ascii::BS as char, s, ascii::BS as char);
-                // Move cursor back by length of str
-                for _ in 0..s.len() {
-                    print!("{}", ascii::BS as char);
-                }
+                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                let _ = buf.push(ascii::BS);
+                Self::fill_str(&mut buf, s);
+                let _ = buf.push(b' ');
+                Self::fill_bs(&mut buf, s.len() + 1);
+                print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::Redraw { s, n } => {
-                print!("{s}");
+                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                Self::fill_str(&mut buf, s);
                 let spaces = n.saturating_sub(s.len());
-                for _ in 0..spaces {
-                    print!(" ");
-                }
-                // Return the cursor back to after the new string
-                for _ in 0..spaces {
-                    print!("{}", ascii::BS as char);
-                }
+                Self::fill_spaces(&mut buf, spaces);
+                Self::fill_bs(&mut buf, s.len() - 1 + spaces);
+                print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::ClearLine { n, c } => {
-                // Backspace to start of line
-                for _ in 0..c {
-                    print!("{}", ascii::BS as char);
-                }
-                // Clear n chars
-                for _ in 0..n {
-                    print!(" ");
-                }
-                // Go back to prompt
-                for _ in 0..n {
-                    print!("{}", ascii::BS as char);
-                }
+                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                Self::fill_clear_line(&mut buf, n, c);
+                print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::RedrawLine { s, n, c } => {
-                Self::handle_display(LineDisplayAction::ClearLine { n, c });
-                Self::handle_display(LineDisplayAction::Redraw { s, n });
+                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                Self::fill_clear_line(&mut buf, n, c);
+                Self::fill_str(&mut buf, s);
+                let spaces = n.saturating_sub(s.len());
+                Self::fill_spaces(&mut buf, spaces);
+                Self::fill_bs(&mut buf, spaces);
+                print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::CursorLeft => {
                 print!("{}", ascii::BS as char);
             }
             LineDisplayAction::CursorRight(ch) => {
-                // Line editor would not ask this if there was nowhere to go right
                 print!("{}", ch as char);
             }
         }

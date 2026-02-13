@@ -15,7 +15,7 @@ macro_rules! print {
         use core::fmt::Write;
         let _ = write!($crate::io::UartWriter, $($arg)*);
         // Also console if available.
-        let mut c = $crate::drivers::console::CONSOLE.lock();
+        let mut c = $crate::drivers::DISPLAY.lock();
         let _ = write!(c, $($arg)*);
     }}
 }
@@ -196,7 +196,7 @@ mod baselines {
 #[cfg(test)]
 mod profile {
     use crate::bench;
-    use crate::drivers::console::CONSOLE;
+    use crate::drivers::DISPLAY;
     use crate::hal::ascii;
     use core::fmt::Write;
 
@@ -210,9 +210,9 @@ mod profile {
 
         printdln!("\n=== Console Print Path Profile ===");
 
-        let mut c = CONSOLE.lock();
-        c.put_char(ascii::FF);
-        let mut renderer = c.release_renderer().unwrap();
+        let mut d = DISPLAY.lock();
+        d.put_char(ascii::FF);
+        let mut renderer = d.release_to_app().unwrap();
         bench::run_avg("set_pixels", ITER_LARGE, || {
             renderer.fb.set_pixels(
                 0,
@@ -229,34 +229,34 @@ mod profile {
                 ],
             );
         });
-        c.attach_renderer(renderer);
-        c.put_char(ascii::FF);
-        let mut renderer = c.release_renderer().unwrap();
+        d.return_to_console(renderer);
+        d.put_char(ascii::FF);
+        let mut renderer = d.release_to_app().unwrap();
         bench::run_avg("Font::draw_char", ITER_LARGE, || {
             Font::draw_char(&mut renderer.fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
         });
-        c.attach_renderer(renderer);
-        c.put_char(ascii::FF);
-        c.put_char(ascii::FF);
-        bench::run_avg("Console::put_char(ch)", ITER_SMALL, || c.put_char(b'X'));
-        c.put_char(ascii::FF);
+        d.return_to_console(renderer);
+        d.put_char(ascii::FF);
+        d.put_char(ascii::FF);
+        bench::run_avg("Console::put_char(ch)", ITER_SMALL, || d.put_char(b'X'));
+        d.put_char(ascii::FF);
         bench::run_avg("Console::show+hide_cursor", ITER_SMALL, || {
-            c.show_cursor();
-            c.hide_cursor();
+            d.show_cursor();
+            d.hide_cursor();
         });
-        c.put_char(ascii::FF);
+        d.put_char(ascii::FF);
         bench::run_avg("Console::write_char(ch)", ITER_SMALL, || {
-            c.write_char(b'X' as char)
+            d.write_char(b'X' as char)
                 .expect("should be able to write char")
         });
-        c.put_char(ascii::FF);
+        d.put_char(ascii::FF);
         bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
-            c.write_char(ascii::LF as char)
+            d.write_char(ascii::LF as char)
                 .expect("should be able to write line feed")
         });
-        c.put_char(ascii::FF);
+        d.put_char(ascii::FF);
         bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
-            let _ = c.write_str("hello\n");
+            let _ = d.write_str("hello\n");
         });
         printdln!("==================================");
     }
@@ -264,16 +264,16 @@ mod profile {
     #[test_case]
     fn profile_console_scroll() {
         println!("\n=== Console Scroll Path Profile ===");
-        let mut c = CONSOLE.lock();
-        c.put_char(ascii::FF);
+        let mut d = DISPLAY.lock();
+        d.put_char(ascii::FF);
         // Position cursor at last row so each LF triggers a scroll
         for _ in 0..29 {
-            c.put_char(ascii::LF);
+            d.put_char(ascii::LF);
         }
         bench::run_avg("Console::write_char(LF) with scroll", ITER_LARGE, || {
-            c.write_char(ascii::LF as char).unwrap();
+            d.write_char(ascii::LF as char).unwrap();
         });
-        drop(c);
+        drop(d);
         println!("====================================");
     }
 }
@@ -282,7 +282,7 @@ mod profile {
 mod benchmarks {
     use super::baselines;
     use crate::bench;
-    use crate::drivers::console::CONSOLE;
+    use crate::drivers::DISPLAY;
     use crate::hal::ascii;
     use crate::io::test_io;
 
@@ -291,7 +291,7 @@ mod benchmarks {
 
     /// Reset console before benchmarks to avoid scroll cost dominating measurements
     fn reset_console() {
-        CONSOLE.lock().put_char(ascii::FF);
+        DISPLAY.lock().put_char(ascii::FF);
     }
 
     #[test_case]

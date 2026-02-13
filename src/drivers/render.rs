@@ -1,5 +1,7 @@
 //! Render trait
 
+#![allow(dead_code)]
+
 use crate::drivers::font::Font;
 use crate::drivers::ramfb::{Colour, FrameBuffer};
 
@@ -21,6 +23,10 @@ impl FrameBufferRenderer {
     pub fn new(fb: FrameBuffer, fg: Colour, bg: Colour) -> Self {
         Self { fb, fg, bg }
     }
+
+    pub fn into_framebuffer(self) -> FrameBuffer {
+        self.fb
+    }
 }
 
 impl Renderer for FrameBufferRenderer {
@@ -39,13 +45,11 @@ impl Renderer for FrameBufferRenderer {
     }
 
     // Clear the screen
-    #[inline]
     fn fill(&mut self) {
         self.fb.fill(self.bg);
     }
 
     /// Scrolls by one line of font height
-    #[inline]
     fn scroll(&mut self) {
         self.fb.scroll(Font::height(), self.bg);
     }

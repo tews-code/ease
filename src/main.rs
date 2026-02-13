@@ -28,7 +28,6 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
-use crate::drivers::console::CONSOLE;
 extern crate alloc;
 
 mod arch;
@@ -76,7 +75,7 @@ fn kernel_init() {
         drivers::ramfb::Colour::WHITE,
         drivers::ramfb::Colour::BLACK,
     );
-    CONSOLE.lock().attach_renderer(fbr);
+    drivers::DISPLAY.lock().init(fbr);
 }
 
 #[cfg(test)]
@@ -154,14 +153,14 @@ mod tests {
         assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
     }
 
-    /// Verify UART output works while CONSOLE lock is held.
+    /// Verify UART output works while DISPLAY lock is held.
     /// Before the fix, this scenario would deadlock in the panic handler
-    /// (and any printdln! while CONSOLE was locked would also deadlock
+    /// (and any printdln! while DISPLAY was locked would also deadlock
     /// if it had used println! instead).
     #[test_case]
-    fn test_printdln_while_console_locked() {
-        let _guard = crate::drivers::console::CONSOLE.lock();
-        crate::printdln!("UART works while CONSOLE is locked");
+    fn test_printdln_while_display_locked() {
+        let _guard = crate::drivers::DISPLAY.lock();
+        crate::printdln!("UART works while DISPLAY is locked");
         // If we reach here, no deadlock occurred
     }
 }
