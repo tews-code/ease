@@ -260,30 +260,11 @@ See `docs/DESIGN_NOTES.md` for TCB structure, context switch flow, and scheduler
 
 ---
 
-### Phase 12B: User Mode & Syscalls (Weeks 35-36)
-**Goal:** Run application threads in RISC-V User mode with kernel protection
-**New concepts:** Privilege levels, PMP, syscall interface, kernel/user stacks
-**Prerequisites:** Phase 12A (scheduler with context switching)
+## QEMU MVP (Week 34)
 
-- [ ] Configure PMP to protect kernel SRAM regions from User-mode access
-- [ ] Add `ecall` dispatch to existing trap handler (branch on `mcause`)
-- [ ] Implement syscall interface: console I/O, filesystem ops, display, timer
-- [ ] Manage `mstatus.MPP` in scheduler: set U-mode for app threads, M-mode for kernel threads
-- [ ] Separate kernel and user stacks per thread; trap entry switches to kernel stack
-- [ ] Test: user-mode thread making syscalls succeeds
-- [ ] Test: user-mode thread accessing kernel memory faults cleanly
+At the end of Phase 12A, the QEMU build is **feature-complete**:
 
-See `docs/DESIGN_NOTES.md` for syscall numbers and calling convention.
-
-**Milestone 12B:** Applications run in User mode with PMP protection and syscall interface
-
----
-
-## QEMU MVP (Week 36)
-
-At the end of Phase 12B, the QEMU build is **feature-complete**:
-
-Boot & UART, memory allocation, timer & sleep, graphical display, keyboard input, shell with commands, FAT16 filesystem, text editor, alarm clock, Doom, audio, dual-core, preemptive scheduler, user/kernel privilege separation.
+Boot & UART, memory allocation, timer & sleep, graphical display, keyboard input, shell with commands, FAT16 filesystem, text editor, alarm clock, Doom, audio, dual-core, preemptive scheduler.
 
 **This is a complete, usable operating system running in QEMU.** Everything beyond this is porting to real hardware.
 
@@ -293,12 +274,12 @@ Boot & UART, memory allocation, timer & sleep, graphical display, keyboard input
 
 Two paths available after QEMU MVP:
 
-- **Path A (MVP, Weeks 37-40):** Stock Pico 2 with UART I/O, no modifications
-- **Path B (Full, Weeks 37-50):** Complete device with PSRAM, e-ink, USB keyboard, audio, battery
+- **Path A (MVP, Weeks 35-38):** Stock Pico 2 with UART I/O, no modifications
+- **Path B (Full, Weeks 35-48):** Complete device with PSRAM, e-ink, USB keyboard, audio, battery
 
 Path A can be completed first as a quick win, then extended with Path B.
 
-### Phase 13: MVP Hardware — Stock Pico 2 (Weeks 37-40)
+### Phase 13: MVP Hardware — Stock Pico 2 (Weeks 35-38)
 
 - [ ] Set up Debug Probe (SWD), flash minimal LED-blink program
 - [ ] Create RP2350 linker script, add `rp2350` cargo feature
@@ -310,7 +291,7 @@ Path A can be completed first as a quick win, then extended with Path B.
 
 **Milestone 13:** EASE shell running on stock Pico 2 via UART
 
-### Phase 14: PSRAM (Weeks 41-42)
+### Phase 14: PSRAM (Weeks 39-40)
 
 - [ ] Solder APS6404L-3SQR to Pico 2 QSPI pins
 - [ ] Implement PSRAM init sequence, test read/write and data integrity
@@ -319,7 +300,7 @@ Path A can be completed first as a quick win, then extended with Path B.
 
 **Milestone 14:** 8MB PSRAM working, Doom runs with full WAD
 
-### Phase 15: E-ink Display (Weeks 43-44)
+### Phase 15: E-ink Display (Weeks 41-42)
 
 - [ ] Implement IT8951 driver (init, write buffer, refresh)
 - [ ] Design `Display` trait covering both ramfb and IT8951
@@ -328,7 +309,7 @@ Path A can be completed first as a quick win, then extended with Path B.
 
 **Milestone 15:** E-ink display showing EASE shell and applications
 
-### Phase 16: USB Host Keyboard (Weeks 45-46)
+### Phase 16: USB Host Keyboard (Weeks 43-44)
 
 - [ ] Configure RP2350 USB controller for Host mode
 - [ ] Implement USB enumeration and HID report parsing
@@ -337,7 +318,7 @@ Path A can be completed first as a quick win, then extended with Path B.
 
 **Milestone 16:** USB keyboard working, can type in shell
 
-### Phase 17: Audio Hardware (Weeks 47-48)
+### Phase 17: Audio Hardware (Weeks 45-46)
 
 - [ ] Configure RP2350 PWM for audio-rate output
 - [ ] Implement DMA transfer to PWM, build RC low-pass filter
@@ -346,7 +327,7 @@ Path A can be completed first as a quick win, then extended with Path B.
 
 **Milestone 17:** Audio working through speaker
 
-### Phase 18: Power & Final Integration (Weeks 49-50)
+### Phase 18: Power & Final Integration (Weeks 47-48)
 
 - [ ] Connect LiPo battery via TP4056
 - [ ] Implement battery voltage reading (ADC) and low-battery warning
@@ -392,15 +373,14 @@ Path A can be completed first as a quick win, then extended with Path B.
 | M11 | 30 | Audio working |
 | M12 | 32 | Dual-core working |
 | M12A | 34 | Preemptive scheduler |
-| M12B | 36 | User mode & syscalls |
-| **QEMU MVP** | **36** | **Feature-complete in emulation** |
-| M13 | 40 | Stock Pico 2 via UART |
-| **HW MVP** | **40** | **Running on real hardware** |
-| M14-M18 | 42-50 | PSRAM, e-ink, USB, audio, battery |
-| **FINAL** | **50** | **Portable device complete** |
+| **QEMU MVP** | **34** | **Feature-complete in emulation** |
+| M13 | 38 | Stock Pico 2 via UART |
+| **HW MVP** | **38** | **Running on real hardware** |
+| M14-M18 | 40-48 | PSRAM, e-ink, USB, audio, battery |
+| **FINAL** | **48** | **Portable device complete** |
 
 ---
 
 *Plan created: January 2026*
-*Target completion: ~12.5 months (50 weeks at 8 hours/week)*
-*Total estimated effort: ~400 hours*
+*Target completion: ~12 months (48 weeks at 8 hours/week)*
+*Total estimated effort: ~385 hours*

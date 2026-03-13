@@ -65,6 +65,12 @@ This project uses **Rust 2024 edition**. Key differences from 2021:
 - FAT16 filesystem
 - Shell commands: `ls`, `cat`, `cd`, `hexdump`
 
+## Code Review Rules
+
+When reviewing code, be direct and critical. Do not soften feedback based on project context or familiarity. Point out real problems.
+
+After the code review, separately check the current phase's implementation against the next 2 phases in `docs/EASE_PROJECT_PLAN.md` and flag abstractions (traits, data structures, API boundaries) that will need to be replaced. Keep this plan-alignment check clearly separated from the code quality review.
+
 ## Commit Rules
 
 **`scripts/ci.sh` must pass before every commit. No exceptions without explicit human approval.** Claude must never skip CI on its own judgement — always run it before committing, and fix any failures before proceeding.

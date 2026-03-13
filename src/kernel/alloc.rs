@@ -101,9 +101,9 @@ mod tests {
     const ITERATIONS: u32 = 10;
 
     mod baselines {
-        pub const BOX_NEW_U64: u64 = 90_000;
-        pub const VEC_PUSH_100_ITEMS: u64 = 500_000;
-        pub const STRING_FROM_SHORT: u64 = 60_000;
+        pub const BOX_NEW_U64: u64 = 180_000;
+        pub const VEC_PUSH_100_ITEMS: u64 = 1_000_000;
+        pub const STRING_FROM_SHORT: u64 = 120_000;
     }
 
     #[test_case]

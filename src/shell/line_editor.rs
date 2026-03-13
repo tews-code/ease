@@ -3,13 +3,12 @@
 use crate::hal::ascii;
 use crate::input::escape::Key;
 use crate::input::keyboard::KeyEvent;
-use crate::kernel::collection::Vec;
+use crate::kernel::collection::StackVec;
 
 pub const LINE_LEN: usize = 256;
 const HISTORY_SIZE: usize = 30;
 
 // Enum returned by the line editor to instruct display
-#[expect(dead_code)]
 pub enum LineDisplayAction<'a> {
     None,
     Backspace { s: &'a str },
@@ -24,21 +23,21 @@ pub enum LineDisplayAction<'a> {
 }
 
 pub struct LineEditor {
-    pub line: Vec<u8, LINE_LEN>,
-    saved_line: Vec<u8, LINE_LEN>, // Stores current line when browsing history
-    cursor: usize,                 // Cursor position
-    history_index: Option<usize>,  // History row currently being used.
-    history: Vec<Vec<u8, LINE_LEN>, HISTORY_SIZE>,
+    pub line: StackVec<u8, LINE_LEN>,
+    saved_line: StackVec<u8, LINE_LEN>, // Stores current line when browsing history
+    cursor: usize,                      // Cursor position
+    history_index: Option<usize>,       // History row currently being used.
+    history: StackVec<StackVec<u8, LINE_LEN>, HISTORY_SIZE>,
 }
 
 impl LineEditor {
     pub const fn new() -> Self {
         Self {
-            line: Vec::new(),
-            saved_line: Vec::new(),
+            line: StackVec::new(),
+            saved_line: StackVec::new(),
             cursor: 0,
             history_index: None,
-            history: Vec::new(),
+            history: StackVec::new(),
         }
     }
 
@@ -51,7 +50,7 @@ impl LineEditor {
         match event {
             KeyEvent::Byte(ascii::TAB) => (None, LineDisplayAction::Bell), // Discard tab
             KeyEvent::Byte(ch) => {
-                if self.line.is_full() {
+                if self.line.is_full() || (!ch.is_ascii_graphic() && ch != b' ') {
                     return (None, LineDisplayAction::Bell);
                 };
                 let at_end = self.cursor == self.line.len();
@@ -67,10 +66,8 @@ impl LineEditor {
                     (
                         None,
                         LineDisplayAction::Redraw {
-                            s: str::from_utf8(
-                                &self.line.as_slice()[self.cursor - 1..self.line.len()],
-                            )
-                            .expect("should be utf-8"),
+                            s: core::str::from_utf8(&self.line.as_slice()[self.cursor - 1..])
+                                .expect("should be utf-8"),
                             n: 0, // No underlining chars to blank
                         },
                     )
@@ -79,22 +76,28 @@ impl LineEditor {
             KeyEvent::Special(key) => {
                 match key {
                     Key::Enter => {
-                        // Insert this command as most recent the command history
-                        if self.history.is_full() {
-                            let _ = self.history.pop();
+                        // If the line is blank don't save it
+                        let blank = self.line.is_empty();
+                        if !blank {
+                            // Insert this command as most recent the command history
+                            if self.history.is_full() {
+                                let _ = self.history.pop();
+                            }
+                            let _ = self.history.insert(0, self.line);
                         }
-                        let _ = self.history.insert(0, self.line);
                         self.line.clear();
                         self.cursor = 0;
                         self.history_index = None; // Not browsing history
                         self.saved_line.clear();
-                        // Return the line (using command history store)
+                        // Return the line
                         (
-                            Some(
+                            Some(if blank {
+                                ""
+                            } else {
                                 self.history[0]
                                     .as_str()
-                                    .expect("should only have UTF-8-valid bytes"),
-                            ),
+                                    .expect("should only have UTF-8-valid bytes")
+                            }),
                             LineDisplayAction::Enter,
                         )
                     }
@@ -103,9 +106,8 @@ impl LineEditor {
                             // Remove the character at the cursor
                             self.line.remove(self.cursor - 1);
                             self.cursor -= 1;
-                            let s =
-                                str::from_utf8(&self.line.as_slice()[self.cursor..self.line.len()])
-                                    .expect("should be valid UTF-8");
+                            let s = core::str::from_utf8(&self.line.as_slice()[self.cursor..])
+                                .expect("should be valid UTF-8");
                             (None, LineDisplayAction::Backspace { s })
                         } else {
                             // Already at start, bell
@@ -113,17 +115,12 @@ impl LineEditor {
                         }
                     }
                     Key::Esc => {
+                        let c = self.cursor;
                         let prev_len = self.line.len();
                         self.line.clear();
                         self.cursor = 0;
                         self.history_index = None;
-                        (
-                            None,
-                            LineDisplayAction::ClearLine {
-                                n: prev_len,
-                                c: self.cursor,
-                            },
-                        )
+                        (None, LineDisplayAction::ClearLine { n: prev_len, c })
                     }
                     Key::ArrowUp => {
                         if self.history.is_empty()
@@ -148,7 +145,8 @@ impl LineEditor {
                         (
                             None,
                             LineDisplayAction::RedrawLine {
-                                s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
+                                s: core::str::from_utf8(self.line.as_slice())
+                                    .expect("should be UTF-8"),
                                 n: prev_len,
                                 c,
                             },
@@ -174,7 +172,8 @@ impl LineEditor {
                         (
                             None,
                             LineDisplayAction::RedrawLine {
-                                s: str::from_utf8(self.line.as_slice()).expect("should be UTF-8"),
+                                s: core::str::from_utf8(self.line.as_slice())
+                                    .expect("should be UTF-8"),
                                 n: prev_len,
                                 c,
                             },
@@ -354,8 +353,32 @@ mod tests {
         let (_, action) = ed.process(key(Key::Esc));
         assert!(matches!(
             action,
-            LineDisplayAction::ClearLine { n: 9, c: 0 }
+            LineDisplayAction::ClearLine { n: 9, c: 9 }
         )); // "something" = 9 chars
+        assert_eq!(ed.line.len(), 0);
+    }
+
+    #[test_case]
+    fn test_esc_mid_line_reports_cursor_position() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "hello");
+        ed.process(key(Key::ArrowLeft));
+        ed.process(key(Key::ArrowLeft));
+        let (_, action) = ed.process(key(Key::Esc));
+        assert!(matches!(
+            action,
+            LineDisplayAction::ClearLine { n: 5, c: 3 }
+        ));
+        assert_eq!(ed.line.len(), 0);
+    }
+
+    #[test_case]
+    fn test_non_ascii_bytes_rejected() {
+        let mut ed = LineEditor::new();
+        let (_, action) = ed.process(byte(0xFF));
+        assert!(matches!(action, LineDisplayAction::Bell));
+        let (_, action) = ed.process(byte(0x01));
+        assert!(matches!(action, LineDisplayAction::Bell));
         assert_eq!(ed.line.len(), 0);
     }
 

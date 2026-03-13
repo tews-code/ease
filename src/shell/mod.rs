@@ -8,7 +8,7 @@ pub mod line_editor;
 use crate::drivers::uart::UartReader;
 use crate::hal::ascii;
 use crate::input::keyboard::{Keyboard, KeyboardInput};
-use crate::kernel::collection::Vec;
+use crate::kernel::collection::StackVec;
 use crate::shell::line_editor::{LINE_LEN, LineDisplayAction};
 use crate::{print, println};
 
@@ -55,25 +55,25 @@ impl Shell {
         }
     }
 
-    fn fill_bs(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, count: usize) {
+    fn fill_bs(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, count: usize) {
         for _ in 0..count {
             let _ = buf.push(ascii::BS);
         }
     }
 
-    fn fill_spaces(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, count: usize) {
+    fn fill_spaces(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, count: usize) {
         for _ in 0..count {
             let _ = buf.push(b' ');
         }
     }
 
-    fn fill_str(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, s: &str) {
+    fn fill_str(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, s: &str) {
         for b in s.bytes() {
             let _ = buf.push(b);
         }
     }
 
-    fn fill_clear_line(buf: &mut Vec<u8, DISPLAY_BUF_SIZE>, n: usize, c: usize) {
+    fn fill_clear_line(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, n: usize, c: usize) {
         Self::fill_bs(buf, c);
         Self::fill_spaces(buf, n);
         Self::fill_bs(buf, n);
@@ -86,7 +86,7 @@ impl Shell {
             LineDisplayAction::Enter => println!(),
             LineDisplayAction::Bell => print!("{}", ascii::BELL as char),
             LineDisplayAction::Backspace { s } => {
-                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
                 let _ = buf.push(ascii::BS);
                 Self::fill_str(&mut buf, s);
                 let _ = buf.push(b' ');
@@ -94,7 +94,7 @@ impl Shell {
                 print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::Redraw { s, n } => {
-                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
                 Self::fill_str(&mut buf, s);
                 let spaces = n.saturating_sub(s.len());
                 Self::fill_spaces(&mut buf, spaces);
@@ -102,12 +102,12 @@ impl Shell {
                 print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::ClearLine { n, c } => {
-                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
                 Self::fill_clear_line(&mut buf, n, c);
                 print!("{}", buf.as_str().expect("should be valid UTF-8"));
             }
             LineDisplayAction::RedrawLine { s, n, c } => {
-                let mut buf: Vec<u8, DISPLAY_BUF_SIZE> = Vec::new();
+                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
                 Self::fill_clear_line(&mut buf, n, c);
                 Self::fill_str(&mut buf, s);
                 let spaces = n.saturating_sub(s.len());

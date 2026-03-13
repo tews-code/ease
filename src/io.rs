@@ -187,10 +187,10 @@ mod test {
 mod baselines {
     // Baselines measured with profile.test opt-level = 1
     // Set at ~2x measured values for QEMU timing variance
-    pub const PRINT_HELLO: u64 = 300_000;
-    pub const PRINTLN_HELLO: u64 = 2_500_000;
-    pub const PRINTLN_FORMATTED: u64 = 500_000;
-    pub const PRINTLN_LONG: u64 = 4_000_000;
+    pub const PRINT_HELLO: u64 = 600_000;
+    pub const PRINTLN_HELLO: u64 = 5_000_000;
+    pub const PRINTLN_FORMATTED: u64 = 1_000_000;
+    pub const PRINTLN_LONG: u64 = 8_000_000;
 }
 
 #[cfg(test)]

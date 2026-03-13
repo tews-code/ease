@@ -201,7 +201,7 @@ impl<R: Renderer> Console<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::collection::Vec;
+    use crate::kernel::collection::StackVec;
 
     fn new_buffer() -> TextBuffer {
         TextBuffer {
@@ -217,8 +217,8 @@ mod tests {
         }
     }
 
-    fn collect_cmds(emu: &mut TerminalEmulator, ch: u8) -> Vec<RenderCommand, 8> {
-        let mut cmds: Vec<RenderCommand, 8> = Vec::new();
+    fn collect_cmds(emu: &mut TerminalEmulator, ch: u8) -> StackVec<RenderCommand, 8> {
+        let mut cmds: StackVec<RenderCommand, 8> = StackVec::new();
         emu.process(ch, |cmd| {
             cmds.push(cmd).unwrap();
         });

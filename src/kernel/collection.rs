@@ -10,12 +10,12 @@ use core::ops::{Index, IndexMut};
 /// The elements must be Copy.
 /// All elements are held on the stack.
 #[derive(Clone, Copy, Debug)]
-pub struct Vec<T: Copy, const N: usize> {
+pub struct StackVec<T: Copy, const N: usize> {
     len: usize,
     buf: [MaybeUninit<T>; N],
 }
 
-impl<T: Copy, const N: usize> Vec<T, N> {
+impl<T: Copy, const N: usize> StackVec<T, N> {
     /// Create a new collection of maximum N elements of type T
     ///
     /// Use turbofish syntax to create
@@ -122,7 +122,7 @@ impl<T: Copy, const N: usize> Vec<T, N> {
     }
 }
 
-impl<const N: usize> Vec<u8, N> {
+impl<const N: usize> StackVec<u8, N> {
     /// Returns a string slice of the collection
     ///
     /// Elements must bytes and valid for UTF-8.
@@ -140,7 +140,7 @@ impl<const N: usize> Vec<u8, N> {
     }
 }
 
-impl<T: Copy, const N: usize> Index<usize> for Vec<T, N> {
+impl<T: Copy, const N: usize> Index<usize> for StackVec<T, N> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -149,7 +149,7 @@ impl<T: Copy, const N: usize> Index<usize> for Vec<T, N> {
     }
 }
 
-impl<T: Copy, const N: usize> IndexMut<usize> for Vec<T, N> {
+impl<T: Copy, const N: usize> IndexMut<usize> for StackVec<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         assert!(index < self.len, "index out of bounds");
         unsafe { self.buf[index].assume_init_mut() }
@@ -162,7 +162,7 @@ mod tests {
 
     #[test_case]
     fn test_push_and_index() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         assert!(v.push(10).is_ok());
         assert!(v.push(20).is_ok());
         assert!(v.push(30).is_ok());
@@ -174,7 +174,7 @@ mod tests {
 
     #[test_case]
     fn test_push_full() {
-        let mut v: Vec<u8, 2> = Vec::new();
+        let mut v: StackVec<u8, 2> = StackVec::new();
         assert!(v.push(1).is_ok());
         assert!(v.push(2).is_ok());
         // Full — returns the element back
@@ -185,7 +185,7 @@ mod tests {
 
     #[test_case]
     fn test_pop() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         assert_eq!(v.pop(), Some(2));
@@ -195,13 +195,13 @@ mod tests {
 
     #[test_case]
     fn test_pop_empty() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         assert_eq!(v.pop(), None);
     }
 
     #[test_case]
     fn test_insert_at_beginning() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(2).unwrap();
         v.push(3).unwrap();
         assert!(v.insert(0, 1).is_ok());
@@ -213,7 +213,7 @@ mod tests {
 
     #[test_case]
     fn test_insert_at_middle() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         v.push(3).unwrap();
         assert!(v.insert(1, 2).is_ok());
@@ -224,7 +224,7 @@ mod tests {
 
     #[test_case]
     fn test_insert_at_end() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         // Insert at index == len is equivalent to push
@@ -235,7 +235,7 @@ mod tests {
 
     #[test_case]
     fn test_insert_beyond_len() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         // index 5 is way past len()==1
         assert_eq!(v.insert(5, 99).unwrap_err(), 99);
@@ -244,7 +244,7 @@ mod tests {
 
     #[test_case]
     fn test_insert_when_full() {
-        let mut v: Vec<u32, 2> = Vec::new();
+        let mut v: StackVec<u32, 2> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         assert_eq!(v.insert(0, 99).unwrap_err(), 99);
@@ -253,7 +253,7 @@ mod tests {
 
     #[test_case]
     fn test_remove_beginning() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         v.push(3).unwrap();
@@ -265,7 +265,7 @@ mod tests {
 
     #[test_case]
     fn test_remove_middle() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         v.push(3).unwrap();
@@ -276,7 +276,7 @@ mod tests {
 
     #[test_case]
     fn test_remove_end() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         v.push(3).unwrap();
@@ -286,7 +286,7 @@ mod tests {
 
     #[test_case]
     fn test_remove_out_of_bounds() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         v.push(1).unwrap();
         assert_eq!(v.remove(5), None);
         assert_eq!(v.remove(1), None);
@@ -295,7 +295,7 @@ mod tests {
 
     #[test_case]
     fn test_clear() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         v.clear();
@@ -305,7 +305,7 @@ mod tests {
 
     #[test_case]
     fn test_is_empty_and_is_full() {
-        let mut v: Vec<u8, 2> = Vec::new();
+        let mut v: StackVec<u8, 2> = StackVec::new();
         assert!(v.is_empty());
         assert!(!v.is_full());
         v.push(1).unwrap();
@@ -318,7 +318,7 @@ mod tests {
 
     #[test_case]
     fn test_as_slice() {
-        let mut v: Vec<u32, 8> = Vec::new();
+        let mut v: StackVec<u32, 8> = StackVec::new();
         v.push(10).unwrap();
         v.push(20).unwrap();
         v.push(30).unwrap();
@@ -327,7 +327,7 @@ mod tests {
 
     #[test_case]
     fn test_as_str() {
-        let mut v: Vec<u8, 16> = Vec::new();
+        let mut v: StackVec<u8, 16> = StackVec::new();
         for &b in b"hello" {
             v.push(b).unwrap();
         }
@@ -336,7 +336,7 @@ mod tests {
 
     #[test_case]
     fn test_copy_from_str() {
-        let mut v: Vec<u8, 16> = Vec::new();
+        let mut v: StackVec<u8, 16> = StackVec::new();
         v.copy_from_str("ease");
         assert_eq!(v.as_str(), Ok("ease"));
         assert_eq!(v.len(), 4);
@@ -344,7 +344,7 @@ mod tests {
 
     #[test_case]
     fn test_copy_from_str_truncates() {
-        let mut v: Vec<u8, 4> = Vec::new();
+        let mut v: StackVec<u8, 4> = StackVec::new();
         v.copy_from_str("toolong");
         assert_eq!(v.len(), 4);
         assert_eq!(v.as_str(), Ok("tool"));
@@ -352,7 +352,7 @@ mod tests {
 
     #[test_case]
     fn test_index_mut() {
-        let mut v: Vec<u32, 4> = Vec::new();
+        let mut v: StackVec<u32, 4> = StackVec::new();
         v.push(1).unwrap();
         v.push(2).unwrap();
         v[1] = 99;

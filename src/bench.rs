@@ -12,18 +12,25 @@ use core::arch::asm;
 /// Returns the number of clock cycles since reset.
 /// On RV32, this reads both `cycleh` and `cycle` CSRs.
 fn cycles() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    unsafe {
-        asm!(
-            "rdcycleh {hi}",
-            "rdcycle {lo}",
-            hi = out(reg) hi,
-            lo = out(reg) lo,
-            options(nomem, nostack),
-        );
+    let mut lo: u32;
+    let mut hi1: u32;
+    let mut hi2: u32;
+    loop {
+        unsafe {
+            asm!(
+                "rdcycleh {hi1}",
+                "rdcycle {lo}",
+                "rdcycleh {hi2}",
+                hi1 = out(reg) hi1,
+                lo = out(reg) lo,
+                hi2 = out(reg) hi2,
+                options(nomem, nostack),
+            );
+        }
+        if hi1 == hi2 {
+            return ((hi1 as u64) << 32) | (lo as u64);
+        }
     }
-    ((hi as u64) << 32) | (lo as u64)
 }
 
 /// Measure the number of cycles taken by a closure
