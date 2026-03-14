@@ -4,8 +4,7 @@
 
 use core::ptr::{read_volatile, write_volatile};
 
-/// UART base address in QEMU virt board (16550 compatible)
-const UART_ADDRESS: usize = 0x10000000;
+use crate::board::uart;
 
 /// UART writer for QEMU
 pub struct UartWriter;
@@ -13,7 +12,7 @@ pub struct UartWriter;
 impl crate::hal::Writer for UartWriter {
     fn write_byte(&self, byte: u8) {
         unsafe {
-            write_volatile(UART_ADDRESS as *mut u8, byte);
+            write_volatile(uart::BASE as *mut u8, byte);
         }
 
         #[cfg(test)]
@@ -33,14 +32,14 @@ pub struct UartReader;
 
 impl crate::hal::Reader for UartReader {
     fn read_byte(&self) -> Option<u8> {
-        const LSR: usize = 5;
-        const BYTE_READY: u8 = 1;
         // First check LSR byte
-        if unsafe { read_volatile((UART_ADDRESS + LSR) as *const u8) } & BYTE_READY == 0 {
+        if unsafe { read_volatile((uart::BASE + uart::LSR) as *const u8) } & uart::LSR_BYTE_READY
+            == 0
+        {
             None
         } else {
             // Read the byte as ready
-            Some(unsafe { read_volatile(UART_ADDRESS as *const u8) })
+            Some(unsafe { read_volatile(uart::BASE as *const u8) })
         }
     }
 }

@@ -1,10 +1,8 @@
 //! Boot code for QEMU virt machine
 //!
-//! Contains early startup: stack init, BSS zeroing,   jump to main.
+//! Contains early startup: stack init, BSS zeroing, jump to main.
 
 use core::arch::naked_asm;
-
-const MSTATUS_MIE: u32 = 0x8;
 
 // The extern block and _start function go here
 // # Safety
@@ -42,16 +40,14 @@ extern "C" fn _start() -> ! {
         "la t0, _trap_vector",
         "csrw mtvec, t0",
 
-        // Enable interrupts
-        "csrsi mstatus, {mstatus_mie}",
-
         "j main",
+
+        // Park unused core
         "park:",
         "wfi",
         "j park",
         stack_top = sym __stack_top,
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
-        mstatus_mie = const MSTATUS_MIE,
     );
 }

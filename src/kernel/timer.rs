@@ -2,51 +2,21 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::arch::csr;
+use crate::drivers::clint::{Clint, with_clint};
 use crate::kernel::stack_guard;
 
-const CLINT_BASE: usize = 0x2000000;
-const MTIME: usize = CLINT_BASE + 0xBFF8;
-const MTIMECMP: usize = CLINT_BASE + 0x4000;
-
 /// Timer interval (QEMU runs at 10MHz, so 10_000 = 1ms)
-const TIMER_INTERVAL: u64 = 10_000;
+const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 1_000; // 1ms
 
 /// Global tick counter (incremented by timer interrupt)
 /// Note will wrap at 49 days (as 32-bit)
 static TICKS: AtomicUsize = AtomicUsize::new(0);
 
-/// Read the current mtime counter value
-pub fn get_mtime() -> u64 {
-    loop {
-        let hi1 = unsafe { core::ptr::read_volatile((MTIME + 4) as *const u32) };
-        let lo = unsafe { core::ptr::read_volatile(MTIME as *const u32) };
-        let hi2 = unsafe { core::ptr::read_volatile((MTIME + 4) as *const u32) };
-        if hi1 == hi2 {
-            return ((hi1 as u64) << 32) | (lo as u64);
-        }
-    }
-}
-
-/// Set the timer comparison `mtimecmp` to trigger interrupt at given ticks count
-pub fn set_mtimecmp(trigger_tick_count: u64) {
-    unsafe {
-        // Write max to low word first to avoid spurious interrupts
-        core::ptr::write_volatile(MTIMECMP as *mut u32, u32::MAX);
-        core::ptr::write_volatile(
-            (MTIMECMP + 4) as *mut u32,
-            (trigger_tick_count >> 32) as u32,
-        );
-        core::ptr::write_volatile(MTIMECMP as *mut u32, trigger_tick_count as u32);
-    }
-}
-
 /// Initialise the timer
 pub fn init() {
-    const MIE_MTIE: u32 = 1 << 7;
-    set_mtimecmp(get_mtime() + TIMER_INTERVAL);
-    unsafe {
-        core::arch::asm!("csrs mie, {}", in(reg) MIE_MTIE);
-    }
+    with_clint(|c| c.set_mtimecmp(Clint::mtime() + TIMER_INTERVAL));
+    csr::mie::enable_bits(csr::mie::MTIE);
 }
 
 /// Handle interrupt called by trap vector
@@ -55,7 +25,10 @@ pub fn handle_interrupt() {
         panic!("Stack has grown into heap");
     }
     TICKS.fetch_add(1, Ordering::Relaxed);
-    set_mtimecmp(get_mtime() + TIMER_INTERVAL);
+    with_clint(|c| {
+        let next = c.get_mtimecmp() + TIMER_INTERVAL;
+        c.set_mtimecmp(next);
+    })
 }
 
 /// Get current tick count (TIMER_INTERVAL is 1ms)
@@ -64,6 +37,7 @@ pub fn ticks_ms() -> usize {
 }
 
 /// Sleep for given ms
+#[allow(dead_code)]
 pub fn sleep_ms(ms: usize) {
     let start = ticks_ms();
     while ticks_ms().wrapping_sub(start) < ms {
@@ -74,9 +48,10 @@ pub fn sleep_ms(ms: usize) {
 }
 
 /// Busy wait for given ms
+#[allow(dead_code)]
 pub fn busy_wait_ms(ms: usize) {
-    let count_start = get_mtime();
-    while get_mtime() - count_start < ms as u64 * TIMER_INTERVAL {
+    let count_start = Clint::mtime();
+    while Clint::mtime() - count_start < ms as u64 * TIMER_INTERVAL {
         core::hint::spin_loop();
     }
 }
@@ -114,9 +89,9 @@ mod tests {
 
     #[test_case]
     fn test_busy_wait_ms() {
-        let start = get_mtime();
+        let start = Clint::mtime();
         busy_wait_ms(100);
-        let elapsed = (get_mtime() - start) / TIMER_INTERVAL;
+        let elapsed = (Clint::mtime() - start) / TIMER_INTERVAL;
         assert!(elapsed >= 90, "busy_wait too short: {}ms", elapsed);
         assert!(elapsed <= 150, "busy_wait too long: {}ms", elapsed);
     }

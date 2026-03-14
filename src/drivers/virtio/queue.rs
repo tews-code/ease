@@ -1,36 +1,24 @@
 //! Virtio queue for QEMU board
 
 use alloc::boxed::Box;
-use core::ptr;
 
+use crate::arch::mmio;
+use crate::board::virtio_blk;
 use crate::hal::PAGE_SIZE;
 
-const VIRTIO_REG_GUEST_PAGE_SIZE: u32 = 0x28;
-pub(super) const VIRTQ_ENTRY_NUM: usize = 16;
-pub(super) const VIRTIO_DEVICE_BLK: u32 = 2;
-pub(super) const VIRTIO_BLK_PADDR: u32 = 0x10001000;
-pub(super) const VIRTIO_REG_MAGIC: u32 = 0x00;
-pub(super) const VIRTIO_REG_VERSION: u32 = 0x04;
-pub(super) const VIRTIO_REG_DEVICE_ID: u32 = 0x08;
-pub(super) const VIRTIO_REG_QUEUE_SEL: u32 = 0x30;
+const VIRTIO_REG_GUEST_PAGE_SIZE: usize = 0x28;
+const VIRTIO_REG_QUEUE_SEL: usize = 0x30;
 #[expect(dead_code)]
-pub(super) const VIRTIO_REG_QUEUE_NUM_MAX: u32 = 0x34;
-pub(super) const VIRTIO_REG_QUEUE_NUM: u32 = 0x38;
-pub(super) const VIRTIO_REG_QUEUE_ALIGN: u32 = 0x3c;
-pub(super) const VIRTIO_REG_QUEUE_PFN: u32 = 0x40;
+const VIRTIO_REG_QUEUE_NUM_MAX: usize = 0x34;
+const VIRTIO_REG_QUEUE_NUM: usize = 0x38;
+const VIRTIO_REG_QUEUE_ALIGN: usize = 0x3c;
+const VIRTIO_REG_QUEUE_PFN: usize = 0x40;
 #[expect(dead_code)]
-pub(super) const VIRTIO_REG_QUEUE_READY: u32 = 0x44;
-pub(super) const VIRTIO_REG_QUEUE_NOTIFY: u32 = 0x50;
-pub(super) const VIRTIO_REG_DEVICE_STATUS: u32 = 0x70;
-pub(super) const VIRTIO_REG_DEVICE_CONFIG: u32 = 0x100;
-pub(super) const VIRTIO_STATUS_ACK: u32 = 1;
-pub(super) const VIRTIO_STATUS_DRIVER: u32 = 2;
-pub(super) const VIRTIO_STATUS_DRIVER_OK: u32 = 4;
-pub(super) const VIRTIO_STATUS_FEAT_OK: u32 = 8;
-pub(super) const VIRTQ_DESC_F_NEXT: u32 = 1;
-pub(super) const VIRTQ_DESC_F_WRITE: u32 = 2;
+const VIRTIO_REG_QUEUE_READY: usize = 0x44;
+const VIRTIO_REG_QUEUE_NOTIFY: usize = 0x50;
+const VIRTQ_ENTRY_NUM: usize = 16;
 #[expect(dead_code)]
-pub(super) const VIRTQ_AVAIL_F_NO_INTERRUPT: u32 = 1;
+const VIRTQ_AVAIL_F_NO_INTERRUPT: u32 = 1;
 
 pub(super) struct VirtqToken {
     used_index: *const u16,
@@ -115,44 +103,6 @@ unsafe impl Sync for VirtioVirtq {}
 // no concurrent access occurs. The hardware is accessible from any CPU core.
 unsafe impl Send for VirtioVirtq {}
 
-pub(super) fn virtio_reg_read32(offset: u32) -> u32 {
-    assert_eq!((VIRTIO_BLK_PADDR + offset) % align_of::<u32>() as u32, 0);
-    unsafe {
-        // Safety:
-        // * VIRTIO_BLK_PADDR + offset is valid for reads
-        // * VIRTIO_BLK_PADDR is 32-bit aligned and offset is 32-bit aligned
-        // * VIRTIO_BLK_PADDR + offset points to a QEMU initialized `u32`
-        // * `u32` is Copy
-        ptr::read_volatile((VIRTIO_BLK_PADDR + offset) as *const u32)
-    }
-}
-
-pub(super) fn virtio_reg_read64(offset: u32) -> u64 {
-    assert_eq!((VIRTIO_BLK_PADDR + offset) % align_of::<u64>() as u32, 0);
-    unsafe {
-        // Safety:
-        // * VIRTIO_BLK_PADDR + offset is valid for reads
-        // * VIRTIO_BLK_PADDR is 64-bit aligned and offset is 64-bit aligned
-        // * VIRTIO_BLK_PADDR + offset points to a QEMU initialized `u64`
-        // * `u64` is Copy
-        ptr::read_volatile((VIRTIO_BLK_PADDR + offset) as *const u64)
-    }
-}
-
-pub(super) fn virtio_reg_write32(offset: u32, value: u32) {
-    assert_eq!((VIRTIO_BLK_PADDR + offset) % align_of::<u32>() as u32, 0);
-    unsafe {
-        // Safety:
-        // * VIRTIO_BLK_PADDR + offset is valid for writes.
-        // * VIRTIO_BLK_PADDR + offset is properly 32-bit aligned.
-        ptr::write_volatile((VIRTIO_BLK_PADDR + offset) as *mut u32, value)
-    }
-}
-
-pub(super) fn virtio_reg_fetch_and_or32(offset: u32, value: u32) {
-    virtio_reg_write32(offset, virtio_reg_read32(offset) | value);
-}
-
 pub(super) fn virtq_init(index: usize) -> Box<VirtioVirtq> {
     // Allocate a region for the virtqueue.
     let mut vq = Box::new(VirtioVirtq::zeroed());
@@ -161,20 +111,32 @@ pub(super) fn virtq_init(index: usize) -> Box<VirtioVirtq> {
     vq.used_index = &raw mut vq.used.0.index; // Create pointer for read_volatile
 
     // 1. Select the queue writing its index (first queue is 0) to QueueSel.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_SEL, index as u32);
+    mmio::write32(virtio_blk::BASE, VIRTIO_REG_QUEUE_SEL, index as u32);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
-    virtio_reg_write32(VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM as u32);
+    mmio::write32(
+        virtio_blk::BASE,
+        VIRTIO_REG_QUEUE_NUM,
+        VIRTQ_ENTRY_NUM as u32,
+    );
     // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Align to 4096;
-    virtio_reg_write32(VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE as u32);
+    mmio::write32(virtio_blk::BASE, VIRTIO_REG_QUEUE_ALIGN, PAGE_SIZE as u32);
     // 7. Notify the device about the guest page size
-    virtio_reg_write32(VIRTIO_REG_GUEST_PAGE_SIZE, PAGE_SIZE as u32);
+    mmio::write32(
+        virtio_blk::BASE,
+        VIRTIO_REG_GUEST_PAGE_SIZE,
+        PAGE_SIZE as u32,
+    );
     // 8. Write the physical number of the first page of the queue to the QueuePFN register.
     let addr = &*vq as *const _ as u32;
     debug_assert!(
         addr.is_multiple_of(PAGE_SIZE as u32),
         "virtqueue not page-aligned"
     );
-    virtio_reg_write32(VIRTIO_REG_QUEUE_PFN, addr / PAGE_SIZE as u32); // In our OS the virtual address matches the physical address
+    mmio::write32(
+        virtio_blk::BASE,
+        VIRTIO_REG_QUEUE_PFN,
+        addr / PAGE_SIZE as u32,
+    ); // In our OS the virtual address matches the physical address
 
     vq
 }
@@ -187,7 +149,11 @@ pub(super) fn virtq_kick(vq: &mut VirtioVirtq, desc_index: u16) -> VirtqToken {
 
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst); // Equivalent to __sync_synchronise();
 
-    virtio_reg_write32(VIRTIO_REG_QUEUE_NOTIFY, vq.queue_index.into()); // converting `u16` to `u32` cannot fail
+    mmio::write32(
+        virtio_blk::BASE,
+        VIRTIO_REG_QUEUE_NOTIFY,
+        vq.queue_index.into(),
+    ); // converting `u16` to `u32` cannot fail
     vq.last_used_index += 1;
 
     VirtqToken {

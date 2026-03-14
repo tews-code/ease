@@ -7,12 +7,29 @@ use core::mem;
 
 mod queue;
 
+use crate::arch::mmio;
+use crate::board::virtio_blk;
 use crate::hal::{BLOCK_SIZE, BlockDevice};
 use crate::kernel::sync::SpinLock;
 use queue::*;
 
+const VIRTIO_REG_MAGIC: usize = 0x00;
+const VIRTIO_REG_VERSION: usize = 0x04;
+const VIRTIO_REG_DEVICE_ID: usize = 0x08;
+const VIRTIO_REG_DEVICE_STATUS: usize = 0x70;
+const VIRTIO_REG_DEVICE_CONFIG: usize = 0x100;
+
+const VIRTIO_MAGIC: u32 = 0x74726976;
+const VIRTIO_VER: u32 = 1;
 const VIRTIO_BLK_T_IN: u32 = 0;
 const VIRTIO_BLK_T_OUT: u32 = 1;
+const VIRTIO_DEVICE_BLK: u32 = 2;
+const VIRTIO_STATUS_ACK: u32 = 1;
+const VIRTIO_STATUS_DRIVER: u32 = 2;
+const VIRTIO_STATUS_DRIVER_OK: u32 = 4;
+const VIRTIO_STATUS_FEAT_OK: u32 = 8;
+const VIRTQ_DESC_F_NEXT: u32 = 1;
+const VIRTQ_DESC_F_WRITE: u32 = 2;
 
 // Virtio-blk request.
 #[repr(C, packed)]
@@ -30,34 +47,59 @@ struct VirtioBlkState {
     vq: Box<VirtioVirtq>,
 }
 
+// Set the bits in `value` to the 32 bit MMIO register at `base` + `offset`
+//
+// This does not disable interrupts
+fn set_bits32(base: usize, offset: usize, value: u32) {
+    mmio::write32(base, offset, mmio::read32(base, offset) | value);
+}
+
 impl VirtioBlkState {
     #[allow(clippy::identity_op)]
     fn new() -> Self {
-        if virtio_reg_read32(VIRTIO_REG_MAGIC) != 0x74726976 {
+        if mmio::read32(virtio_blk::BASE, VIRTIO_REG_MAGIC) != VIRTIO_MAGIC {
             panic!("virtio: invalid magic value");
         }
-        if virtio_reg_read32(VIRTIO_REG_VERSION) != 1 {
+        if mmio::read32(virtio_blk::BASE, VIRTIO_REG_VERSION) != VIRTIO_VER {
             panic!("virtio: invalid version");
         }
-        if virtio_reg_read32(VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK {
+        if mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_ID) != VIRTIO_DEVICE_BLK {
             panic!("virtio: invalid version");
         }
 
         // 1. Reset the device
-        virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, 0);
+        mmio::write32(virtio_blk::BASE, VIRTIO_REG_DEVICE_STATUS, 0);
         // 2. Set the ACKNOWLEDGE status bit: the guest OS has noticed the device
-        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK);
+        set_bits32(
+            virtio_blk::BASE,
+            VIRTIO_REG_DEVICE_STATUS,
+            VIRTIO_STATUS_ACK,
+        );
         // 3. Set the DRIVER status bit.
-        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER);
+        set_bits32(
+            virtio_blk::BASE,
+            VIRTIO_REG_DEVICE_STATUS,
+            VIRTIO_STATUS_DRIVER,
+        );
         // 5. Set the FEATURES_OK status bit
-        virtio_reg_fetch_and_or32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_FEAT_OK);
+        set_bits32(
+            virtio_blk::BASE,
+            VIRTIO_REG_DEVICE_STATUS,
+            VIRTIO_STATUS_FEAT_OK,
+        );
         // 7. Perform device-specific setup, including discovery of virtqueues for the device
         let vq = virtq_init(0);
         // 8. Set the DRIVER_OK status bit.
-        virtio_reg_write32(VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_DRIVER_OK);
+        mmio::write32(
+            virtio_blk::BASE,
+            VIRTIO_REG_DEVICE_STATUS,
+            VIRTIO_STATUS_DRIVER_OK,
+        );
 
         // Get the disk capacity.
-        let capacity = virtio_reg_read64(VIRTIO_REG_DEVICE_CONFIG + 0) * BLOCK_SIZE as u64;
+        let cap_lo = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG) as u64;
+        let cap_hi = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG + 4) as u64;
+        let capacity = (cap_hi << 32 | cap_lo) * BLOCK_SIZE as u64;
 
         crate::printdln!("virtio-blk: capacity is {} bytes", capacity);
 
@@ -188,7 +230,7 @@ mod test {
     #[test_case]
     fn device_status_after_init() {
         // virtio_blk_init() already ran in main(); verify DRIVER_OK is set
-        let status = virtio_reg_read32(VIRTIO_REG_DEVICE_STATUS);
+        let status = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_STATUS);
         assert_eq!(status & VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_DRIVER_OK);
     }
 

@@ -1,5 +1,6 @@
 //! Device drivers
 
+pub mod clint;
 pub mod console;
 pub mod font;
 pub mod ramfb;

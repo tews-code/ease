@@ -6,7 +6,6 @@
 //!
 //! 1. QEMU loads the kernel binary at `0x80000000` (RAM base, set in `memory-qemu.x`)
 //! 2. CPU begins execution at the `ENTRY` symbol: [`_start`]
-//! 3. Currently just loops forever — no stack, BSS, or hardware init yet
 //!
 //! # Memory Layout
 //!
@@ -19,7 +18,7 @@
 //! | `.data`   | RAM      | Initialized mutable data    |
 //! | `.bss`    | RAM      | Zero-initialized data       |
 //!
-//! RAM spans `0x80000000` to `0x88000000` (128 MB on QEMU virt).
+//! RAM spans `0x80000000` to `0x81800000` (32 MB on QEMU virt).
 
 #![no_std]
 #![no_main]
@@ -32,6 +31,7 @@ extern crate alloc;
 
 mod arch;
 mod bench;
+mod board;
 mod drivers;
 mod fs;
 mod hal;
@@ -67,7 +67,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 fn kernel_init() {
     kernel::stack_guard::init();
     kernel::alloc::init();
-    arch::timer::init();
+    kernel::timer::init();
+    arch::enable_interrupts();
     drivers::virtio::virtio_blk_init();
     let fb = drivers::ramfb::FrameBuffer::init();
     let fbr = drivers::render::FrameBufferRenderer::new(

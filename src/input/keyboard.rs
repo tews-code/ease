@@ -35,7 +35,7 @@ impl<R: Reader> Keyboard for KeyboardInput<R> {
             ParseResult::InvalidSequence => None,
             ParseResult::Pending => {
                 // Wait for 10ms for rest of escape key sequence
-                let deadline = crate::arch::timer::ticks_ms() + 10;
+                let deadline = crate::kernel::timer::ticks_ms() + 10;
                 loop {
                     if let Some(next) = self.reader.read_byte() {
                         match self.parser.parse(next) {
@@ -45,7 +45,7 @@ impl<R: Reader> Keyboard for KeyboardInput<R> {
                             ParseResult::Pending => continue, // still in sequence get next
                         }
                     }
-                    if crate::arch::timer::ticks_ms() >= deadline {
+                    if crate::kernel::timer::ticks_ms() >= deadline {
                         break;
                     }
                     core::hint::spin_loop();

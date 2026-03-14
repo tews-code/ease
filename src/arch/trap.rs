@@ -102,7 +102,7 @@ extern "C" fn trap_handler() {
 
     if is_interrupt {
         match code {
-            INTERRUPT_TIMER => crate::arch::timer::handle_interrupt(),
+            INTERRUPT_TIMER => crate::kernel::timer::handle_interrupt(),
             _ => crate::printdln!("Unknown interrupt {}", code),
         }
     } else {

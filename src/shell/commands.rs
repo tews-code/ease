@@ -2,8 +2,8 @@
 
 #![allow(dead_code)]
 
-use crate::arch::timer;
 use crate::hal::ascii;
+use crate::kernel::timer;
 use crate::{print, println};
 
 pub fn clear() {
