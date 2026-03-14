@@ -9,10 +9,10 @@ This plan establishes a realistic QEMU environment and cherry-picks MOSS's best 
 ## Dependency Graph
 
 ```
-Step 1: QEMU + memory.x + core 1 parking
+Step 1: QEMU + memory.x + core 1 parking  [DONE]
   |
   v
-Step 2: board.rs (centralize constants)
+Step 2: board.rs (centralize constants)  [DONE]
   |
   +---> Step 3: SpscRingBuf
   |
@@ -32,7 +32,7 @@ Steps 3 and 4 are independent of each other. Step 7 is independent but sequenced
 
 ---
 
-## Step 1: QEMU Config, Memory Layout, Core 1 Parking
+## Step 1: QEMU Config, Memory Layout, Core 1 Parking [DONE]
 
 **Goal**: Dual-core QEMU with constrained memory regions matching RP2350 intent.
 
@@ -52,7 +52,7 @@ Steps 3 and 4 are independent of each other. Step 7 is independent but sequenced
 
 ---
 
-## Step 2: board.rs (Centralize Constants)
+## Step 2: board.rs (Centralize Constants) [DONE]
 
 **Goal**: Single source of truth for all hardware addresses and register offsets.
 
