@@ -1,42 +1,88 @@
-ENTRY(_start)
+ENTRY(_start) /* For ELF metadata e.g. debugger */
+
+/*
+ * Memory layout for QEMU `virt` machine
+ *
+ * We are modeling an RP2350 microcontroller with 520KB SRAM and 8MB PSRAM,
+ * some of which is assigned to a framebuffer. QEMU is configured to provide
+ * 32MB of physical RAM starting at 0x80000000.
+ * We declare only 520KB as our working SRAM region. PSRAM is placed
+ * at a separate address (0x81000000) to model a separate PSRAM region,
+ * similar to real hardware (see e.g. Adafruit Metro RP2350 with PSRAM).
+ *
+ * 0x80000000  +--------------------+
+ *             | .text              |
+ *             | .rodata / .srodata |
+ *             | .data / .sdata     |
+ *             | .bss / .sbss       |
+ *             | heap -->           |  Grows up (bump allocator, bounded by __heap_end)
+ *             |                    |
+ *             |        <-- stack   |  Grows down from __stack_top (64KB reserved)
+ * 0x80082000  +--------------------+  End of declared SRAM (520KB)
+ *             :   (unused gap)     :
+ * 0x81000000  +--------------------+
+ *             | PSRAM (8MB)        |
+ *             |                    |
+ * 0x816d4000  | 640x480x4 fb       | Framebuffer configured via QEMU ramfb
+ * 0x81800000  +--------------------+ End of declared PSRAM
+ *
+ * The heap cannot grow past __heap_end (enforced by the bump allocator).
+ * The gap between SRAM and PSRAM is backed by QEMU's physical RAM but is
+ * not used.
+ */
 
 MEMORY {
-    RAM : ORIGIN = 0x80000000, LENGTH = 0x8000000
+    SRAM : ORIGIN = 0x80000000, LENGTH = 0x00082000 /* 520 KB SRAM on RP2350, not power 2 */
+    PSRAM : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB PSRAM */
 }
 
-__stack_top = 0x80100000;
-__fb_addr   = 0x80200000;
+__stack_top = 0x80082000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
+__psram_start = 0x81000000;
+__psram_end = 0x81800000;
 __fb_size   = 640 * 480 * 4;   /* 640  x 480 x 4 bytes = 1.2MiB */
+__fb_addr   = 0x81800000 - __fb_size;
 
 
 SECTIONS {
     .text : {
         *(.text.init)
         *(.text .text.*)
-    } > RAM
+    } > SRAM
 
-    .rodata : { *(.rodata .rodata.*) } > RAM
+    .rodata : { *(.rodata .rodata.* .srodata .srodata.*) } > SRAM
 
-    .data : { *(.data .data.*) } > RAM
+    .data : {
+        *(.data .data.*)
+         PROVIDE(__global_pointer$ = . + 0x800); /* Small variable gp pointer address at + 2KB */
+         *(.sdata .sdata.*)
+    } > SRAM
 
     .bss : { 
-	__bss_start = .;
-	*(.bss .bss.*) 
-	__bss_end = .;
-    } > RAM
+        . = ALIGN(4);
+        __bss_start = .;
+        *(.bss .bss.* .sbss .sbss.*)
+        . = ALIGN(4);
+        __bss_end = .;
+    } > SRAM
 
-    /* Heap: 64KB after BSS */
-    . = ALIGN(16);
-    __heap_start = .;
-    . = . + 64K;
-    __heap_end = .;
+    .heap (NOLOAD) : ALIGN(16) {
+        __heap_start = .;
+        . = . + 64K;
+        __heap_end = .;
+    } > SRAM
 
     /* Add stack guard with 4 bytes reserved */
-    __stack_guard = .;
-    . = . + 4;
+    .stack_guard (NOLOAD) : {
+        __stack_guard = .;
+        . = . + 4;
+    } > SRAM
 
+    /DISCARD/ : { *(.comment) } /* Discard comment strings to keep binary small */
+    /* Note - .eh_frame is not emitted by LLVM for target riscv32imac-unknown-none-elf (panic=abort) */
 }
 
+ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
+ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
 ASSERT(__heap_end <= __stack_top, "heap overlaps stack region")
-ASSERT(__stack_top <= __fb_addr, "stack region overlaps framebuffer")
-ASSERT(__fb_addr + __fb_size <= ORIGIN(RAM) + LENGTH(RAM), "framebuffer exceeds RAM")
+ASSERT(__heap_end <= __psram_start, "heap overlaps psram region")
+ASSERT(__stack_guard + 4 <= __stack_top, "SRAM sections overflow into stack")

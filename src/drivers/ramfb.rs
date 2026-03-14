@@ -15,12 +15,13 @@ impl FrameBuffer {
     const HEIGHT: usize = 480;
     const STRIDE: usize = Self::WIDTH * 4; // 4 bytes per pixel
 
-    // Framebuffer address (after stack at 0x80100000) must match linker
-    const FB_ADDR: usize = 0x80200000;
+    // Framebuffer address (at end of PSRAM at 0x816d4000) from linker
+    fn fb_addr() -> usize {
+        &raw const __fb_addr as usize
+    }
 
     // Initialize the framebuffer
     pub fn init() -> Self {
-        debug_assert_eq!(Self::FB_ADDR, &raw const __fb_addr as usize);
         // Configuration sent to QEMU (all fields big-endian)
         #[repr(C, packed)]
         struct RamfbConfig {
@@ -33,7 +34,7 @@ impl FrameBuffer {
         }
 
         let config = RamfbConfig {
-            addr: (Self::FB_ADDR as u64).to_be(),
+            addr: (Self::fb_addr() as u64).to_be(),
             fourcc: Colour::pixel_format().to_be(),
             flags: 0,
             width: (Self::WIDTH as u32).to_be(),
@@ -49,7 +50,7 @@ impl FrameBuffer {
             "ramfb: {}x{} at {:#x}",
             Self::WIDTH,
             Self::HEIGHT,
-            Self::FB_ADDR
+            Self::fb_addr()
         );
 
         // Send RamfbConfig to QEMU via DMA
@@ -103,7 +104,10 @@ impl FrameBuffer {
     fn buffer(&mut self) -> &mut [u32] {
         unsafe {
             // Safety: the framebuffer has been created and is safe for writes
-            core::slice::from_raw_parts_mut(Self::FB_ADDR as *mut u32, self.width() * self.height())
+            core::slice::from_raw_parts_mut(
+                Self::fb_addr() as *mut u32,
+                self.width() * self.height(),
+            )
         }
     }
 
@@ -135,6 +139,10 @@ impl FrameBuffer {
 
     /// Scroll the frame buffer by `scroll_height` pixels
     pub fn scroll(&mut self, scroll_height: usize, bg: Colour) {
+        if scroll_height >= self.height() {
+            self.fill(bg);
+            return;
+        }
         let w = self.width();
         self.buffer().copy_within(scroll_height * w.., 0);
         self.fill_rows(self.height() - scroll_height, scroll_height, bg);
