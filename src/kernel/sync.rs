@@ -1,10 +1,43 @@
 //! Synchronisation primitives
 
 use core::cell::UnsafeCell;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::{disable_interrupts, restore_interrupts};
+
+/// Zero-sized proof that interrupts are disabled.
+/// Private constructor — only `with_interrupts_disabled` can create one.
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+pub struct CriticalSection<'cs> {
+    _lifetime: PhantomData<&'cs ()>, // lifetime linked to struct existence
+}
+
+impl<'cs> CriticalSection<'cs> {
+    // # Safety
+    // Interrupts must be disabled for the duration of 'cs.
+    unsafe fn new() -> Self {
+        Self {
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+/// Runs the closure with interrupts disabled, providing a `CriticalSection` token
+/// as proof. Interrupts are restored to their previous state when the closure returns.
+#[allow(dead_code)]
+pub fn with_interrupts_disabled<F, R>(f: F) -> R
+where
+    F: FnOnce(CriticalSection<'_>) -> R,
+{
+    let prev = disable_interrupts();
+    let result = f(unsafe { CriticalSection::new() });
+    restore_interrupts(prev);
+
+    result
+}
 
 pub struct SpinLock<T> {
     locked: AtomicBool,

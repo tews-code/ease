@@ -19,13 +19,27 @@ const LSR_BYTE_READY: u8 = 1;
 const THRE_INTERRUPT: u8 = 1 << 1; // Transmitter Holding Register Empty - IER register bit 1
 
 static RX_BUF: SpscRingBuf<u8, 64> = SpscRingBuf::new();
+static TX_BUF: SpscRingBuf<u8, 256> = SpscRingBuf::new();
 
 /// UART writer for QEMU
 pub struct UartWriter;
 
 impl crate::hal::Writer for UartWriter {
     fn write_byte(&self, byte: u8) {
-        mmio::write8(uart::BASE, THR, byte);
+        while TX_BUF.push(byte).is_err() {
+            mmio::write8(
+                uart::BASE,
+                IER,
+                mmio::read8(uart::BASE, IER) | THRE_INTERRUPT,
+            );
+            core::hint::spin_loop();
+        }
+        // Enable THRE interrupt to drain the buffer
+        mmio::write8(
+            uart::BASE,
+            IER,
+            mmio::read8(uart::BASE, IER) | THRE_INTERRUPT,
+        );
 
         #[cfg(test)]
         crate::io::test_io::capture(byte);
@@ -37,6 +51,14 @@ impl core::fmt::Write for UartWriter {
         crate::hal::Writer::write_str(self, s);
         Ok(())
     }
+}
+
+/// Direct write to MMIO - skips queue
+pub fn direct_write_byte(byte: u8) {
+    while mmio::read8(uart::BASE, LSR) & LSR_TX_READY == 0 {
+        core::hint::spin_loop();
+    }
+    mmio::write8(uart::BASE, THR, byte);
 }
 
 /// UART reader for QEMU
@@ -63,7 +85,17 @@ pub fn handle_interrupt() {
             }
         }
         0b0010 => {
-            // THRE (TX ready) — nothing to do yet
+            // THRE (TX ready)
+            if let Some(byte) = TX_BUF.pop() {
+                mmio::write8(uart::BASE, THR, byte);
+            } else {
+                // Buffer empty — disable THRE interrupt
+                mmio::write8(
+                    uart::BASE,
+                    IER,
+                    mmio::read8(uart::BASE, IER) & !THRE_INTERRUPT,
+                );
+            }
         }
         0b0110 => {
             // Line status — read LSR to clear

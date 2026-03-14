@@ -5,6 +5,20 @@
 
 pub use crate::drivers::uart::UartWriter;
 
+/// Direct UART writer that bypasses TX buffer.
+///
+/// Safe to use from interrupt handlers and panic handler.
+pub struct DirectWriter;
+
+impl core::fmt::Write for DirectWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for &b in s.as_bytes() {
+            crate::drivers::uart::direct_write_byte(b);
+        }
+        Ok(())
+    }
+}
+
 /// Print to Console and UART
 ///
 /// Prints formatted string to Console and UART.
@@ -40,7 +54,7 @@ macro_rules! println {
 macro_rules! printd {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!($crate::io::UartWriter, $($arg)*);
+        let _ = write!($crate::io::DirectWriter, $($arg)*);
     }}
 }
 
