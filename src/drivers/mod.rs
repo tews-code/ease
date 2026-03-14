@@ -3,6 +3,7 @@
 pub mod clint;
 pub mod console;
 pub mod font;
+pub mod plic;
 pub mod ramfb;
 pub mod render;
 pub mod uart;
