@@ -6,6 +6,7 @@
 
 use crate::arch::mmio;
 use crate::board::uart;
+use crate::kernel::collection::SpscRingBuf;
 
 const RBR: usize = 0; // offset +0: receive buffer register (read)
 const THR: usize = 0; // offset +0: transmit holding register (write)
@@ -16,6 +17,8 @@ const LSR: usize = 5; // offset +5: line status register
 const LSR_TX_READY: u8 = 0x20;
 const LSR_BYTE_READY: u8 = 1;
 const THRE_INTERRUPT: u8 = 1 << 1; // Transmitter Holding Register Empty - IER register bit 1
+
+static RX_BUF: SpscRingBuf<u8, 64> = SpscRingBuf::new();
 
 /// UART writer for QEMU
 pub struct UartWriter;
@@ -41,14 +44,7 @@ pub struct UartReader;
 
 impl crate::hal::Reader for UartReader {
     fn read_byte(&self) -> Option<u8> {
-        // First check LSR byte
-
-        if mmio::read8(uart::BASE, LSR) & LSR_BYTE_READY == 0 {
-            None
-        } else {
-            // Read the byte as ready
-            Some(mmio::read8(uart::BASE, RBR))
-        }
+        RX_BUF.pop()
     }
 }
 
@@ -61,8 +57,10 @@ pub fn handle_interrupt() {
     match iir {
         0b0100 | 0b1100 => {
             // RX data ready — drain RBR to clear interrupt
-            // TODO: Step 6 will push into SpscRingBuf instead
-            let _ = mmio::read8(uart::BASE, RBR);
+            while mmio::read8(uart::BASE, LSR) & LSR_BYTE_READY != 0 {
+                let byte = mmio::read8(uart::BASE, RBR);
+                let _ = RX_BUF.push(byte); // drop if full
+            }
         }
         0b0010 => {
             // THRE (TX ready) — nothing to do yet
