@@ -100,7 +100,7 @@ extern "C" fn trap_handler() {
                         crate::drivers::uart::handle_interrupt();
                     }
                     crate::board::plic::VIRTIO0_IRQ => {
-                        // TODO handle interrupt for virtio
+                        crate::drivers::virtio::handle_virtio_interrupt();
                     }
                     _ => panic!("Unknown external interrupt: {}", irq),
                 }
