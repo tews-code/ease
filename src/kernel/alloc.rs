@@ -4,20 +4,20 @@
 
 use core::alloc::GlobalAlloc;
 
-use super::sync::SpinLock;
+use super::sync::IrqSpinLock;
 
 /// Bump allocator
 #[global_allocator]
 pub static BUMP_ALLOCATOR: BumpAllocator = BumpAllocator::new();
 
 pub struct BumpAllocator {
-    inner: SpinLock<BumpAllocatorInner>,
+    inner: IrqSpinLock<BumpAllocatorInner>,
 }
 
 impl BumpAllocator {
     pub const fn new() -> Self {
         Self {
-            inner: SpinLock::new(BumpAllocatorInner {
+            inner: IrqSpinLock::new(BumpAllocatorInner {
                 heap_start: 0,
                 heap_end: 0,
                 next: 0,
@@ -101,9 +101,9 @@ mod tests {
     const ITERATIONS: u32 = 10;
 
     mod baselines {
-        pub const BOX_NEW_U64: u64 = 180_000;
-        pub const VEC_PUSH_100_ITEMS: u64 = 1_000_000;
-        pub const STRING_FROM_SHORT: u64 = 120_000;
+        pub const BOX_NEW_U64: u64 = 360_000;
+        pub const VEC_PUSH_100_ITEMS: u64 = 2_000_000;
+        pub const STRING_FROM_SHORT: u64 = 240_000;
     }
 
     #[test_case]

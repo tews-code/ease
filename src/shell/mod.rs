@@ -141,6 +141,7 @@ impl Shell {
             "clear" => commands::clear(),
             "echo" => commands::echo(args),
             "time" => commands::time(),
+            "ls" => commands::ls(),
             _ => commands::unknown(cmd),
         }
     }

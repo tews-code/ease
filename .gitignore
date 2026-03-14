@@ -2,3 +2,4 @@
 Cargo.lock
 *.kate-swp
 disk.img
+.rust-analyzer.json

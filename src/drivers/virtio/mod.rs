@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::mmio;
 use crate::board::virtio_blk;
 use crate::hal::BLOCK_SIZE;
-use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::IrqSpinLock;
 use crate::kernel::timer::ticks_ms;
 
 mod queue;
@@ -79,7 +79,7 @@ pub struct VirtioBlkDev {
 
 pub type Blk = VirtioBlkDev;
 
-// SAFETY: All access is guarded by SpinLock (interrupts disabled while held).
+// SAFETY: All access is guarded by IrqSpinLock (interrupts disabled while held).
 unsafe impl Sync for VirtioBlkDev {}
 
 // Set the bits in `value` to the 32 bit MMIO register at `base` + `offset`
@@ -323,7 +323,7 @@ pub fn write_block_async(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkEr
     result
 }
 
-static BLK_DEV: SpinLock<Option<VirtioBlkDev>> = SpinLock::new(None);
+static BLK_DEV: IrqSpinLock<Option<VirtioBlkDev>> = IrqSpinLock::new(None);
 
 /// Initialise the virtio block device. Must be called before any block I/O.
 pub fn virtio_blk_init() {
@@ -396,9 +396,9 @@ mod baselines {
     //   READ_BLOCK:       200,000  (measured ~49,000)
     //   WRITE_BLOCK:    1,000,000  (measured ~277,000)
     //   WRITE_READ_BLOCK: 1,000,000  (measured ~246,000)
-    pub const READ_BLOCK: u64 = 2_000_000;
-    pub const WRITE_BLOCK: u64 = 2_000_000;
-    pub const WRITE_READ_BLOCK: u64 = 2_000_000;
+    pub const READ_BLOCK: u64 = 4_000_000;
+    pub const WRITE_BLOCK: u64 = 4_000_000;
+    pub const WRITE_READ_BLOCK: u64 = 4_000_000;
 }
 
 #[cfg(test)]

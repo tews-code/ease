@@ -12,10 +12,10 @@ pub mod virtio;
 use crate::drivers::console::Console;
 use crate::drivers::ramfb::FrameBuffer;
 use crate::drivers::render::{FrameBufferRenderer, Renderer};
-use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::IrqSpinLock;
 
-pub static DISPLAY: SpinLock<DisplayManager<FrameBufferRenderer>> =
-    SpinLock::new(DisplayManager::new());
+pub static DISPLAY: IrqSpinLock<DisplayManager<FrameBufferRenderer>> =
+    IrqSpinLock::new(DisplayManager::new());
 
 #[allow(clippy::large_enum_variant)]
 #[expect(dead_code)]

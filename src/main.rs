@@ -82,6 +82,8 @@ fn kernel_init() {
     arch::enable_interrupts();
 
     drivers::virtio::virtio_blk_init();
+    fs::fat16::fat16_init();
+
     let fb = drivers::ramfb::FrameBuffer::init();
     let fbr = drivers::render::FrameBufferRenderer::new(
         fb,

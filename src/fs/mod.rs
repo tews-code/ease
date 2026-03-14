@@ -2,10 +2,4 @@
 
 #![allow(dead_code)]
 
-mod fat16;
-
-#[derive(Debug)]
-pub enum FsError {
-    DeviceError,
-    NotFat16,
-}
+pub mod fat16;

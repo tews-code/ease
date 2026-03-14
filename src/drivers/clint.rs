@@ -2,7 +2,7 @@
 
 use crate::arch::mmio;
 use crate::board::clint;
-use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::IrqSpinLock;
 
 pub struct SiFiveClint(()); // Private field to prevent other modules creating this struct
 
@@ -55,7 +55,7 @@ impl SiFiveClint {
     }
 }
 
-static CLINT: SpinLock<SiFiveClint> = SpinLock::new(SiFiveClint(())); // Private - only access with `with_clint`
+static CLINT: IrqSpinLock<SiFiveClint> = IrqSpinLock::new(SiFiveClint(())); // Private - only access with `with_clint`
 
 /// Runs a closure with exclusive access to the CLINT driver.
 pub fn with_clint<F, R>(f: F) -> R
