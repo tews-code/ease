@@ -27,3 +27,43 @@ pub mod mie {
         }
     }
 }
+
+/// Machine Except Program Counter (mepc)
+pub mod mepc {
+    /// Read the mepc CSR.
+    pub fn read() -> usize {
+        let mepc: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, mepc", out(reg) mepc);
+        }
+        mepc
+    }
+}
+
+/// Machine cause register (mcause)
+pub mod mcause {
+    pub enum Trap {
+        Exception(usize),
+        Interrupt(usize),
+    }
+    pub mod exception {
+        pub const ILLEGAL_INSTRUCTION: usize = 2;
+    }
+    pub mod interrupt {
+        pub const EXTERNAL: usize = 11;
+        pub const TIMER: usize = 7;
+    }
+
+    /// Read the mcause CSR.
+    pub fn read() -> Trap {
+        let mcause: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, mcause", out(reg) mcause);
+        }
+        if (mcause >> 31) & 1 == 1 {
+            Trap::Interrupt(mcause & 0x7FFFFFFF)
+        } else {
+            Trap::Exception(mcause & 0x7FFFFFFF)
+        }
+    }
+}

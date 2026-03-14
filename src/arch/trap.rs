@@ -2,7 +2,6 @@
 //!
 //! Saves context and calls handler, returns with `mret`.
 
-use core::arch::asm;
 use core::arch::global_asm;
 
 global_asm!(
@@ -83,32 +82,37 @@ global_asm!(
 "#
 );
 
-const EXCEPTION_ILLEGAL_INSTRUCTION: usize = 2;
-const INTERRUPT_TIMER: usize = 7;
+use crate::arch::csr::mcause::exception::*;
+use crate::arch::csr::mcause::interrupt::*;
+use crate::arch::csr::mcause::{self, Trap};
+use crate::arch::csr::mepc;
 
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler() {
-    let mcause: usize;
-    let mepc: usize;
-
-    unsafe {
-        asm!("csrr {}, mcause", out(reg) mcause);
-        asm!("csrr {}, mepc", out(reg) mepc);
-    }
-
-    // Bit 31 - 1 means interrupt, 0 means exception
-    let is_interrupt = (mcause >> 31) & 1 == 1;
-    let code = mcause & 0x7FFFFFFF;
-
-    if is_interrupt {
-        match code {
-            INTERRUPT_TIMER => crate::kernel::timer::handle_interrupt(),
+    match mcause::read() {
+        Trap::Interrupt(code) => match code {
+            TIMER => crate::kernel::timer::handle_interrupt(),
+            EXTERNAL => {
+                let irq = crate::drivers::plic::claim();
+                match irq {
+                    0 => {} // Spurious interrupt
+                    crate::board::plic::UART0_IRQ => {
+                        crate::drivers::uart::handle_interrupt();
+                    }
+                    crate::board::plic::VIRTIO0_IRQ => {
+                        // TODO handle interrupt for virtio
+                    }
+                    _ => panic!("Unknown external interrupt: {}", irq),
+                }
+                if irq != 0 {
+                    crate::drivers::plic::complete(irq);
+                }
+            }
             _ => crate::printdln!("Unknown interrupt {}", code),
-        }
-    } else {
-        match code {
-            EXCEPTION_ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc),
-            _ => panic!("Unknown exception mcause {:x} mepc {:x}", mcause, mepc),
-        }
+        },
+        Trap::Exception(code) => match code {
+            ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
+            _ => panic!("Unknown exception code {:x} mepc {:x}", code, mepc::read()),
+        },
     }
 }
