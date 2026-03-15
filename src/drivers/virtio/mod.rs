@@ -247,33 +247,11 @@ impl VirtioBlkDev {
         }
         Ok(())
     }
-
-    pub fn read_block(&mut self, block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-        self.submit_read(block)?;
-
-        let expected = self.vq.last_used_index;
-        while self.vq.read_used_index() != expected {
-            crate::hal::wait_for_interrupt();
-        }
-
-        self.finish_read(buf)
-    }
-
-    fn write_block(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-        self.submit_write(block, buf)?;
-
-        let expected = self.vq.last_used_index;
-        while self.vq.read_used_index() != expected {
-            crate::hal::wait_for_interrupt();
-        }
-
-        self.finish_write()
-    }
 }
 
 const IO_TIMEOUT_MS: usize = 1_000;
 
-pub fn read_block_async(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     assert!(
         !IO_IN_PROGRESS.swap(true, Ordering::Relaxed),
         "IO should not already be in progress"
@@ -298,7 +276,7 @@ pub fn read_block_async(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), Bl
     result
 }
 
-pub fn write_block_async(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     assert!(
         !IO_IN_PROGRESS.swap(true, Ordering::Relaxed),
         "IO should not already be in progress"
@@ -373,7 +351,7 @@ mod test {
     fn read_block_zero_fat16_signature() {
         // Block 0 of a FAT16 volume has "FAT16" at byte offset 54
         let mut buf = [0u8; BLOCK_SIZE];
-        with_blk_dev(|blk| blk.read_block(0, &mut buf).unwrap());
+        read_block(0, &mut buf).unwrap();
         assert_eq!(&buf[54..59], b"FAT16");
     }
 
@@ -382,10 +360,10 @@ mod test {
         let s = "hello from kernel!!!";
         let mut buf = [0u8; BLOCK_SIZE];
         buf[..s.len()].copy_from_slice(s.as_bytes());
-        with_blk_dev(|blk| blk.write_block(1, &buf).unwrap());
+        write_block(1, &buf).unwrap();
 
         let mut buf2 = [0u8; BLOCK_SIZE];
-        with_blk_dev(|blk| blk.read_block(1, &mut buf2).unwrap());
+        read_block(1, &mut buf2).unwrap();
         assert_eq!(&buf2[..s.len()], s.as_bytes());
     }
 }
@@ -418,7 +396,7 @@ mod benchmarks {
             ITERATIONS,
             || {
                 let mut buf = [0u8; BLOCK_SIZE];
-                with_blk_dev(|blk| blk.read_block(0, &mut buf).unwrap());
+                read_block(0, &mut buf).unwrap();
             },
         );
     }
@@ -431,7 +409,7 @@ mod benchmarks {
             ITERATIONS,
             || {
                 let buf = [0u8; BLOCK_SIZE];
-                with_blk_dev(|blk| blk.write_block(1, &buf).unwrap());
+                write_block(1, &buf).unwrap();
             },
         );
     }
@@ -444,10 +422,8 @@ mod benchmarks {
             ITERATIONS,
             || {
                 let mut buf = [0u8; BLOCK_SIZE];
-                with_blk_dev(|blk| {
-                    blk.write_block(1, &buf).unwrap();
-                    blk.read_block(1, &mut buf).unwrap();
-                });
+                write_block(1, &buf).unwrap();
+                read_block(1, &mut buf).unwrap();
             },
         );
     }

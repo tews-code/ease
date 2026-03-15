@@ -75,7 +75,7 @@ Attribute flags:
 #![allow(dead_code)]
 use core::ops::ControlFlow;
 
-use crate::drivers::virtio::{Blk, BlkError, read_block_async, with_blk_dev};
+use crate::drivers::virtio::{BlkError, read_block};
 use crate::kernel::collection::StackVec;
 use crate::kernel::sync::SpinLock;
 
@@ -155,11 +155,9 @@ pub struct Volume {
 
 impl Volume {
     /// Read from disk, parse BPB, return initialised FAT16 Volume
-    ///
-    /// Does not lock BLK, instead takes a &mut VirtioBlk
-    pub fn new(blk: &mut Blk) -> Result<Self, FsError> {
+    pub fn new() -> Result<Self, FsError> {
         let mut buf = [0u8; SECTOR_SIZE];
-        blk.read_block(0, &mut buf).map_err(FsError::DeviceError)?;
+        read_block(0, &mut buf).map_err(FsError::DeviceError)?;
         let bpb = Bpb::parse(&buf)?;
         Ok(Self { bpb })
     }
@@ -174,7 +172,7 @@ impl Volume {
         let num_entries = SECTOR_SIZE / core::mem::size_of::<u16>(); // In a 512 byte block there are 256 entries
         let fat_sector = self.bpb.fat_start_sector() + (cluster as usize / num_entries);
         // Now read the block which holds that sector
-        read_block_async(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+        read_block(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
         // Work out the offset within the sector
         let offset = (cluster as usize % num_entries) * core::mem::size_of::<u16>();
         // Now look inside the block (in buffer) to read the offset of the entry
@@ -196,7 +194,7 @@ impl Volume {
         let count = self.bpb.root_dir_sectors();
         for sector in start..start + count {
             // First read the sector
-            read_block_async(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
 
             // 16 entries per sector (512 / 32)
             for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
@@ -288,7 +286,7 @@ impl DirEntry {
 static VOLUME: SpinLock<Option<Volume>> = SpinLock::new(None);
 
 pub fn fat16_init() {
-    let vol = with_blk_dev(|blk| Volume::new(blk).expect("FAT16 init failed"));
+    let vol = Volume::new().expect("FAT16 init failed");
     *VOLUME.lock() = Some(vol);
 }
 
@@ -523,7 +521,7 @@ mod test {
     #[test_case]
     fn disk_image_bpb() {
         let mut buf = [0u8; SECTOR_SIZE];
-        crate::drivers::virtio::with_blk_dev(|blk| blk.read_block(0, &mut buf).unwrap());
+        crate::drivers::virtio::read_block(0, &mut buf).unwrap();
         let bpb = Bpb::parse(&buf).unwrap();
         assert_eq!(bpb.sectors_per_cluster, 4);
         assert_eq!(bpb.reserved_sectors, 4);
