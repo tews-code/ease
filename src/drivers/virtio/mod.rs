@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::mmio;
 use crate::board::virtio_blk;
 use crate::hal::BLOCK_SIZE;
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sync::{IrqSpinLock, SpinLock};
 use crate::kernel::timer::ticks_ms;
 
 mod queue;
@@ -251,54 +251,39 @@ impl VirtioBlkDev {
 
 const IO_TIMEOUT_MS: usize = 1_000;
 
+// Lock held when IO is in progress (interrupts enabled)
+static IO_IN_PROGRESS: SpinLock<()> = SpinLock::new(());
+
 pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-    assert!(
-        !IO_IN_PROGRESS.swap(true, Ordering::Relaxed),
-        "IO should not already be in progress"
-    );
-    let result = with_blk_dev(|blk| blk.submit_read(block));
-    if result.is_err() {
-        IO_IN_PROGRESS.store(false, Ordering::Relaxed);
-        return result;
-    }
+    let _guard = IO_IN_PROGRESS.lock();
+    with_blk_dev(|blk| blk.submit_read(block))?;
 
     let start = ticks_ms();
     while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
         if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
-            IO_IN_PROGRESS.store(false, Ordering::Relaxed);
             return Err(BlkError::Timeout);
         }
         crate::hal::wait_for_interrupt();
     }
 
-    let result = with_blk_dev(|blk| blk.finish_read(buf));
-    IO_IN_PROGRESS.store(false, Ordering::Relaxed);
-    result
+    with_blk_dev(|blk| blk.finish_read(buf))?;
+    Ok(())
 }
 
 pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-    assert!(
-        !IO_IN_PROGRESS.swap(true, Ordering::Relaxed),
-        "IO should not already be in progress"
-    );
-    let result = with_blk_dev(|blk| blk.submit_write(block, buf));
-    if result.is_err() {
-        IO_IN_PROGRESS.store(false, Ordering::Relaxed);
-        return result;
-    }
+    let _guard = IO_IN_PROGRESS.lock();
+    with_blk_dev(|blk| blk.submit_write(block, buf))?;
 
     let start = ticks_ms();
     while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
         if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
-            IO_IN_PROGRESS.store(false, Ordering::Relaxed);
             return Err(BlkError::Timeout);
         }
         crate::hal::wait_for_interrupt();
     }
 
-    let result = with_blk_dev(|blk| blk.finish_write());
-    IO_IN_PROGRESS.store(false, Ordering::Relaxed);
-    result
+    with_blk_dev(|blk| blk.finish_write())?;
+    Ok(())
 }
 
 static BLK_DEV: IrqSpinLock<Option<VirtioBlkDev>> = IrqSpinLock::new(None);
@@ -319,9 +304,6 @@ where
 
 // Flag tracks completion for interrupt-driven IO
 static VIRTIO_COMPLETE: AtomicBool = AtomicBool::new(false);
-
-// Flag tracks when IO is in progress (interrupts disabled)
-static IO_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 pub fn handle_virtio_interrupt() {
     let status = mmio::read32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_STATUS);
