@@ -1,35 +1,31 @@
 //! Device drivers
 
 pub mod clint;
-pub mod console;
-pub mod font;
 pub mod plic;
 pub mod ramfb;
 pub mod render;
 pub mod uart;
 pub mod virtio;
 
-use crate::drivers::console::Console;
 use crate::drivers::ramfb::FrameBuffer;
-use crate::drivers::render::{FrameBufferRenderer, Renderer};
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sync::SpinLock;
+use crate::shell::console::Console;
 
-pub static DISPLAY: IrqSpinLock<DisplayManager<FrameBufferRenderer>> =
-    IrqSpinLock::new(DisplayManager::new());
+pub static DISPLAY: SpinLock<DisplayManager> = SpinLock::new(DisplayManager::new());
 
 #[allow(clippy::large_enum_variant)]
 #[expect(dead_code)]
-enum DisplayMode<R: Renderer> {
+enum DisplayMode {
     Headless,
-    Console(Console<R>), // renderer attached to console
-    App(FrameBuffer),    // renderer detached, FB used directly
+    Console(Console), // renderer attached to console
+    App(FrameBuffer), // renderer detached, FB used directly
 }
 
-pub struct DisplayManager<R: Renderer> {
-    display_mode: DisplayMode<R>,
+pub struct DisplayManager {
+    display_mode: DisplayMode,
 }
 
-impl<R: Renderer> DisplayManager<R> {
+impl DisplayManager {
     pub const fn new() -> Self {
         Self {
             display_mode: DisplayMode::Headless,
@@ -37,15 +33,15 @@ impl<R: Renderer> DisplayManager<R> {
     }
 
     // Initialise console
-    pub fn init(&mut self, renderer: R) {
-        self.display_mode = DisplayMode::Console(Console::new(renderer))
+    pub fn init(&mut self, console: Console) {
+        self.display_mode = DisplayMode::Console(console)
     }
 
     /// Release the framebuffer to other user
     #[allow(dead_code)]
-    pub fn release_to_app(&mut self) -> Option<R> {
+    pub fn release_to_app(&mut self) -> Option<FrameBuffer> {
         match core::mem::replace(&mut self.display_mode, DisplayMode::Headless) {
-            DisplayMode::Console(console) => Some(console.into_renderer()),
+            DisplayMode::Console(console) => Some(console.into_framebuffer()),
             other => {
                 self.display_mode = other;
                 None
@@ -55,8 +51,8 @@ impl<R: Renderer> DisplayManager<R> {
 
     /// Return the framebuffer to the console
     #[allow(dead_code)]
-    pub fn return_to_console(&mut self, renderer: R) {
-        self.display_mode = DisplayMode::Console(Console::new(renderer));
+    pub fn return_to_console(&mut self, fb: FrameBuffer) {
+        self.display_mode = DisplayMode::Console(Console::new(fb));
     }
 
     /// Write a character at the current cursor position
@@ -82,9 +78,21 @@ impl<R: Renderer> DisplayManager<R> {
             console.show_cursor();
         }
     }
+
+    pub fn take_console(&mut self) -> Option<Console> {
+        match core::mem::replace(&mut self.display_mode, DisplayMode::Headless) {
+            DisplayMode::Console(console) => Some(console),
+            other => {
+                self.display_mode = other;
+                None
+            }
+        }
+    }
 }
 
-impl<R: Renderer> core::fmt::Write for DisplayManager<R> {
+use crate::drivers::uart::UartWriter;
+
+impl core::fmt::Write for DisplayManager {
     fn write_str(&mut self, s: &str) -> Result<(), core::fmt::Error> {
         // Deconstruct display_mode to get a console
         if let DisplayMode::Console(console) = &mut self.display_mode
@@ -96,6 +104,8 @@ impl<R: Renderer> core::fmt::Write for DisplayManager<R> {
             }
             console.show_cursor();
         }
+        // Echo to UART
+        let _ = UartWriter.write_str(s);
         Ok(())
     }
 }

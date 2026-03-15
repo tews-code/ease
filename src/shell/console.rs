@@ -2,8 +2,9 @@
 //!
 //! Classic 80 columns x 30 rows dumb terminal
 
+use crate::drivers::ramfb::{Colour, FrameBuffer};
 use crate::drivers::render::Renderer;
-use crate::hal::ascii;
+use crate::shell::{ascii, font};
 
 const ROWS: usize = 30;
 const COLUMNS: usize = 80;
@@ -47,7 +48,7 @@ impl TextBuffer {
     fn line_feed(&mut self) -> bool {
         if self.cy < ROWS - 1 {
             self.cy += 1;
-            self.cx = 0;
+            // Note - for ANSI VT-100 we do not set cx back to zero
         } else {
             return true; // Flag to ask for scrolling
         }
@@ -127,16 +128,23 @@ impl TerminalEmulator {
     }
 }
 
-pub struct Console<R: Renderer> {
-    fb: R,
+/// 80x30 text console backed by a framebuffer. Handles character rendering,
+/// cursor display, and scrolling.
+pub struct Console {
+    fb: FrameBuffer,
     emulator: TerminalEmulator,
     cursor_visible: bool,
+    prev_cursor: usize,
+    prev_line_len: usize,
+    fg: Colour,
+    bg: Colour,
 }
 
-impl<R: Renderer> Console<R> {
-    pub fn new(renderer: R) -> Self {
+impl Console {
+    /// Creates a new console with green-on-black text and cursor enabled.
+    pub fn new(fb: FrameBuffer) -> Self {
         Self {
-            fb: renderer,
+            fb,
             emulator: TerminalEmulator {
                 buffer: TextBuffer {
                     cells: [[b' '; COLUMNS]; ROWS],
@@ -145,23 +153,31 @@ impl<R: Renderer> Console<R> {
                 },
             },
             cursor_visible: true,
+            prev_cursor: 0,
+            prev_line_len: 0,
+            fg: Colour::GREEN,
+            bg: Colour::BLACK,
         }
     }
 
-    // Write a single character using the font at the current cursor position without cursor management
+    /// Writes a character to the terminal emulator and renders it. Does not manage cursor visibility.
     pub fn process_char(&mut self, ch: u8) {
+        let fg = self.fg;
+        let bg = self.bg;
         let fb = &mut self.fb;
-        self.emulator.process(ch, |cmd| match cmd {
-            RenderCommand::Clear => fb.fill(),
-            RenderCommand::Scroll => fb.scroll(),
-            RenderCommand::WriteChar(row, column, ch) => fb.draw_char(row, column, ch, false),
+        let emulator = &mut self.emulator;
+        emulator.process(ch, |cmd| match cmd {
+            RenderCommand::Clear => fb.fill(bg),
+            RenderCommand::Scroll => fb.scroll(crate::shell::font::HEIGHT, bg),
+            RenderCommand::WriteChar(row, column, ch) => {
+                font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg)
+            }
         });
     }
 
     /// Write a character using the font at the current cursor position
     ///
     /// # `ch` is a byte
-    #[allow(dead_code)]
     pub fn put_char(&mut self, ch: u8) {
         self.hide_cursor();
         self.process_char(ch);
@@ -169,32 +185,100 @@ impl<R: Renderer> Console<R> {
     }
 
     // Draw char at current position
-    fn draw_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
-        self.fb.draw_char(row, column, ch, inverted);
+    fn render_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
+        let (fg, bg) = if inverted {
+            (self.bg, self.fg)
+        } else {
+            (self.fg, self.bg)
+        };
+        font::render_glyph(
+            &mut self.fb,
+            column * font::WIDTH,
+            row * font::HEIGHT,
+            ch,
+            fg,
+            bg,
+        );
     }
 
-    // Hide the cursor at current position
+    /// Hides the cursor by redrawing the character at the cursor position in normal colours.
     pub fn hide_cursor(&mut self) {
         if self.cursor_visible {
             let (row, column) = self.emulator.cursor_pos();
             let ch = self.emulator.char_at_cursor();
-            self.draw_char(row, column, ch, false);
+            self.render_char(row, column, ch, false);
             self.cursor_visible = false;
         }
     }
 
-    // Show the cursor at current position
+    /// Shows the cursor by drawing the character at the cursor position in inverted colours.
     pub fn show_cursor(&mut self) {
         if !self.cursor_visible {
             let (row, column) = self.emulator.cursor_pos();
             let ch = self.emulator.char_at_cursor();
-            self.draw_char(row, column, ch, true);
+            self.render_char(row, column, ch, true);
             self.cursor_visible = true;
         };
     }
 
-    pub fn into_renderer(self) -> R {
+    /// Redraws a line overwriting the previous content, starting at `cursor`
+    pub fn redraw_line(&mut self, line: &[u8], cursor: usize) {
+        // Covers mid line insert and delete, Esc line clear and history recall by redrawing
+        self.hide_cursor();
+        for _ in 0..self.prev_cursor {
+            self.process_char(ascii::BS);
+        }
+        for byte in line {
+            self.process_char(*byte);
+        }
+        let new_len = line.len();
+        let spaces = self.prev_line_len.saturating_sub(new_len);
+        for _ in 0..spaces {
+            self.process_char(b' ');
+        }
+        for _ in 0..(new_len + spaces - cursor) {
+            self.process_char(ascii::BS);
+        }
+        self.show_cursor();
+        self.prev_line_len = new_len;
+        self.prev_cursor = cursor;
+    }
+
+    pub fn reset_line(&mut self) {
+        self.prev_cursor = 0;
+        self.prev_line_len = 0;
+    }
+
+    pub fn into_framebuffer(self) -> FrameBuffer {
         self.fb
+    }
+}
+
+impl core::fmt::Write for Console {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.hide_cursor();
+        for byte in s.bytes() {
+            if byte == b'\n' {
+                self.process_char(b'\r');
+            }
+            self.process_char(byte);
+        }
+        self.show_cursor();
+        Ok(())
+    }
+}
+
+impl Renderer for Console {
+    fn draw_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
+        self.render_char(row, column, ch, inverted);
+    }
+
+    fn fill(&mut self) {
+        self.fb.fill(self.bg);
+    }
+
+    fn scroll(&mut self) {
+        self.fb.scroll(font::HEIGHT, self.bg);
     }
 }
 
@@ -301,7 +385,7 @@ mod tests {
         let scroll = buf.line_feed();
         assert!(!scroll);
         assert_eq!(buf.cy, 1);
-        assert_eq!(buf.cx, 0);
+        assert_eq!(buf.cx, 10);
     }
 
     #[test_case]
@@ -444,5 +528,28 @@ mod tests {
         assert_eq!(emu.buffer.char_at(0, 3), b'l');
         assert_eq!(emu.buffer.char_at(0, 4), b'o');
         assert_eq!(emu.cursor_pos(), (0, 5));
+    }
+
+    #[test_case]
+    fn emulator_cr_lf_moves_to_start_of_next_line() {
+        let mut emu = new_emulator();
+        for b in b"hello" {
+            collect_cmds(&mut emu, *b);
+        }
+        assert_eq!(emu.cursor_pos(), (0, 5));
+        collect_cmds(&mut emu, ascii::CR);
+        collect_cmds(&mut emu, ascii::LF);
+        assert_eq!(emu.cursor_pos(), (1, 0));
+    }
+
+    #[test_case]
+    fn emulator_lf_alone_preserves_column() {
+        let mut emu = new_emulator();
+        for b in b"hello" {
+            collect_cmds(&mut emu, *b);
+        }
+        collect_cmds(&mut emu, ascii::LF);
+        // Column stays at 5 — correct VT-100 behaviour
+        assert_eq!(emu.cursor_pos(), (1, 5));
     }
 }

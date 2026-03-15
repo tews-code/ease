@@ -158,6 +158,110 @@ impl<T: Copy, const N: usize> IndexMut<usize> for StackVec<T, N> {
     }
 }
 
+/// Ring buffer using the stack
+///
+/// T is Copy
+/// Note that this always allocates one more T than is used
+pub struct RingBuf<T: Copy, const N: usize> {
+    buf: [MaybeUninit<T>; N],
+    head: usize,
+    tail: usize,
+}
+
+impl<T: Copy, const N: usize> RingBuf<T, N> {
+    /// Create a new ring buffer
+    pub const fn new() -> Self {
+        Self {
+            buf: [MaybeUninit::uninit(); N],
+            head: 0,
+            tail: 0,
+        }
+    }
+    /// Push a new value into the ring at the tail
+    ///
+    /// Overwites the oldest if full
+    pub fn push(&mut self, value: T) {
+        self.buf[self.head].write(value);
+        self.head = (self.head + 1) % N;
+        if self.head == self.tail {
+            self.tail = (self.tail + 1) % N
+        };
+    }
+    /// Length of data in the ring buffer
+    pub fn len(&self) -> usize {
+        if self.head >= self.tail {
+            self.head - self.tail
+        } else {
+            N - self.tail + self.head
+        }
+    }
+    /// Buffer is empty
+    ///
+    /// Note - stack resource is only released when buffer is dropped
+    pub fn is_empty(&self) -> bool {
+        self.tail == self.head
+    }
+    /// Buffer is full
+    ///
+    /// This does not prevent adding values (which will overwrite the oldest)
+    pub fn is_full(&self) -> bool {
+        (self.head + 1) % N == self.tail
+    }
+    /// Get a value by index
+    ///
+    /// Indexing is by value's age. 0 = oldest
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index >= self.len() {
+            None
+        } else {
+            Some(unsafe {
+                // Safety: Only returning values that have been inserted
+                self.buf[(self.tail + index) % N].assume_init_ref()
+            })
+        }
+    }
+    /// Newest value by index
+    ///
+    /// 0 = most recent
+    pub fn newest(&self, n: usize) -> Option<&T> {
+        if n >= self.len() {
+            None
+        } else {
+            Some(unsafe { self.buf[(self.head + N - 1 - n) % N].assume_init_ref() })
+        }
+    }
+
+    /// Provides an iterator over the values present, from oldest to newest
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        RingBufIter {
+            ring: self,
+            pos: self.tail,
+            remaining: self.len(),
+        }
+    }
+}
+
+pub struct RingBufIter<'a, T: Copy, const N: usize> {
+    ring: &'a RingBuf<T, N>,
+    pos: usize,
+    remaining: usize,
+}
+
+impl<'a, T: Copy, const N: usize> Iterator for RingBufIter<'a, T, N> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            None
+        } else {
+            let val = unsafe { self.ring.buf[self.pos].assume_init_ref() };
+            self.pos = (self.pos + 1) % N;
+            self.remaining -= 1;
+            Some(val)
+        }
+    }
+}
+
 /// Lock-free single-producer single-consumer ring buffer
 pub struct SpscRingBuf<T: Copy, const N: usize> {
     buf: [UnsafeCell<MaybeUninit<T>>; N],
@@ -425,6 +529,122 @@ mod tests {
         v.push(2).unwrap();
         v[1] = 99;
         assert_eq!(v[1], 99);
+    }
+
+    // ── RingBuf tests ──
+
+    #[test_case]
+    fn test_ring_push_and_get() {
+        let mut r: RingBuf<u32, 8> = RingBuf::new();
+        r.push(10);
+        r.push(20);
+        r.push(30);
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.get(0), Some(&10)); // oldest
+        assert_eq!(r.get(1), Some(&20));
+        assert_eq!(r.get(2), Some(&30)); // newest
+    }
+
+    #[test_case]
+    fn test_ring_get_out_of_bounds() {
+        let mut r: RingBuf<u32, 8> = RingBuf::new();
+        r.push(1);
+        assert_eq!(r.get(1), None);
+        assert_eq!(r.get(100), None);
+    }
+
+    #[test_case]
+    fn test_ring_empty() {
+        let r: RingBuf<u32, 4> = RingBuf::new();
+        assert!(r.is_empty());
+        assert!(!r.is_full());
+        assert_eq!(r.len(), 0);
+        assert_eq!(r.get(0), None);
+        assert_eq!(r.newest(0), None);
+    }
+
+    #[test_case]
+    fn test_ring_full() {
+        // N=4 means max 3 elements (one slot reserved)
+        let mut r: RingBuf<u32, 4> = RingBuf::new();
+        r.push(1);
+        r.push(2);
+        r.push(3);
+        assert!(r.is_full());
+        assert_eq!(r.len(), 3);
+    }
+
+    #[test_case]
+    fn test_ring_newest() {
+        let mut r: RingBuf<u32, 8> = RingBuf::new();
+        r.push(10);
+        r.push(20);
+        r.push(30);
+        assert_eq!(r.newest(0), Some(&30)); // most recent
+        assert_eq!(r.newest(1), Some(&20));
+        assert_eq!(r.newest(2), Some(&10)); // oldest
+        assert_eq!(r.newest(3), None);
+    }
+
+    #[test_case]
+    fn test_ring_wraparound() {
+        // N=4, capacity=3. Push 5 values so it wraps and overwrites.
+        let mut r: RingBuf<u32, 4> = RingBuf::new();
+        r.push(1);
+        r.push(2);
+        r.push(3); // full: [1, 2, 3]
+        r.push(4); // overwrites 1: [2, 3, 4]
+        r.push(5); // overwrites 2: [3, 4, 5]
+        assert_eq!(r.len(), 3);
+        assert_eq!(r.get(0), Some(&3)); // oldest surviving
+        assert_eq!(r.get(1), Some(&4));
+        assert_eq!(r.get(2), Some(&5)); // newest
+        assert_eq!(r.newest(0), Some(&5));
+        assert_eq!(r.newest(2), Some(&3));
+    }
+
+    #[test_case]
+    fn test_ring_iter() {
+        let mut r: RingBuf<u32, 8> = RingBuf::new();
+        r.push(10);
+        r.push(20);
+        r.push(30);
+        let vals: StackVec<u32, 8> = {
+            let mut v = StackVec::new();
+            for &x in r.iter() {
+                v.push(x).unwrap();
+            }
+            v
+        };
+        assert_eq!(vals.as_slice(), &[10, 20, 30]);
+    }
+
+    #[test_case]
+    fn test_ring_iter_after_wraparound() {
+        let mut r: RingBuf<u32, 4> = RingBuf::new();
+        r.push(1);
+        r.push(2);
+        r.push(3);
+        r.push(4); // [2, 3, 4]
+        r.push(5); // [3, 4, 5]
+        let vals: StackVec<u32, 4> = {
+            let mut v = StackVec::new();
+            for &x in r.iter() {
+                v.push(x).unwrap();
+            }
+            v
+        };
+        assert_eq!(vals.as_slice(), &[3, 4, 5]);
+    }
+
+    #[test_case]
+    fn test_ring_iter_empty() {
+        let r: RingBuf<u32, 4> = RingBuf::new();
+        let mut count = 0;
+        for _ in r.iter() {
+            count += 1;
+        }
+        assert_eq!(count, 0);
     }
 
     // ── SpscRingBuf tests ──

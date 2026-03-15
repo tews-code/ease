@@ -35,7 +35,6 @@ mod board;
 mod drivers;
 mod fs;
 mod hal;
-mod input;
 mod io;
 mod kernel;
 mod qemu;
@@ -85,21 +84,14 @@ fn kernel_init() {
     fs::fat16::fat16_init();
 
     let fb = drivers::ramfb::FrameBuffer::init();
-    let fbr = drivers::render::FrameBufferRenderer::new(
-        fb,
-        drivers::ramfb::Colour::WHITE,
-        drivers::ramfb::Colour::BLACK,
-    );
-    drivers::DISPLAY.lock().init(fbr);
+    let console = shell::console::Console::new(fb);
+    drivers::DISPLAY.lock().init(console);
 }
 
 #[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     kernel_init();
-
-    // Start the shell
-    let _shell = shell::Shell::new();
 
     test_main();
     loop {
@@ -114,8 +106,9 @@ extern "C" fn main() -> ! {
 
     println!("Hello from EASE!");
     // Start the shell
-    let mut shell = shell::Shell::new();
-    shell.run(); // Never returns
+    let console = drivers::DISPLAY.lock().take_console().unwrap();
+    let mut shell = shell::Shell::new(console);
+    shell.run();
 }
 
 // =============================================================================

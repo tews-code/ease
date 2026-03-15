@@ -3,8 +3,6 @@
 //! Provides traits and implementations for byte-level I/O.
 //! In test mode, output is captured to a buffer for verification.
 
-pub use crate::drivers::uart::UartWriter;
-
 /// Direct UART writer that bypasses TX buffer.
 ///
 /// Safe to use from interrupt handlers and panic handler.
@@ -27,8 +25,6 @@ impl core::fmt::Write for DirectWriter {
 macro_rules! print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!($crate::io::UartWriter, $($arg)*);
-        // Also console if available.
         let mut c = $crate::drivers::DISPLAY.lock();
         let _ = write!(c, $($arg)*);
     }}
@@ -48,7 +44,7 @@ macro_rules! println {
 
 /// Print to UART only
 ///
-/// Prints formatted string to Console and UART.
+/// Prints formatted string to UART without locking.
 /// In test mode, output is also captured for verification.
 #[macro_export]
 macro_rules! printd {
@@ -211,7 +207,7 @@ mod baselines {
 mod profile {
     use crate::bench;
     use crate::drivers::DISPLAY;
-    use crate::hal::ascii;
+    use crate::shell::ascii;
     use core::fmt::Write;
 
     const ITER_LARGE: u32 = 100;
@@ -219,16 +215,16 @@ mod profile {
 
     #[test_case]
     fn profile_console_print() {
-        use crate::drivers::font::Font;
         use crate::drivers::ramfb::Colour;
+        use crate::shell::font;
 
         printdln!("\n=== Console Print Path Profile ===");
 
         let mut d = DISPLAY.lock();
         d.put_char(ascii::FF);
-        let mut renderer = d.release_to_app().unwrap();
+        let mut fb = d.release_to_app().unwrap();
         bench::run_avg("set_pixels", ITER_LARGE, || {
-            renderer.fb.set_pixels(
+            fb.set_pixels(
                 0,
                 0,
                 &[
@@ -243,13 +239,13 @@ mod profile {
                 ],
             );
         });
-        d.return_to_console(renderer);
+        d.return_to_console(fb);
         d.put_char(ascii::FF);
-        let mut renderer = d.release_to_app().unwrap();
-        bench::run_avg("Font::draw_char", ITER_LARGE, || {
-            Font::draw_char(&mut renderer.fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
+        let mut fb = d.release_to_app().unwrap();
+        bench::run_avg("font::render_glyph", ITER_LARGE, || {
+            font::render_glyph(&mut fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
         });
-        d.return_to_console(renderer);
+        d.return_to_console(fb);
         d.put_char(ascii::FF);
         d.put_char(ascii::FF);
         bench::run_avg("Console::put_char(ch)", ITER_SMALL, || d.put_char(b'X'));
@@ -297,8 +293,8 @@ mod benchmarks {
     use super::baselines;
     use crate::bench;
     use crate::drivers::DISPLAY;
-    use crate::hal::ascii;
     use crate::io::test_io;
+    use crate::shell::ascii;
 
     /// Number of iterations for averaging (reduces noise)
     const ITERATIONS: u32 = 10;

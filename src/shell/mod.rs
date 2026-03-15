@@ -1,130 +1,89 @@
-//! EASE Simple Shell
+//! Moss Simple Shell
 
-#![allow(dead_code)]
+use core::fmt::Write;
+
+use crate::hal::Reader;
+use crate::shell::console::Console;
+use crate::shell::keyboard::Keyboard;
+use crate::shell::line_editor::EditResult;
 
 pub mod commands;
+pub mod console;
+pub mod font;
+pub mod keyboard;
 pub mod line_editor;
+pub mod vt_parse;
 
-use crate::drivers::uart::UartReader;
-use crate::hal::ascii;
-use crate::input::keyboard::{Keyboard, KeyboardInput};
-use crate::kernel::collection::StackVec;
-use crate::shell::line_editor::{LINE_LEN, LineDisplayAction};
-use crate::{print, println};
+// ASCII chars that are used for console and serial control
+pub mod ascii {
+    pub const BELL: u8 = 0x07;
+    pub const BS: u8 = 0x08;
+    pub const TAB: u8 = 0x09;
+    pub const LF: u8 = 0x0A;
+    pub const FF: u8 = 0x0C;
+    pub const CR: u8 = 0x0D;
+    pub const DEL: u8 = 0x7F;
+}
 
 use line_editor::LineEditor;
 
-const DISPLAY_BUF_SIZE: usize = LINE_LEN * 4;
+static PROMPT: &str = "moss> ";
 
-static PROMPT: &str = "ease> ";
-
+/// Interactive shell with line editing, command history, and framebuffer console.
 pub struct Shell {
-    keyboard: KeyboardInput<UartReader>,
+    console: Console,
+    keyboard: Keyboard,
     line_editor: LineEditor,
 }
 
 impl Shell {
-    pub const fn new() -> Self {
+    /// Creates a new shell with the given framebuffer console.
+    pub fn new(console: Console) -> Self {
         Self {
-            keyboard: KeyboardInput::new(UartReader),
+            console,
+            keyboard: Keyboard::default(),
             line_editor: LineEditor::new(),
         }
     }
 
+    /// Runs the shell main loop. Polls keyboard, processes input, dispatches commands. Never returns.
     pub fn run(&mut self) -> ! {
         loop {
-            print!("{PROMPT}");
+            let _ = write!(self.console, "{PROMPT}");
             loop {
-                if let Some(event) = self.keyboard.poll() {
+                if let Some(event) = self
+                    .keyboard
+                    .poll(|| crate::drivers::uart::UartReader.read_byte())
+                {
                     // Send event to line editor
-                    let (result, action) = self.line_editor.process(event);
-                    // Handle display action from line editor
-                    Self::handle_display(action);
-                    // If the line is complete, execute and break
-                    if let Some(line) = result {
-                        Self::execute(line);
-                        break;
+                    match self.line_editor.process(event) {
+                        EditResult::CursorMove | EditResult::LineEdit | EditResult::Append => {
+                            self.console
+                                .redraw_line(self.line_editor.line(), self.line_editor.cursor());
+                        }
+                        EditResult::Complete => {
+                            self.console.put_char(ascii::LF);
+                            self.console.put_char(ascii::CR);
+                            let cmd = core::str::from_utf8(self.line_editor.line())
+                                .expect("should be UTF-8");
+                            Self::execute(&mut self.console, cmd);
+                            self.line_editor.reset();
+                            self.console.reset_line();
+                            break;
+                        }
+                        EditResult::Reject => {
+                            self.console.put_char(ascii::BELL);
+                        }
                     }
                 } else {
                     // Sleep until next tick
-                    unsafe {
-                        core::arch::asm!("wfi");
-                    }
+                    crate::hal::wait_for_interrupt();
                 }
             }
         }
     }
 
-    fn fill_bs(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, count: usize) {
-        for _ in 0..count {
-            let _ = buf.push(ascii::BS);
-        }
-    }
-
-    fn fill_spaces(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, count: usize) {
-        for _ in 0..count {
-            let _ = buf.push(b' ');
-        }
-    }
-
-    fn fill_str(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, s: &str) {
-        for b in s.bytes() {
-            let _ = buf.push(b);
-        }
-    }
-
-    fn fill_clear_line(buf: &mut StackVec<u8, DISPLAY_BUF_SIZE>, n: usize, c: usize) {
-        Self::fill_bs(buf, c);
-        Self::fill_spaces(buf, n);
-        Self::fill_bs(buf, n);
-    }
-
-    fn handle_display(action: LineDisplayAction) {
-        match action {
-            LineDisplayAction::None => {}
-            LineDisplayAction::Echo(b) => print!("{}", b as char),
-            LineDisplayAction::Enter => println!(),
-            LineDisplayAction::Bell => print!("{}", ascii::BELL as char),
-            LineDisplayAction::Backspace { s } => {
-                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
-                let _ = buf.push(ascii::BS);
-                Self::fill_str(&mut buf, s);
-                let _ = buf.push(b' ');
-                Self::fill_bs(&mut buf, s.len() + 1);
-                print!("{}", buf.as_str().expect("should be valid UTF-8"));
-            }
-            LineDisplayAction::Redraw { s, n } => {
-                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
-                Self::fill_str(&mut buf, s);
-                let spaces = n.saturating_sub(s.len());
-                Self::fill_spaces(&mut buf, spaces);
-                Self::fill_bs(&mut buf, s.len() - 1 + spaces);
-                print!("{}", buf.as_str().expect("should be valid UTF-8"));
-            }
-            LineDisplayAction::ClearLine { n, c } => {
-                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
-                Self::fill_clear_line(&mut buf, n, c);
-                print!("{}", buf.as_str().expect("should be valid UTF-8"));
-            }
-            LineDisplayAction::RedrawLine { s, n, c } => {
-                let mut buf: StackVec<u8, DISPLAY_BUF_SIZE> = StackVec::new();
-                Self::fill_clear_line(&mut buf, n, c);
-                Self::fill_str(&mut buf, s);
-                let spaces = n.saturating_sub(s.len());
-                Self::fill_spaces(&mut buf, spaces);
-                Self::fill_bs(&mut buf, spaces);
-                print!("{}", buf.as_str().expect("should be valid UTF-8"));
-            }
-            LineDisplayAction::CursorLeft => {
-                print!("{}", ascii::BS as char);
-            }
-            LineDisplayAction::CursorRight(ch) => {
-                print!("{}", ch as char);
-            }
-        }
-    }
-
-    pub fn execute(line: &str) {
+    fn execute(console: &mut Console, line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -137,12 +96,13 @@ impl Shell {
         };
 
         match cmd {
-            "help" => commands::help(),
-            "clear" => commands::clear(),
-            "echo" => commands::echo(args),
-            "time" => commands::time(),
-            "ls" => commands::ls(),
-            _ => commands::unknown(cmd),
+            "clear" => commands::clear(console),
+            "echo" => commands::echo(console, args),
+            "help" => commands::help(console),
+            "ls" => commands::ls(console),
+            "time" => commands::time(console),
+            "panic" => commands::panic(console),
+            _ => commands::unknown(console, cmd),
         }
     }
 }
