@@ -59,6 +59,9 @@ pub fn direct_write_byte(byte: u8) {
         core::hint::spin_loop();
     }
     mmio::write8(uart::BASE, THR, byte);
+
+    #[cfg(test)]
+    crate::io::test_io::capture(byte);
 }
 
 /// UART reader for QEMU

@@ -17,37 +17,12 @@ impl core::fmt::Write for DirectWriter {
     }
 }
 
-/// Print to Console and UART
-///
-/// Prints formatted string to Console and UART.
-/// In test mode, output is also captured for verification.
-#[macro_export]
-macro_rules! print {
-    ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let mut c = $crate::drivers::DISPLAY.lock();
-        let _ = write!(c, $($arg)*);
-    }}
-}
-
-/// Print to Console and UART with newline
-///
-/// Prints formatted string to Console and UART with trailing newline.
-/// In test mode, output is also captured for verification.
-#[macro_export]
-macro_rules! println {
-    () => {{ $crate::print!("\n"); }};
-    ($($arg:tt)*) => {{
-        $crate::print!("{}\n", format_args!($($arg)*));
-    }}
-}
-
 /// Print to UART only
 ///
 /// Prints formatted string to UART without locking.
 /// In test mode, output is also captured for verification.
 #[macro_export]
-macro_rules! printd {
+macro_rules! print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
         let _ = write!($crate::io::DirectWriter, $($arg)*);
@@ -59,12 +34,12 @@ macro_rules! printd {
 /// Prints formatted string to UART with trailing newline.
 /// In test mode, output is also captured for verification.
 #[macro_export]
-macro_rules! printdln {
+macro_rules! println {
     () => { {
-        $crate::printd!("\n");
+        $crate::print!("\n");
     }};
     ($($arg:tt)*) => {{
-        $crate::printd!("{}\n", format_args!($($arg)*));
+        $crate::print!("{}\n", format_args!($($arg)*));
     }}
 }
 
@@ -182,178 +157,5 @@ mod test {
         assert!(test_io::contains("quick"));
         assert!(test_io::contains("brown"));
         assert!(!test_io::contains("lazy"));
-    }
-}
-
-// =============================================================================
-// Benchmarks (QEMU)
-// =============================================================================
-
-/// Baseline cycle counts for regression detection.
-/// Update these when intentionally changing performance.
-/// Run `cargo test --bin ease` to see current measurements.
-/// Baselines set ~20% above measured values to allow for variance.
-#[cfg(test)]
-mod baselines {
-    // Baselines measured with profile.test opt-level = 1
-    // Set at ~2x measured values for QEMU timing variance
-    pub const PRINT_HELLO: u64 = 1_200_000;
-    pub const PRINTLN_HELLO: u64 = 10_000_000;
-    pub const PRINTLN_FORMATTED: u64 = 2_000_000;
-    pub const PRINTLN_LONG: u64 = 16_000_000;
-}
-
-#[cfg(test)]
-mod profile {
-    use crate::bench;
-    use crate::drivers::DISPLAY;
-    use crate::shell::ascii;
-    use core::fmt::Write;
-
-    const ITER_LARGE: u32 = 100;
-    const ITER_SMALL: u32 = 10;
-
-    #[test_case]
-    fn profile_console_print() {
-        use crate::drivers::ramfb::Colour;
-        use crate::shell::font;
-
-        printdln!("\n=== Console Print Path Profile ===");
-
-        let mut d = DISPLAY.lock();
-        d.put_char(ascii::FF);
-        let mut fb = d.release_to_app().unwrap();
-        bench::run_avg("set_pixels", ITER_LARGE, || {
-            fb.set_pixels(
-                0,
-                0,
-                &[
-                    Colour::RED.as_raw(),
-                    Colour::BLUE.as_raw(),
-                    Colour::RED.as_raw(),
-                    Colour::BLUE.as_raw(),
-                    Colour::RED.as_raw(),
-                    Colour::BLUE.as_raw(),
-                    Colour::RED.as_raw(),
-                    Colour::BLUE.as_raw(),
-                ],
-            );
-        });
-        d.return_to_console(fb);
-        d.put_char(ascii::FF);
-        let mut fb = d.release_to_app().unwrap();
-        bench::run_avg("font::render_glyph", ITER_LARGE, || {
-            font::render_glyph(&mut fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE)
-        });
-        d.return_to_console(fb);
-        d.put_char(ascii::FF);
-        d.put_char(ascii::FF);
-        bench::run_avg("Console::put_char(ch)", ITER_SMALL, || d.put_char(b'X'));
-        d.put_char(ascii::FF);
-        bench::run_avg("Console::show+hide_cursor", ITER_SMALL, || {
-            d.show_cursor();
-            d.hide_cursor();
-        });
-        d.put_char(ascii::FF);
-        bench::run_avg("Console::write_char(ch)", ITER_SMALL, || {
-            d.write_char(b'X' as char)
-                .expect("should be able to write char")
-        });
-        d.put_char(ascii::FF);
-        bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
-            d.write_char(ascii::LF as char)
-                .expect("should be able to write line feed")
-        });
-        d.put_char(ascii::FF);
-        bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
-            let _ = d.write_str("hello\n");
-        });
-        printdln!("==================================");
-    }
-
-    #[test_case]
-    fn profile_console_scroll() {
-        println!("\n=== Console Scroll Path Profile ===");
-        let mut d = DISPLAY.lock();
-        d.put_char(ascii::FF);
-        // Position cursor at last row so each LF triggers a scroll
-        for _ in 0..29 {
-            d.put_char(ascii::LF);
-        }
-        bench::run_avg("Console::write_char(LF) with scroll", ITER_LARGE, || {
-            d.write_char(ascii::LF as char).unwrap();
-        });
-        drop(d);
-        println!("====================================");
-    }
-}
-
-#[cfg(test)]
-mod benchmarks {
-    use super::baselines;
-    use crate::bench;
-    use crate::drivers::DISPLAY;
-    use crate::io::test_io;
-    use crate::shell::ascii;
-
-    /// Number of iterations for averaging (reduces noise)
-    const ITERATIONS: u32 = 10;
-
-    /// Reset console before benchmarks to avoid scroll cost dominating measurements
-    fn reset_console() {
-        DISPLAY.lock().put_char(ascii::FF);
-    }
-
-    #[test_case]
-    fn regression_print_hello() {
-        println!();
-        println!("=== Regression Checks ===");
-        reset_console();
-        test_io::clear();
-        bench::check("print!(hello)", baselines::PRINT_HELLO, ITERATIONS, || {
-            print!("hello");
-        });
-    }
-
-    #[test_case]
-    fn regression_println_hello() {
-        reset_console();
-        test_io::clear();
-        bench::check(
-            "println!(hello)",
-            baselines::PRINTLN_HELLO,
-            ITERATIONS,
-            || {
-                println!("hello");
-            },
-        );
-    }
-
-    #[test_case]
-    fn regression_println_formatted() {
-        reset_console();
-        test_io::clear();
-        bench::check(
-            "println!(formatted)",
-            baselines::PRINTLN_FORMATTED,
-            ITERATIONS,
-            || {
-                println!("num: {}", 42);
-            },
-        );
-    }
-
-    #[test_case]
-    fn regression_println_long() {
-        reset_console();
-        test_io::clear();
-        bench::check(
-            "println!(50 chars)",
-            baselines::PRINTLN_LONG,
-            ITERATIONS,
-            || {
-                println!("the quick brown fox jumps over the lazy dog!!");
-            },
-        );
     }
 }

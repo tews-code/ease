@@ -46,7 +46,7 @@ impl FrameBuffer {
         const _: () = assert!(core::mem::size_of::<RamfbConfig>() == 28);
 
         write_fw_cfg_dma(&config);
-        crate::printdln!(
+        crate::println!(
             "ramfb: {}x{} at {:#x}",
             Self::WIDTH,
             Self::HEIGHT,

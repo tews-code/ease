@@ -108,7 +108,7 @@ extern "C" fn trap_handler() {
                     crate::drivers::plic::complete(irq);
                 }
             }
-            _ => crate::printdln!("Unknown interrupt {}", code),
+            _ => crate::println!("Unknown interrupt {}", code),
         },
         Trap::Exception(code) => match code {
             ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),

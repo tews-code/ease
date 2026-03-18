@@ -27,6 +27,8 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
+use core::fmt::Write;
+
 use crate::drivers::ramfb::FrameBuffer;
 
 extern crate alloc;
@@ -45,7 +47,7 @@ mod shell;
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    printdln!("PANIC! {info}");
+    println!("PANIC! {info}");
     loop {
         unsafe {
             core::arch::asm!("wfi");
@@ -56,8 +58,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 #[cfg(test)]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    printdln!("\x1b[31mfailed\x1b[0m");
-    printdln!("Error: {}", info);
+    println!("\x1b[31mfailed\x1b[0m");
+    println!("Error: {}", info);
     qemu::exit_failure();
 }
 
@@ -91,9 +93,7 @@ fn kernel_init() -> FrameBuffer {
 #[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    let fb = kernel_init();
-    let console = shell::console::Console::new(fb);
-    drivers::DISPLAY.lock().init(console);
+    let _fb = kernel_init();
 
     test_main();
     loop {
@@ -106,9 +106,8 @@ extern "C" fn main() -> ! {
 extern "C" fn main() -> ! {
     let fb = kernel_init();
     let mut console = shell::console::Console::new(fb);
-    use core::fmt::Write;
     let _ = writeln!(console, "Hello from EASE!");
-    printdln!("Hello from EASE!");
+    println!("Hello from EASE!");
     // Start the shell
     let mut shell = shell::Shell::new(console);
     shell.run();

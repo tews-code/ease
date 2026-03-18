@@ -248,10 +248,6 @@ impl Console {
         self.prev_cursor = 0;
         self.prev_line_len = 0;
     }
-
-    pub fn into_framebuffer(self) -> FrameBuffer {
-        self.fb
-    }
 }
 
 impl core::fmt::Write for Console {
@@ -260,10 +256,15 @@ impl core::fmt::Write for Console {
         for byte in s.bytes() {
             if byte == b'\n' {
                 self.process_char(b'\r');
+                // Also print to UART (no locking)
+                crate::drivers::uart::direct_write_byte(b'\r');
             }
             self.process_char(byte);
+            // Also print to UART (no locking)
+            crate::drivers::uart::direct_write_byte(byte);
         }
         self.show_cursor();
+
         Ok(())
     }
 }
@@ -279,6 +280,115 @@ impl Renderer for Console {
 
     fn scroll(&mut self) {
         self.fb.scroll(font::HEIGHT, self.bg);
+    }
+}
+
+#[cfg(test)]
+mod benchmarks {
+    use crate::bench;
+    use crate::drivers::ramfb::FrameBuffer;
+    use crate::shell::ascii;
+    use core::fmt::Write;
+
+    use super::Console;
+
+    const ITER_LARGE: u32 = 100;
+    const ITER_SMALL: u32 = 10;
+
+    // Baselines measured without IrqSpinLock overhead (owned Console).
+    // Set at ~2x measured values for QEMU timing variance.
+    const WRITE_STR_HELLO: u64 = 2_500_000;
+
+    #[test_case]
+    fn regression_write_str_hello() {
+        let fb = FrameBuffer::init();
+        let mut console = Console::new(fb);
+        console.put_char(ascii::FF);
+        bench::check(
+            "Console::write_str(\"hello\\n\")",
+            WRITE_STR_HELLO,
+            ITER_SMALL,
+            || {
+                let _ = console.write_str("hello\n");
+            },
+        );
+    }
+
+    #[test_case]
+    fn profile_console_print() {
+        use crate::drivers::ramfb::Colour;
+        use crate::shell::font;
+
+        crate::println!("\n=== Console Print Path Profile ===");
+
+        let fb = FrameBuffer::init();
+        let mut console = Console::new(fb);
+
+        bench::run_avg("Console::put_char(ch)", ITER_SMALL, || {
+            console.put_char(b'X');
+        });
+        console.put_char(ascii::FF);
+        bench::run_avg("Console::show+hide_cursor", ITER_SMALL, || {
+            console.show_cursor();
+            console.hide_cursor();
+        });
+        console.put_char(ascii::FF);
+        bench::run_avg("Console::write_char(ch)", ITER_SMALL, || {
+            console
+                .write_char(b'X' as char)
+                .expect("should be able to write char");
+        });
+        console.put_char(ascii::FF);
+        bench::run_avg("Console::write_char(LF)", ITER_SMALL, || {
+            console
+                .write_char(ascii::LF as char)
+                .expect("should be able to write line feed");
+        });
+        console.put_char(ascii::FF);
+        bench::run_avg("Console::write_str(\"hello\\n\")", ITER_SMALL, || {
+            let _ = console.write_str("hello\n");
+        });
+
+        // FrameBuffer-level benchmarks
+        let mut fb = console.fb;
+        bench::run_avg("FrameBuffer::set_pixels(8px)", ITER_LARGE, || {
+            fb.set_pixels(
+                0,
+                0,
+                &[
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                    Colour::RED.as_raw(),
+                    Colour::BLUE.as_raw(),
+                ],
+            );
+        });
+        bench::run_avg("font::render_glyph", ITER_LARGE, || {
+            font::render_glyph(&mut fb, 0, 0, b'X', Colour::WHITE, Colour::BLUE);
+        });
+        crate::println!("==================================");
+    }
+
+    #[test_case]
+    fn profile_console_scroll() {
+        crate::println!("\n=== Console Scroll Path Profile ===");
+
+        let fb = FrameBuffer::init();
+        let mut console = Console::new(fb);
+
+        // Position cursor at last row so each LF triggers a scroll
+        console.put_char(ascii::FF);
+        for _ in 0..29 {
+            console.put_char(ascii::LF);
+        }
+        bench::run_avg("Console::write_char(LF) with scroll", ITER_LARGE, || {
+            console.write_char(ascii::LF as char).unwrap();
+        });
+        crate::println!("====================================");
     }
 }
 
