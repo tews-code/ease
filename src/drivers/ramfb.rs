@@ -7,7 +7,6 @@ unsafe extern "C" {
     static __fb_addr: u8;
 }
 
-#[derive(Clone, Copy)]
 pub struct FrameBuffer(()); // Private field to prevent external code writing to FrameBuffer
 
 impl FrameBuffer {
