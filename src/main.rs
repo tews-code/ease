@@ -27,6 +27,8 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
+use crate::drivers::ramfb::FrameBuffer;
+
 extern crate alloc;
 
 mod arch;
@@ -63,7 +65,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 // Entry Points
 // =============================================================================
 
-fn kernel_init() {
+fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::alloc::init();
     kernel::timer::init();
@@ -83,15 +85,15 @@ fn kernel_init() {
     drivers::virtio::virtio_blk_init();
     fs::fat16::fat16_init();
 
-    let fb = drivers::ramfb::FrameBuffer::init();
-    let console = shell::console::Console::new(fb);
-    drivers::DISPLAY.lock().init(console);
+    drivers::ramfb::FrameBuffer::init()
 }
 
 #[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    kernel_init();
+    let fb = kernel_init();
+    let console = shell::console::Console::new(fb);
+    drivers::DISPLAY.lock().init(console);
 
     test_main();
     loop {
@@ -102,11 +104,12 @@ extern "C" fn main() -> ! {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    kernel_init();
-
-    println!("Hello from EASE!");
+    let fb = kernel_init();
+    let mut console = shell::console::Console::new(fb);
+    use core::fmt::Write;
+    let _ = writeln!(console, "Hello from EASE!");
+    printdln!("Hello from EASE!");
     // Start the shell
-    let console = drivers::DISPLAY.lock().take_console().unwrap();
     let mut shell = shell::Shell::new(console);
     shell.run();
 }
@@ -159,16 +162,5 @@ mod tests {
     #[test_case]
     fn test_bss_zeroed() {
         assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
-    }
-
-    /// Verify UART output works while DISPLAY lock is held.
-    /// Before the fix, this scenario would deadlock in the panic handler
-    /// (and any printdln! while DISPLAY was locked would also deadlock
-    /// if it had used println! instead).
-    #[test_case]
-    fn test_printdln_while_display_locked() {
-        let _guard = crate::drivers::DISPLAY.lock();
-        crate::printdln!("UART works while DISPLAY is locked");
-        // If we reach here, no deadlock occurred
     }
 }

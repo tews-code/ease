@@ -21,6 +21,7 @@ enum DisplayMode {
     App(FrameBuffer), // renderer detached, FB used directly
 }
 
+#[allow(dead_code)]
 pub struct DisplayManager {
     display_mode: DisplayMode,
 }
@@ -33,6 +34,7 @@ impl DisplayManager {
     }
 
     // Initialise console
+    #[allow(dead_code)]
     pub fn init(&mut self, console: Console) {
         self.display_mode = DisplayMode::Console(console)
     }
@@ -79,6 +81,7 @@ impl DisplayManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn take_console(&mut self) -> Option<Console> {
         match core::mem::replace(&mut self.display_mode, DisplayMode::Headless) {
             DisplayMode::Console(console) => Some(console),
