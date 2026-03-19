@@ -181,6 +181,8 @@ impl Console {
         self.hide_cursor();
         self.process_char(ch);
         self.show_cursor();
+        // Also echo to UART
+        crate::drivers::uart::direct_write_byte(ch);
     }
 
     // Draw char at current position

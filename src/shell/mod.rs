@@ -56,9 +56,17 @@ impl Shell {
                 {
                     // Send event to line editor
                     match self.line_editor.process(event) {
-                        EditResult::CursorMove | EditResult::LineEdit | EditResult::Append => {
+                        EditResult::CursorMove | EditResult::LineEdit => {
                             self.console
                                 .redraw_line(self.line_editor.line(), self.line_editor.cursor());
+                        }
+                        EditResult::Append => {
+                            self.console
+                                .redraw_line(self.line_editor.line(), self.line_editor.cursor());
+                            // Echo last typed character to UART
+                            if let Some(&ch) = self.line_editor.line().last() {
+                                crate::drivers::uart::direct_write_byte(ch);
+                            }
                         }
                         EditResult::Complete => {
                             self.console.put_char(ascii::CR);
