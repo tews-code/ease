@@ -40,6 +40,10 @@ pub fn ticks_ms() -> usize {
 #[allow(dead_code)]
 pub fn sleep_ms(ms: usize) {
     let start = ticks_ms();
+    debug_assert!(
+        crate::arch::interrupts_enabled(),
+        "sleep_ms called with interrupts disabled"
+    );
     while ticks_ms().wrapping_sub(start) < ms {
         unsafe {
             core::arch::asm!("wfi");

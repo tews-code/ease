@@ -40,3 +40,10 @@ pub fn restore_interrupts(prev: usize) {
         }
     }
 }
+
+/// Checks if interrupts are enabled
+pub fn interrupts_enabled() -> bool {
+    let mstatus: usize;
+    unsafe { core::arch::asm!("csrr {}, mstatus", out(reg) mstatus) };
+    mstatus & csr::mstatus::MIE != 0
+}

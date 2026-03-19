@@ -77,8 +77,6 @@ pub struct VirtioBlkDev {
     vq: Box<VirtioVirtq>, // device writes to the used ring
 }
 
-pub type Blk = VirtioBlkDev;
-
 // SAFETY: All access is guarded by IrqSpinLock (interrupts disabled while held).
 unsafe impl Sync for VirtioBlkDev {}
 

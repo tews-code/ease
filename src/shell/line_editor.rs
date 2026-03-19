@@ -10,6 +10,7 @@ const HISTORY_SIZE: usize = 10;
 
 /// Result of processing a key event. The caller uses `line()` and `cursor()` to
 /// get the current state after each result.
+#[must_use]
 pub enum EditResult {
     Append,     // Append a byte to the end of the line
     Complete,   // Enter pressed
