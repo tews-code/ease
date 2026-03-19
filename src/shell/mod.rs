@@ -62,8 +62,8 @@ impl Shell {
                                 .redraw_line(self.line_editor.line(), self.line_editor.cursor());
                         }
                         EditResult::Complete => {
-                            self.console.put_char(ascii::LF);
                             self.console.put_char(ascii::CR);
+                            self.console.put_char(ascii::LF);
                             let cmd = core::str::from_utf8(self.line_editor.line())
                                 .expect("should be UTF-8");
                             Self::execute(&mut self.console, cmd);
