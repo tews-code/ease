@@ -4,7 +4,7 @@ use core::fmt::Write;
 use core::ops::ControlFlow;
 
 use crate::kernel::timer;
-use crate::shell::{Console, ascii};
+use crate::shell::{Args, Console, ascii};
 
 /// Clears the console screen.
 pub fn clear(console: &mut Console) {
@@ -12,8 +12,14 @@ pub fn clear(console: &mut Console) {
 }
 
 /// Prints arguments to the console.
-pub fn echo(console: &mut Console, args: &str) {
-    let _ = writeln!(console, "{args}");
+pub fn echo(console: &mut Console, args: &Args) {
+    for (i, arg) in args.positionals.as_slice().iter().enumerate() {
+        if i > 0 {
+            let _ = write!(console, " ");
+        }
+        let _ = write!(console, "{arg}");
+    }
+    let _ = writeln!(console);
 }
 
 /// Prints the list of available commands.
@@ -27,15 +33,28 @@ pub fn help(console: &mut Console) {
 }
 
 /// Lists files in current directory
-pub fn ls(console: &mut Console) {
+pub fn ls(console: &mut Console, args: &Args) {
     crate::fs::fat16::with_volume(|vol| {
         let _ = vol
             .read_root_dir(|entry| {
                 let name = entry.filename();
-                let _ = writeln!(console, "{}", name.as_str().unwrap_or("???"));
+                if args.has_flag(b'l') {
+                    let _ = writeln!(
+                        console,
+                        "{:>8}  {}",
+                        entry.file_size,
+                        name.as_str().unwrap_or("???")
+                    );
+                } else {
+                    let _ = write!(console, "{}  ", name.as_str().unwrap_or("???"));
+                }
                 ControlFlow::<()>::Continue(())
             })
             .expect("ls command failed");
+
+        if !args.has_flag(b'l') {
+            let _ = writeln!(console);
+        }
     });
 }
 

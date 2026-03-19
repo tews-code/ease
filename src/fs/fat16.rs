@@ -226,7 +226,7 @@ pub struct DirEntry {
     extension: [u8; 3],
     attributes: u8,
     first_cluster: u16, // Little Endian
-    file_size: u32,     // Little Endian
+    pub file_size: u32, // Little Endian
 }
 
 impl DirEntry {

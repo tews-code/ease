@@ -2,6 +2,7 @@
 
 use core::fmt::Write;
 
+use crate::kernel::collection::StackVec;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
 use crate::shell::line_editor::EditResult;
@@ -33,6 +34,18 @@ pub struct Shell {
     console: Console,
     keyboard: Keyboard,
     line_editor: LineEditor,
+}
+
+/// Struct holding flags and positional arguments
+pub struct Args<'a> {
+    flags: StackVec<u8, 8>,
+    positionals: StackVec<&'a str, 8>,
+}
+
+impl Args<'_> {
+    pub fn has_flag(&self, flag: u8) -> bool {
+        self.flags.as_slice().contains(&flag)
+    }
 }
 
 impl Shell {
@@ -90,26 +103,117 @@ impl Shell {
         }
     }
 
+    fn parse(rest: &str) -> Args<'_> {
+        let mut flags = StackVec::<u8, 8>::new();
+        let mut positionals = StackVec::<&str, 8>::new();
+        for token in rest.split_whitespace() {
+            if let Some(flag_chars) = token.strip_prefix('-') {
+                for ch in flag_chars.bytes() {
+                    let _ = flags.push(ch);
+                }
+            } else {
+                // Positional argument
+                let _ = positionals.push(token);
+            }
+        }
+        Args { flags, positionals }
+    }
+
     fn execute(console: &mut Console, line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
         }
 
-        // Split on first space
-        let (cmd, args) = match line.find(' ') {
+        let (cmd, rest) = match line.find(' ') {
             Some(pos) => (&line[..pos], line[pos + 1..].trim()),
             None => (line, ""),
         };
 
+        let args = Self::parse(rest);
+
         match cmd {
             "clear" => commands::clear(console),
-            "echo" => commands::echo(console, args),
+            "echo" => commands::echo(console, &args),
             "help" => commands::help(console),
-            "ls" => commands::ls(console),
+            "ls" => commands::ls(console, &args),
             "time" => commands::time(console),
             "panic" => commands::panic(console),
             _ => commands::unknown(console, cmd),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn parse_empty_input() {
+        let args = Shell::parse("");
+        assert_eq!(args.flags.len(), 0);
+        assert_eq!(args.positionals.len(), 0);
+    }
+
+    #[test_case]
+    fn parse_single_positional() {
+        let args = Shell::parse("HELLO.TXT");
+        assert_eq!(args.flags.len(), 0);
+        assert_eq!(args.positionals.len(), 1);
+        assert_eq!(args.positionals[0], "HELLO.TXT");
+    }
+
+    #[test_case]
+    fn parse_multiple_positionals() {
+        let args = Shell::parse("FOO.TXT BAR.TXT");
+        assert_eq!(args.positionals.len(), 2);
+        assert_eq!(args.positionals[0], "FOO.TXT");
+        assert_eq!(args.positionals[1], "BAR.TXT");
+    }
+
+    #[test_case]
+    fn parse_single_flag() {
+        let args = Shell::parse("-l");
+        assert_eq!(args.flags.len(), 1);
+        assert!(args.has_flag(b'l'));
+        assert_eq!(args.positionals.len(), 0);
+    }
+
+    #[test_case]
+    fn parse_multiple_separate_flags() {
+        let args = Shell::parse("-l -a");
+        assert_eq!(args.flags.len(), 2);
+        assert!(args.has_flag(b'l'));
+        assert!(args.has_flag(b'a'));
+    }
+
+    #[test_case]
+    fn parse_combined_flags() {
+        let args = Shell::parse("-la");
+        assert_eq!(args.flags.len(), 2);
+        assert!(args.has_flag(b'l'));
+        assert!(args.has_flag(b'a'));
+    }
+
+    #[test_case]
+    fn parse_flags_and_positionals_mixed() {
+        let args = Shell::parse("-l HELLO.TXT -a");
+        assert!(args.has_flag(b'l'));
+        assert!(args.has_flag(b'a'));
+        assert_eq!(args.positionals.len(), 1);
+        assert_eq!(args.positionals[0], "HELLO.TXT");
+    }
+
+    #[test_case]
+    fn has_flag_returns_false_for_absent_flag() {
+        let args = Shell::parse("-l");
+        assert!(!args.has_flag(b'a'));
+    }
+
+    #[test_case]
+    fn parse_whitespace_only() {
+        let args = Shell::parse("   ");
+        assert_eq!(args.flags.len(), 0);
+        assert_eq!(args.positionals.len(), 0);
     }
 }
