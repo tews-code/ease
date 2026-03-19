@@ -104,6 +104,24 @@ impl VirtioBlkDev {
             VIRTIO_DEVICE_ID
         );
 
+        let vq = VirtioBlkDev::reset();
+
+        // Get the disk capacity.
+        let cap_lo = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG) as u64;
+        let cap_hi = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG + 4) as u64;
+        let capacity = (cap_hi << 32 | cap_lo) * BLOCK_SIZE as u64;
+
+        crate::println!("virtio-blk: capacity is {} bytes", capacity);
+
+        // Allocate a region to store requests to the device.
+        // Safety: VirtioBlkReq contains only integer types and byte arrays.
+        // All-zero bytes is a valid representation for all fields.
+        let req: VirtioBlkReq = unsafe { MaybeUninit::zeroed().assume_init() };
+
+        Self { capacity, req, vq }
+    }
+
+    fn reset() -> Box<VirtioVirtq> {
         // 1. Reset the device
         mmio::write32(virtio_blk::BASE, VIRTIO_REG_DEVICE_STATUS, 0);
         // 2. Set the ACKNOWLEDGE status bit: the guest OS has noticed the device
@@ -133,19 +151,7 @@ impl VirtioBlkDev {
             VIRTIO_STATUS_DRIVER_OK,
         );
 
-        // Get the disk capacity.
-        let cap_lo = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG) as u64;
-        let cap_hi = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG + 4) as u64;
-        let capacity = (cap_hi << 32 | cap_lo) * BLOCK_SIZE as u64;
-
-        crate::println!("virtio-blk: capacity is {} bytes", capacity);
-
-        // Allocate a region to store requests to the device.
-        // Safety: VirtioBlkReq contains only integer types and byte arrays.
-        // All-zero bytes is a valid representation for all fields.
-        let req: VirtioBlkReq = unsafe { MaybeUninit::zeroed().assume_init() };
-
-        Self { capacity, req, vq }
+        vq
     }
 
     // Set up descriptors and kick the virtio queue
@@ -261,6 +267,11 @@ pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     let start = ticks_ms();
     while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
         if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
+            // Reset device and clean up queue
+            with_blk_dev(|blk| {
+                blk.vq = VirtioBlkDev::reset();
+            });
+            VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
             return Err(BlkError::Timeout);
         }
         crate::hal::wait_for_interrupt();
@@ -277,6 +288,11 @@ pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     let start = ticks_ms();
     while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
         if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
+            // Reset device and clean up queue
+            with_blk_dev(|blk| {
+                blk.vq = VirtioBlkDev::reset();
+            });
+            VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
             return Err(BlkError::Timeout);
         }
         crate::hal::wait_for_interrupt();
