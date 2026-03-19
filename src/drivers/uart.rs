@@ -24,7 +24,7 @@ static TX_BUF: SpscRingBuf<u8, 256> = SpscRingBuf::new();
 /// UART writer for QEMU
 pub struct UartWriter;
 
-impl crate::hal::Writer for UartWriter {
+impl UartWriter {
     fn write_byte(&self, byte: u8) {
         while TX_BUF.push(byte).is_err() {
             mmio::write8(
@@ -44,11 +44,17 @@ impl crate::hal::Writer for UartWriter {
         #[cfg(test)]
         crate::io::test_io::capture(byte);
     }
+
+    fn write_str(&self, s: &str) {
+        for byte in s.bytes() {
+            self.write_byte(byte);
+        }
+    }
 }
 
 impl core::fmt::Write for UartWriter {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        crate::hal::Writer::write_str(self, s);
+        UartWriter::write_str(self, s);
         Ok(())
     }
 }
@@ -67,8 +73,8 @@ pub fn direct_write_byte(byte: u8) {
 /// UART reader for QEMU
 pub struct UartReader;
 
-impl crate::hal::Reader for UartReader {
-    fn read_byte(&self) -> Option<u8> {
+impl UartReader {
+    pub fn read_byte(&self) -> Option<u8> {
         RX_BUF.pop()
     }
 }

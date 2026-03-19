@@ -3,7 +3,6 @@
 //! Classic 80 columns x 30 rows dumb terminal
 
 use crate::drivers::ramfb::{Colour, FrameBuffer};
-use crate::drivers::render::Renderer;
 use crate::shell::{ascii, font};
 
 const ROWS: usize = 30;
@@ -266,20 +265,6 @@ impl core::fmt::Write for Console {
         self.show_cursor();
 
         Ok(())
-    }
-}
-
-impl Renderer for Console {
-    fn draw_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
-        self.render_char(row, column, ch, inverted);
-    }
-
-    fn fill(&mut self) {
-        self.fb.fill(self.bg);
-    }
-
-    fn scroll(&mut self) {
-        self.fb.scroll(font::HEIGHT, self.bg);
     }
 }
 

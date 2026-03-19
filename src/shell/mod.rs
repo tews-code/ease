@@ -2,7 +2,6 @@
 
 use core::fmt::Write;
 
-use crate::hal::Reader;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
 use crate::shell::line_editor::EditResult;

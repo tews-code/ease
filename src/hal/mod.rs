@@ -14,23 +14,3 @@ pub fn wait_for_interrupt() {
         core::arch::asm!("wfi");
     }
 }
-
-/// Trait for byte-level output
-///
-/// Implemenation can write to UART or capture output for testing
-pub trait Writer {
-    fn write_byte(&self, byte: u8);
-
-    fn write_str(&self, s: &str) {
-        for byte in s.bytes() {
-            self.write_byte(byte);
-        }
-    }
-}
-
-/// Trait for byte-level input
-///
-/// Implementation can read from UART or capture input for testing
-pub trait Reader {
-    fn read_byte(&self) -> Option<u8>;
-}

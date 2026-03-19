@@ -283,6 +283,8 @@ impl DirEntry {
 }
 
 // Need to lock with interrupts enabled waiting for IO completion
+// SpinLock (not IrqSpinLock) because I/O needs interrupts enabled for virtio
+// completion. Must never be accessed from an interrupt handler.
 static VOLUME: SpinLock<Option<Volume>> = SpinLock::new(None);
 
 pub fn fat16_init() {
