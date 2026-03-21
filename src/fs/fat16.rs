@@ -763,6 +763,26 @@ mod test {
     }
 
     #[test_case]
+    fn read_file_64kb() {
+        // 64KB file spans many clusters — tests cluster chain following at scale
+        with_volume(|vol| {
+            let entry = vol.open("BIG.TXT").unwrap();
+            assert_eq!(entry.file_size, 64 * 1024);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 64 * 1024);
+            // Verify first line content
+            let first_line_end = content.iter().position(|&b| b == b'\n').unwrap();
+            let first_line = core::str::from_utf8(&content[..first_line_end]).unwrap();
+            assert_eq!(
+                first_line,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 abcdefghijklmnopqrstuvwxyz"
+            );
+            // Verify last byte
+            assert_eq!(content[content.len() - 1], b'X');
+        });
+    }
+
+    #[test_case]
     fn open_multi_cluster_file() {
         // The PDF is ~7.9MB — too large to read into heap, but verify open finds it
         // and the dir entry has the expected size.
