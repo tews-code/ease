@@ -81,7 +81,7 @@ impl TextBuffer {
 enum RenderCommand {
     Clear,
     Scroll,
-    WriteChar(usize, usize, u8), // (row, column, ch)
+    WriteChar(usize, usize, u8),        // (row, column, ch)
     DrawCursor(usize, usize, u8, bool), // (row, column, ch, inverted)
 }
 
@@ -91,6 +91,7 @@ struct TerminalEmulator {
 }
 
 impl TerminalEmulator {
+    #[cfg(test)]
     fn cursor_pos(&self) -> (usize, usize) {
         (self.buffer.cy, self.buffer.cx)
     }
@@ -134,14 +135,24 @@ impl TerminalEmulator {
     fn show_cursor(&mut self, mut emit: impl FnMut(RenderCommand)) {
         if !self.cursor_visible {
             self.cursor_visible = true;
-            emit(RenderCommand::DrawCursor(self.buffer.cy, self.buffer.cx, self.char_at_cursor(), true))
+            emit(RenderCommand::DrawCursor(
+                self.buffer.cy,
+                self.buffer.cx,
+                self.char_at_cursor(),
+                true,
+            ))
         }
     }
 
     fn hide_cursor(&mut self, mut emit: impl FnMut(RenderCommand)) {
         if self.cursor_visible {
             self.cursor_visible = false;
-            emit(RenderCommand::DrawCursor(self.buffer.cy, self.buffer.cx, self.char_at_cursor(), false))
+            emit(RenderCommand::DrawCursor(
+                self.buffer.cy,
+                self.buffer.cx,
+                self.char_at_cursor(),
+                false,
+            ))
         }
     }
 }
@@ -204,35 +215,17 @@ impl Console {
         crate::drivers::uart::direct_write_byte(ch);
     }
 
-    // Draw char at current position
-    fn render_char(&mut self, row: usize, column: usize, ch: u8, inverted: bool) {
-        let (fg, bg) = if inverted {
-            (self.bg, self.fg)
-        } else {
-            (self.fg, self.bg)
-        };
-        font::render_glyph(
-            &mut self.fb,
-            column * font::WIDTH,
-            row * font::HEIGHT,
-            ch,
-            fg,
-            bg,
-        );
-    }
-
     /// Hides the cursor by redrawing the character at the cursor position in normal colours.
     pub fn hide_cursor(&mut self) {
         let fg = self.fg;
         let bg = self.bg;
         let fb = &mut self.fb;
-        self.emulator.hide_cursor(|cmd| match cmd {
-            RenderCommand::DrawCursor(row, column, ch, inverted) => {
+        self.emulator.hide_cursor(|cmd| {
+            if let RenderCommand::DrawCursor(row, column, ch, inverted) = cmd {
                 let (fg, bg) = if inverted { (bg, fg) } else { (fg, bg) };
                 font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg);
             }
-            _ => {}
-        });
+        })
     }
 
     /// Shows the cursor by drawing the character at the cursor position in inverted colours.
@@ -240,13 +233,12 @@ impl Console {
         let fg = self.fg;
         let bg = self.bg;
         let fb = &mut self.fb;
-        self.emulator.show_cursor(|cmd| match cmd {
-            RenderCommand::DrawCursor(row, column, ch, inverted) => {
+        self.emulator.show_cursor(|cmd| {
+            if let RenderCommand::DrawCursor(row, column, ch, inverted) = cmd {
                 let (fg, bg) = if inverted { (bg, fg) } else { (fg, bg) };
                 font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg);
             }
-            _ => {}
-        });
+        })
     }
 
     /// Redraws a line overwriting the previous content, starting at `cursor`

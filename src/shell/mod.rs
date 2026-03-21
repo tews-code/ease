@@ -3,6 +3,7 @@
 use core::fmt::Write;
 
 use crate::kernel::collection::StackVec;
+use crate::print;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
 use crate::shell::line_editor::EditResult;
@@ -34,6 +35,7 @@ pub struct Shell {
     console: Console,
     keyboard: Keyboard,
     line_editor: LineEditor,
+    prev_line_len: usize, // Needed for UART redraw
 }
 
 /// Struct holding flags and positional arguments
@@ -55,6 +57,7 @@ impl Shell {
             console,
             keyboard: Keyboard::default(),
             line_editor: LineEditor::new(),
+            prev_line_len: 0,
         }
     }
 
@@ -141,6 +144,37 @@ impl Shell {
             "panic" => commands::panic(console),
             _ => commands::unknown(console, cmd),
         }
+    }
+
+    #[allow(dead_code)]
+    fn uart_redraw_line(&mut self, line: &[u8], _cursor: usize) {
+        print!("\r");
+        print!("{PROMPT}");
+        for &b in line {
+            crate::drivers::uart::direct_write_byte(b);
+        }
+        crate::drivers::uart::direct_write_byte(ascii::BS);
+        let erase_count = self.prev_line_len.saturating_sub(line.len());
+        for _ in 0..erase_count {
+            print!(" ");
+        }
+        for _ in 0..erase_count {
+            crate::drivers::uart::direct_write_byte(ascii::BS);
+        }
+        /*
+        *
+        1 . CR (\r) — move cursor to start of line                                                   *
+        2. Print prompt — moss>
+        3. Print line contents — the current editor buffer
+        4. Erase leftover chars — if the line got shorter (backspace/delete), old characters remain on
+        screen. You can either:
+        - Send spaces to overwrite, then move back
+        - Use the ANSI escape \x1b[K (erase from cursor to end of line) — simpler if your terminal
+        supports it (most do, including QEMU's serial)
+        5. Reposition cursor — CR again, then move forward prompt.len() + cursor_position characters
+        *
+        *
+        */
     }
 }
 
