@@ -67,7 +67,7 @@ SECTIONS {
 
     .heap (NOLOAD) : ALIGN(16) {
         __heap_start = .;
-        . = . + 64K;
+        . = . + 256K;
         __heap_end = .;
     } > SRAM
 
