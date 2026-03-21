@@ -49,7 +49,8 @@ impl TextBuffer {
             self.cy += 1;
             // Note - for ANSI VT-100 we do not set cx back to zero
         } else {
-            return true; // Flag to ask for scrolling
+            self.scroll();
+            return true; // Flag to tell TerminalEmulator we are scrolling
         }
         false
     }
@@ -65,9 +66,11 @@ impl TextBuffer {
         self.cx += 1;
         if self.cx >= COLUMNS {
             self.cx = 0;
-            self.cy += 1;
-            if self.cy >= ROWS {
-                scroll = true;
+            if self.cy < ROWS - 1 {
+                self.cy += 1;
+            } else {
+                self.scroll();
+                scroll = true; // Flag to tell TerminalEmulator we are scrolling
             }
         }
         (old_cy, old_cx, scroll)
@@ -79,10 +82,12 @@ enum RenderCommand {
     Clear,
     Scroll,
     WriteChar(usize, usize, u8), // (row, column, ch)
+    DrawCursor(usize, usize, u8, bool), // (row, column, ch, inverted)
 }
 
 struct TerminalEmulator {
     buffer: TextBuffer,
+    cursor_visible: bool,
 }
 
 impl TerminalEmulator {
@@ -110,19 +115,33 @@ impl TerminalEmulator {
             ascii::LF => {
                 let scroll = self.buffer.line_feed();
                 if scroll {
-                    self.buffer.scroll();
                     emit(RenderCommand::Scroll);
                 }
             }
             ascii::TAB => {}
             _ => {
-                let (row, column, scroll) = self.buffer.writeable_char(ch);
-                emit(RenderCommand::WriteChar(row, column, ch));
-                if scroll {
-                    self.buffer.scroll();
-                    emit(RenderCommand::Scroll);
+                if ch.is_ascii_graphic() || ch == b' ' {
+                    let (row, column, scroll) = self.buffer.writeable_char(ch);
+                    emit(RenderCommand::WriteChar(row, column, ch));
+                    if scroll {
+                        emit(RenderCommand::Scroll);
+                    }
                 }
             }
+        }
+    }
+
+    fn show_cursor(&mut self, mut emit: impl FnMut(RenderCommand)) {
+        if !self.cursor_visible {
+            self.cursor_visible = true;
+            emit(RenderCommand::DrawCursor(self.buffer.cy, self.buffer.cx, self.char_at_cursor(), true))
+        }
+    }
+
+    fn hide_cursor(&mut self, mut emit: impl FnMut(RenderCommand)) {
+        if self.cursor_visible {
+            self.cursor_visible = false;
+            emit(RenderCommand::DrawCursor(self.buffer.cy, self.buffer.cx, self.char_at_cursor(), false))
         }
     }
 }
@@ -132,7 +151,6 @@ impl TerminalEmulator {
 pub struct Console {
     fb: FrameBuffer,
     emulator: TerminalEmulator,
-    cursor_visible: bool,
     prev_cursor: usize,
     prev_line_len: usize,
     fg: Colour,
@@ -150,8 +168,8 @@ impl Console {
                     cx: 0,
                     cy: 0,
                 },
+                cursor_visible: true,
             },
-            cursor_visible: true,
             prev_cursor: 0,
             prev_line_len: 0,
             fg: Colour::GREEN,
@@ -171,6 +189,7 @@ impl Console {
             RenderCommand::WriteChar(row, column, ch) => {
                 font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg)
             }
+            _ => {}
         });
     }
 
@@ -204,22 +223,30 @@ impl Console {
 
     /// Hides the cursor by redrawing the character at the cursor position in normal colours.
     pub fn hide_cursor(&mut self) {
-        if self.cursor_visible {
-            let (row, column) = self.emulator.cursor_pos();
-            let ch = self.emulator.char_at_cursor();
-            self.render_char(row, column, ch, false);
-            self.cursor_visible = false;
-        }
+        let fg = self.fg;
+        let bg = self.bg;
+        let fb = &mut self.fb;
+        self.emulator.hide_cursor(|cmd| match cmd {
+            RenderCommand::DrawCursor(row, column, ch, inverted) => {
+                let (fg, bg) = if inverted { (bg, fg) } else { (fg, bg) };
+                font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg);
+            }
+            _ => {}
+        });
     }
 
     /// Shows the cursor by drawing the character at the cursor position in inverted colours.
     pub fn show_cursor(&mut self) {
-        if !self.cursor_visible {
-            let (row, column) = self.emulator.cursor_pos();
-            let ch = self.emulator.char_at_cursor();
-            self.render_char(row, column, ch, true);
-            self.cursor_visible = true;
-        };
+        let fg = self.fg;
+        let bg = self.bg;
+        let fb = &mut self.fb;
+        self.emulator.show_cursor(|cmd| match cmd {
+            RenderCommand::DrawCursor(row, column, ch, inverted) => {
+                let (fg, bg) = if inverted { (bg, fg) } else { (fg, bg) };
+                font::render_glyph(fb, column * font::WIDTH, row * font::HEIGHT, ch, fg, bg);
+            }
+            _ => {}
+        });
     }
 
     /// Redraws a line overwriting the previous content, starting at `cursor`
@@ -395,6 +422,7 @@ mod tests {
     fn new_emulator() -> TerminalEmulator {
         TerminalEmulator {
             buffer: new_buffer(),
+            cursor_visible: true,
         }
     }
 
