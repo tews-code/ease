@@ -3,6 +3,7 @@
 use core::fmt::Write;
 use core::ops::ControlFlow;
 
+use crate::fs::FsError;
 use crate::kernel::timer;
 use crate::shell::{Args, Console, ascii};
 
@@ -55,6 +56,7 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  help  - Show this help");
     let _ = writeln!(console, "  ls    - List files in directory");
     let _ = writeln!(console, "  time  - Show system ticks");
+    let _ = writeln!(console, "  touch - Create empty file");
 }
 
 /// Lists files in current directory
@@ -91,6 +93,23 @@ pub fn time(console: &mut Console) {
 /// Panics the system.
 pub fn panic(_console: &mut Console) {
     panic!("user requested panic");
+}
+
+/// Creates an empty file
+pub fn touch(console: &mut Console, args: &Args) {
+    for filename in args.positionals.as_slice().iter() {
+        crate::fs::volume::with_volume(|vol| match vol.create_empty_file(filename) {
+            Ok(_) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::DirFull => "directory full",
+                    FsError::InvalidName => "invalid file name",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "touch: {}: {}", filename, msg);
+            }
+        });
+    }
 }
 
 /// Prints an error message for an unrecognised command.

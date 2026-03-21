@@ -142,8 +142,9 @@ impl Shell {
             "echo" => commands::echo(console, &args),
             "help" => commands::help(console),
             "ls" => commands::ls(console, &args),
-            "time" => commands::time(console),
             "panic" => commands::panic(console),
+            "time" => commands::time(console),
+            "touch" => commands::touch(console, &args),
             _ => commands::unknown(console, cmd),
         }
     }

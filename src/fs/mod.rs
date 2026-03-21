@@ -80,7 +80,9 @@ const SECTOR_SIZE: usize = 512;
 #[allow(dead_code)]
 pub enum FsError {
     DeviceError(BlkError),
+    DirFull,
     InvalidBpb,
+    InvalidName,
     NotFat16,
     NotFound,
     UnsupportedSectorSize,

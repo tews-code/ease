@@ -1,5 +1,6 @@
 //! FAT16 directory entries
 
+use crate::fs::FsError;
 use crate::kernel::collection::StackVec;
 
 pub(super) const DIR_ENTRY_BYTES: usize = 32;
@@ -70,6 +71,39 @@ impl DirEntry {
             }
         }
         full_name
+    }
+
+    /// Parse string into 8.3 file name
+    #[allow(dead_code)]
+    // take "TEST.TXT" and produce (b"TEST    ", b"TXT"). Rules: split
+    // on ., uppercase, pad name to 8 with spaces, pad extension to 3 with spaces. Reject names that are too long
+    // (>8 name or >3 extension) or contain invalid characters.
+    pub fn parse_83_name(filename: &str) -> Result<([u8; 8], [u8; 3]), FsError> {
+        if !filename.is_ascii() {
+            return Err(FsError::InvalidName);
+        }
+        let (name_str, ext_str) = match filename.split_once('.') {
+            Some((n, e)) => (n, e),
+            None => (filename, ""),
+        };
+        // Validation. Before copying, check lengths:
+        if !(1..=8).contains(&name_str.len()) {
+            return Err(FsError::InvalidName);
+        }
+        if ext_str.len() > 3 || ext_str.contains('.') {
+            return Err(FsError::InvalidName);
+        }
+
+        let mut name = [b' '; 8];
+        let mut ext = [b' '; 3];
+
+        for (i, &b) in name_str.as_bytes().iter().enumerate() {
+            name[i] = b.to_ascii_uppercase()
+        }
+        for (i, &b) in ext_str.as_bytes().iter().enumerate() {
+            ext[i] = b.to_ascii_uppercase()
+        }
+        Ok((name, ext))
     }
 }
 
@@ -193,5 +227,75 @@ mod test {
         if let DirParseResult::Parsed(entry) = DirEntry::parse(&bytes) {
             assert_eq!(entry.filename().as_str(), Ok("A.C"));
         }
+    }
+
+    // =========================================================================
+    // parse_83_name tests
+    // =========================================================================
+
+    #[test_case]
+    fn parse_83_name_with_extension() {
+        let (name, ext) = DirEntry::parse_83_name("TEST.TXT").unwrap();
+        assert_eq!(&name, b"TEST    ");
+        assert_eq!(&ext, b"TXT");
+    }
+
+    #[test_case]
+    fn parse_83_name_no_extension() {
+        let (name, ext) = DirEntry::parse_83_name("README").unwrap();
+        assert_eq!(&name, b"README  ");
+        assert_eq!(&ext, b"   ");
+    }
+
+    #[test_case]
+    fn parse_83_name_lowercased() {
+        let (name, ext) = DirEntry::parse_83_name("a.b").unwrap();
+        assert_eq!(&name, b"A       ");
+        assert_eq!(&ext, b"B  ");
+    }
+
+    #[test_case]
+    fn parse_83_name_full_length() {
+        let (name, ext) = DirEntry::parse_83_name("12345678.ABC").unwrap();
+        assert_eq!(&name, b"12345678");
+        assert_eq!(&ext, b"ABC");
+    }
+
+    #[test_case]
+    fn parse_83_name_single_char() {
+        let (name, ext) = DirEntry::parse_83_name("X.Y").unwrap();
+        assert_eq!(&name, b"X       ");
+        assert_eq!(&ext, b"Y  ");
+    }
+
+    #[test_case]
+    fn parse_83_name_rejects_empty() {
+        assert!(DirEntry::parse_83_name("").is_err());
+    }
+
+    #[test_case]
+    fn parse_83_name_rejects_long_name() {
+        assert!(DirEntry::parse_83_name("TOOLONGNAME.TXT").is_err());
+    }
+
+    #[test_case]
+    fn parse_83_name_rejects_long_ext() {
+        assert!(DirEntry::parse_83_name("TEST.LONG").is_err());
+    }
+
+    #[test_case]
+    fn parse_83_name_rejects_multiple_dots() {
+        assert!(DirEntry::parse_83_name("A.B.C").is_err());
+    }
+
+    #[test_case]
+    fn parse_83_name_rejects_non_ascii() {
+        assert!(DirEntry::parse_83_name("café.txt").is_err());
+    }
+
+    #[test_case]
+    fn parse_83_name_dot_only_name() {
+        // ".TXT" has empty name part
+        assert!(DirEntry::parse_83_name(".TXT").is_err());
     }
 }

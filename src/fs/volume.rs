@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::drivers::virtio::read_block;
+use crate::drivers::virtio::{read_block, write_block};
 use crate::kernel::sync::SpinLock;
 
 use super::bpb::Bpb;
@@ -121,6 +121,41 @@ impl Volume {
         }
         content.truncate(entry.file_size as usize);
         Ok(content)
+    }
+
+    // Create an empty file ("touch")
+    pub fn create_empty_file(&mut self, filename: &str) -> Result<(), FsError> {
+        // First parse the file name for FAT16 8.3 validity
+        let (name, ext) = DirEntry::parse_83_name(filename)?;
+
+        // Loop through root dir to find empty slot (first byte is 0x00 or 0xE5)
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        let start = self.bpb.root_dir_start_sector();
+        let count = self.bpb.root_dir_sectors();
+        for sector in start..start + count {
+            // First read the sector
+            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+
+            // 16 entries per sector (512 / 32)
+            for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
+                let offset = entry * DIR_ENTRY_BYTES;
+                if buf[offset] != 0x00 && buf[offset] != 0xE5 {
+                    continue;
+                } else {
+                    // Found a free slot
+                    buf[offset..offset + 8].copy_from_slice(&name);
+                    buf[offset + 8..offset + 11].copy_from_slice(&ext);
+                    buf[offset + 11] = 0x20; // Attributes
+                    // Zero out the rest (cluster = 0, size = 0, timestamps, etc.)
+                    buf[offset + 12..offset + 32].fill(0);
+
+                    // Write back
+                    write_block(sector as u32, &buf).map_err(FsError::DeviceError)?;
+                    return Ok(());
+                }
+            }
+        }
+        Err(FsError::DirFull)
     }
 }
 
@@ -349,6 +384,63 @@ mod test {
                 entry1 >= 0xFFF8,
                 "FAT[1] should be reserved/EOC, got {:#06x}",
                 entry1
+            );
+        });
+    }
+
+    // =========================================================================
+    // Volume::create_empty_file tests
+    // =========================================================================
+
+    #[test_case]
+    fn touch_creates_file() {
+        with_volume(|vol| {
+            vol.create_empty_file("NEW.TXT").unwrap();
+            let entry = vol.open("NEW.TXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn touch_case_insensitive_open() {
+        with_volume(|vol| {
+            vol.create_empty_file("LOWER.TXT").unwrap();
+            let entry = vol.open("lower.txt").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn touch_no_extension() {
+        with_volume(|vol| {
+            vol.create_empty_file("NOEXT").unwrap();
+            let entry = vol.open("NOEXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn touch_invalid_name_rejected() {
+        with_volume(|vol| {
+            let result = vol.create_empty_file("TOOLONGNAME.TXT");
+            assert!(matches!(result, Err(FsError::InvalidName)));
+        });
+    }
+
+    #[test_case]
+    fn touch_created_file_visible_in_ls() {
+        with_volume(|vol| {
+            vol.create_empty_file("VISIBLE.TXT").unwrap();
+            let mut found = false;
+            let _ = vol.read_root_dir(|entry| {
+                if entry.filename().as_str() == Ok("VISIBLE.TXT") {
+                    found = true;
+                }
+                ControlFlow::<()>::Continue(())
+            });
+            assert!(
+                found,
+                "created file should appear in root directory listing"
             );
         });
     }
