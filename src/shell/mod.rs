@@ -3,7 +3,6 @@
 use core::fmt::Write;
 
 use crate::kernel::collection::StackVec;
-use crate::print;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
 use crate::shell::line_editor::EditResult;
@@ -35,7 +34,6 @@ pub struct Shell {
     console: Console,
     keyboard: Keyboard,
     line_editor: LineEditor,
-    prev_line_len: usize, // Needed for UART redraw
 }
 
 /// Struct holding flags and positional arguments
@@ -57,7 +55,6 @@ impl Shell {
             console,
             keyboard: Keyboard::default(),
             line_editor: LineEditor::new(),
-            prev_line_len: 0,
         }
     }
 
@@ -75,6 +72,10 @@ impl Shell {
                         EditResult::CursorMove | EditResult::LineEdit => {
                             self.console
                                 .redraw_line(self.line_editor.line(), self.line_editor.cursor());
+                            Self::uart_redraw_line(
+                                self.line_editor.line(),
+                                self.line_editor.cursor(),
+                            );
                         }
                         EditResult::Append => {
                             self.console
@@ -146,35 +147,34 @@ impl Shell {
         }
     }
 
-    #[allow(dead_code)]
-    fn uart_redraw_line(&mut self, line: &[u8], _cursor: usize) {
-        print!("\r");
-        print!("{PROMPT}");
+    /// Redraws the current input line on the UART serial terminal.
+    ///
+    /// 1. CR — move cursor to start of line
+    /// 2. Print prompt
+    /// 3. Print line contents
+    /// 4. Erase from cursor to end of line (ANSI escape `\x1b[K`)
+    /// 5. Reposition cursor with backspaces
+    fn uart_redraw_line(line: &[u8], cursor: usize) {
+        use crate::drivers::uart::direct_write_byte;
+
+        // 1. CR — move to start of line
+        direct_write_byte(ascii::CR);
+        // 2. Print prompt
+        for &b in PROMPT.as_bytes() {
+            direct_write_byte(b);
+        }
+        // 3. Print line contents
         for &b in line {
-            crate::drivers::uart::direct_write_byte(b);
+            direct_write_byte(b);
         }
-        crate::drivers::uart::direct_write_byte(ascii::BS);
-        let erase_count = self.prev_line_len.saturating_sub(line.len());
-        for _ in 0..erase_count {
-            print!(" ");
+        // 4. Erase to end of line
+        direct_write_byte(0x1b);
+        direct_write_byte(b'[');
+        direct_write_byte(b'K');
+        // 5. Reposition cursor
+        for _ in 0..line.len().saturating_sub(cursor) {
+            direct_write_byte(ascii::BS);
         }
-        for _ in 0..erase_count {
-            crate::drivers::uart::direct_write_byte(ascii::BS);
-        }
-        /*
-        *
-        1 . CR (\r) — move cursor to start of line                                                   *
-        2. Print prompt — moss>
-        3. Print line contents — the current editor buffer
-        4. Erase leftover chars — if the line got shorter (backspace/delete), old characters remain on
-        screen. You can either:
-        - Send spaces to overwrite, then move back
-        - Use the ANSI escape \x1b[K (erase from cursor to end of line) — simpler if your terminal
-        supports it (most do, including QEMU's serial)
-        5. Reposition cursor — CR again, then move forward prompt.len() + cursor_position characters
-        *
-        *
-        */
     }
 }
 
