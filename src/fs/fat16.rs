@@ -75,6 +75,8 @@ Attribute flags:
 #![allow(dead_code)]
 use core::ops::ControlFlow;
 
+use alloc::vec::Vec;
+
 use crate::drivers::virtio::{BlkError, read_block};
 use crate::kernel::collection::StackVec;
 use crate::kernel::sync::SpinLock;
@@ -83,9 +85,10 @@ const SECTOR_SIZE: usize = 512;
 
 #[derive(Debug)]
 pub enum FsError {
-    InvalidBpb,
     DeviceError(BlkError),
+    InvalidBpb,
     NotFat16,
+    NotFound,
     UnsupportedSectorSize,
 }
 
@@ -213,6 +216,49 @@ impl Volume {
         }
         Ok(ControlFlow::Continue(()))
     }
+
+    /// Find a file by file name
+    pub fn open(&self, filename: &str) -> Result<DirEntry, FsError> {
+        match self.read_root_dir(|entry| {
+            if let Ok(name) = entry.filename().as_str() {
+                if name.eq_ignore_ascii_case(filename) {
+                    ControlFlow::Break(entry.clone())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            } else {
+                ControlFlow::Continue(())
+            }
+        })? {
+            ControlFlow::Break(entry) => Ok(entry),
+            ControlFlow::Continue(()) => Err(FsError::NotFound),
+        }
+    }
+
+    /// Read a file from a given DirEntry
+    pub fn read_file(&self, entry: &DirEntry) -> Result<Vec<u8>, FsError> {
+        if entry.file_size == 0 {
+            return Ok(Vec::new());
+        }
+        let mut content = Vec::<u8>::new();
+        let mut current_cluster = entry.first_cluster;
+        let mut buf = [0u8; 512];
+        loop {
+            let start_sector = self.bpb.cluster_to_sector(current_cluster);
+            for s in 0..self.bpb.sectors_per_cluster as u32 {
+                read_block(start_sector as u32 + s, &mut buf).map_err(FsError::DeviceError)?;
+                content.extend_from_slice(&buf);
+            }
+            let next_cluster = self.fat_entry(current_cluster)?;
+
+            match next_cluster {
+                0xFFF8..=0xFFFF => break,
+                _ => current_cluster = next_cluster,
+            }
+        }
+        content.truncate(entry.file_size as usize);
+        Ok(content)
+    }
 }
 
 enum DirParseResult {
@@ -221,6 +267,7 @@ enum DirParseResult {
     End,
 }
 
+#[derive(Clone)]
 pub struct DirEntry {
     filename: [u8; 8],
     extension: [u8; 3],
@@ -616,6 +663,112 @@ mod test {
                     ControlFlow::<()>::Continue(())
                 })
                 .unwrap();
+        });
+    }
+
+    // =========================================================================
+    // Volume::open tests
+    // =========================================================================
+
+    #[test_case]
+    fn open_finds_hello_txt() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    #[test_case]
+    fn open_case_insensitive() {
+        with_volume(|vol| {
+            let entry = vol.open("hello.txt").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    #[test_case]
+    fn open_not_found() {
+        with_volume(|vol| {
+            let result = vol.open("NOPE.TXT");
+            assert!(matches!(result, Err(FsError::NotFound)));
+        });
+    }
+
+    #[test_case]
+    fn open_empty_file() {
+        with_volume(|vol| {
+            let entry = vol.open("EMPTY.TXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn open_no_extension() {
+        with_volume(|vol| {
+            let entry = vol.open("SHORT").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    // =========================================================================
+    // Volume::read_file tests
+    // =========================================================================
+
+    #[test_case]
+    fn read_file_hello_txt() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "Text file contents\n");
+        });
+    }
+
+    #[test_case]
+    fn read_file_empty() {
+        with_volume(|vol| {
+            let entry = vol.open("EMPTY.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 0);
+        });
+    }
+
+    #[test_case]
+    fn read_file_short() {
+        with_volume(|vol| {
+            let entry = vol.open("SHORT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "This is a file with a short name.\n");
+        });
+    }
+
+    #[test_case]
+    fn read_file_size_matches_dir_entry() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), entry.file_size as usize);
+        });
+    }
+
+    #[test_case]
+    fn read_file_longname() {
+        with_volume(|vol| {
+            let entry = vol.open("LONGNAME.END").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "This is a file with a long name.\n");
+        });
+    }
+
+    #[test_case]
+    fn open_multi_cluster_file() {
+        // The PDF is ~7.9MB — too large to read into heap, but verify open finds it
+        // and the dir entry has the expected size.
+        with_volume(|vol| {
+            let entry = vol.open("RP-008~1.PDF").unwrap();
+            assert_eq!(entry.file_size, 7_968_417);
         });
     }
 }

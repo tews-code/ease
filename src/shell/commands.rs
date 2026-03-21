@@ -6,6 +6,30 @@ use core::ops::ControlFlow;
 use crate::kernel::timer;
 use crate::shell::{Args, Console, ascii};
 
+/// Reads file content to console
+pub fn cat(console: &mut Console, args: &Args) {
+    for filename in args.positionals.as_slice().iter() {
+        crate::fs::fat16::with_volume(|vol| match vol.open(filename) {
+            Ok(entry) => match vol.read_file(&entry) {
+                Ok(content) => match core::str::from_utf8(&content) {
+                    Ok(text) => {
+                        let _ = write!(console, "{}", text);
+                    }
+                    Err(_) => {
+                        let _ = writeln!(console, "cat: file is not valid text");
+                    }
+                },
+                Err(_) => {
+                    let _ = writeln!(console, "cat: unable to read file");
+                }
+            },
+            Err(_) => {
+                let _ = write!(console, "cat: {}: No such file or directory", filename);
+            }
+        })
+    }
+}
+
 /// Clears the console screen.
 pub fn clear(console: &mut Console) {
     let _ = write!(console, "{}", ascii::FF as char);
@@ -25,6 +49,7 @@ pub fn echo(console: &mut Console, args: &Args) {
 /// Prints the list of available commands.
 pub fn help(console: &mut Console) {
     let _ = writeln!(console, "Available commands:");
+    let _ = writeln!(console, "  cat   - Read file content to screen");
     let _ = writeln!(console, "  clear - Clear the screen");
     let _ = writeln!(console, "  echo  - Print arguments");
     let _ = writeln!(console, "  help  - Show this help");

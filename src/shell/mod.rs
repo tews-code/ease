@@ -137,6 +137,7 @@ impl Shell {
         let args = Self::parse(rest);
 
         match cmd {
+            "cat" => commands::cat(console, &args),
             "clear" => commands::clear(console),
             "echo" => commands::echo(console, &args),
             "help" => commands::help(console),
