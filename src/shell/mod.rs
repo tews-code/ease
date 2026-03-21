@@ -141,6 +141,7 @@ impl Shell {
             "clear" => commands::clear(console),
             "echo" => commands::echo(console, &args),
             "help" => commands::help(console),
+            "hexdump" => commands::hexdump(console, &args),
             "ls" => commands::ls(console, &args),
             "panic" => commands::panic(console),
             "time" => commands::time(console),

@@ -50,14 +50,88 @@ pub fn echo(console: &mut Console, args: &Args) {
 /// Prints the list of available commands.
 pub fn help(console: &mut Console) {
     let _ = writeln!(console, "Available commands:");
-    let _ = writeln!(console, "  cat   - Read file content to screen");
-    let _ = writeln!(console, "  clear - Clear the screen");
-    let _ = writeln!(console, "  echo  - Print arguments");
-    let _ = writeln!(console, "  help  - Show this help");
-    let _ = writeln!(console, "  ls    - List files in directory");
-    let _ = writeln!(console, "  time  - Show system ticks");
-    let _ = writeln!(console, "  touch - Create empty file");
-    let _ = writeln!(console, "  rm    - Delete file");
+    let _ = writeln!(console, "  cat     - Read file content to screen");
+    let _ = writeln!(console, "  clear   - Clear the screen");
+    let _ = writeln!(console, "  echo    - Print arguments");
+    let _ = writeln!(console, "  help    - Show this help");
+    let _ = writeln!(console, "  hexdump - Raw file output");
+    let _ = writeln!(console, "  ls      - List files in directory");
+    let _ = writeln!(console, "  time    - Show system ticks");
+    let _ = writeln!(console, "  touch   - Create empty file");
+    let _ = writeln!(console, "  rm      - Delete file");
+}
+
+/// Shows the raw file details in hex format
+///
+/// - Supports -C argument
+pub fn hexdump(console: &mut Console, args: &Args) {
+    // Open the file
+    for filename in args.positionals.as_slice().iter() {
+        crate::fs::volume::with_volume(|vol| match vol.open(filename) {
+            Ok(entry) => match vol.read_file(&entry) {
+                Ok(content) => {
+                    if args.has_flag(b'C') {
+                        // byte-by-byte with ASCII column
+                        // Loop through content 16 bytes at a time
+                        for (i, chunk) in content.chunks(16).enumerate() {
+                            let offset = i * 16;
+                            // chunk is a &[u8], length 16 (or less for the last one)
+                            // Print offset
+                            let _ = write!(console, "{:08x}  ", offset);
+
+                            // Print hex bytes
+                            for (j, &byte) in chunk.iter().enumerate() {
+                                let _ = write!(console, "{:02x} ", byte);
+                                if j == 7 {
+                                    let _ = write!(console, " ");
+                                }
+                            }
+
+                            // Pad if chunk is shorter than 16 (last line)
+                            for j in chunk.len()..16 {
+                                let _ = write!(console, "   ");
+                                if j == 7 {
+                                    let _ = write!(console, " ");
+                                }
+                            }
+
+                            // Print ASCII column
+                            let _ = write!(console, " |");
+                            for &byte in chunk {
+                                let ch = if byte.is_ascii_graphic() || byte == b' ' {
+                                    byte as char
+                                } else {
+                                    '.'
+                                };
+                                let _ = write!(console, "{}", ch);
+                            }
+                            let _ = writeln!(console, "|");
+                        }
+                    } else {
+                        for (i, chunk) in content.chunks(16).enumerate() {
+                            let offset = i * 16;
+                            let _ = write!(console, "{:07x}", offset);
+                            for word in chunk.chunks(2) {
+                                if word.len() == 2 {
+                                    let val = u16::from_le_bytes([word[0], word[1]]);
+                                    let _ = write!(console, " {:04x}", val);
+                                } else {
+                                    let _ = write!(console, " {:02x}", word[0]);
+                                }
+                            }
+                            let _ = writeln!(console);
+                        }
+                    }
+                }
+                Err(_) => {
+                    let _ = writeln!(console, "hexdump: unable to read file");
+                }
+            },
+            Err(_) => {
+                let _ = write!(console, "hexdump: {}: No such file or directory", filename);
+            }
+        });
+    }
 }
 
 /// Lists files in current directory
