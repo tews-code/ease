@@ -9,7 +9,7 @@ use crate::shell::{Args, Console, ascii};
 /// Reads file content to console
 pub fn cat(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::fat16::with_volume(|vol| match vol.open(filename) {
+        crate::fs::volume::with_volume(|vol| match vol.open(filename) {
             Ok(entry) => match vol.read_file(&entry) {
                 Ok(content) => match core::str::from_utf8(&content) {
                     Ok(text) => {
@@ -59,7 +59,7 @@ pub fn help(console: &mut Console) {
 
 /// Lists files in current directory
 pub fn ls(console: &mut Console, args: &Args) {
-    crate::fs::fat16::with_volume(|vol| {
+    crate::fs::volume::with_volume(|vol| {
         let _ = vol
             .read_root_dir(|entry| {
                 let name = entry.filename();

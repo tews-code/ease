@@ -66,7 +66,7 @@ fn kernel_init() -> FrameBuffer {
     arch::enable_interrupts();
 
     drivers::virtio::virtio_blk_init();
-    fs::fat16::fat16_init();
+    fs::volume::fat16_init();
 
     drivers::ramfb::FrameBuffer::init()
 }

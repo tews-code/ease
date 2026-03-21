@@ -1,0 +1,355 @@
+//! Volume for FAT16
+
+use alloc::vec::Vec;
+use core::ops::ControlFlow;
+
+use crate::drivers::virtio::read_block;
+use crate::kernel::sync::SpinLock;
+
+use super::bpb::Bpb;
+use super::dir_entry::{DIR_ENTRY_BYTES, DirEntry, DirParseResult};
+use super::{FsError, SECTOR_SIZE};
+
+// Need to lock with interrupts enabled waiting for IO completion
+// SpinLock (not IrqSpinLock) because I/O needs interrupts enabled for virtio
+// completion. Must never be accessed from an interrupt handler.
+pub(super) static VOLUME: SpinLock<Option<Volume>> = SpinLock::new(None);
+
+pub struct Volume {
+    bpb: Bpb,
+}
+
+impl Volume {
+    /// Read from disk, parse BPB, return initialised FAT16 Volume
+    pub fn new() -> Result<Self, FsError> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        read_block(0, &mut buf).map_err(FsError::DeviceError)?;
+        let bpb = Bpb::parse(&buf)?;
+        Ok(Self { bpb })
+    }
+
+    /// Read a single FAT entry for the given cluster number
+    ///
+    /// The cluster number is the index into the FAT
+    fn fat_entry(&self, cluster: u16) -> Result<u16, FsError> {
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        // A FAT is a flat array of u16 bits, one for each FAT cluster.
+        // First find which sector the cluster number refers to
+        let num_entries = SECTOR_SIZE / core::mem::size_of::<u16>(); // In a 512 byte block there are 256 entries
+        let fat_sector = self.bpb.fat_start_sector() + (cluster as usize / num_entries);
+        // Now read the block which holds that sector
+        read_block(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+        // Work out the offset within the sector
+        let offset = (cluster as usize % num_entries) * core::mem::size_of::<u16>();
+        // Now look inside the block (in buffer) to read the offset of the entry
+        Ok(u16::from_le_bytes([buf[offset], buf[offset + 1]]))
+    }
+
+    /// Read entry from root directory
+    ///
+    /// The method reads sectors from root_dir_start_sector for root_dir_sectors count,
+    /// parses each 32-byte chunk, calls f for each
+    /// Parsed entry, skips Skip entries, and returns early on End.
+    /// Returns a ControlFlow to allow early break
+    pub fn read_root_dir<B, F>(&self, mut f: F) -> Result<ControlFlow<B>, FsError>
+    where
+        F: FnMut(&DirEntry) -> ControlFlow<B>,
+    {
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        let start = self.bpb.root_dir_start_sector();
+        let count = self.bpb.root_dir_sectors();
+        for sector in start..start + count {
+            // First read the sector
+            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+
+            // 16 entries per sector (512 / 32)
+            for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
+                let offset = entry * DIR_ENTRY_BYTES;
+                let bytes: &[u8; 32] = buf[offset..offset + DIR_ENTRY_BYTES].try_into().unwrap();
+                match DirEntry::parse(bytes) {
+                    DirParseResult::Parsed(entry) => {
+                        if let ControlFlow::Break(val) = f(&entry) {
+                            return Ok(ControlFlow::Break(val));
+                        }
+                    }
+                    DirParseResult::Skip => continue,
+                    DirParseResult::End => return Ok(ControlFlow::Continue(())),
+                }
+            }
+        }
+        Ok(ControlFlow::Continue(()))
+    }
+
+    /// Find a file by file name
+    pub fn open(&self, filename: &str) -> Result<DirEntry, FsError> {
+        match self.read_root_dir(|entry| {
+            if let Ok(name) = entry.filename().as_str() {
+                if name.eq_ignore_ascii_case(filename) {
+                    ControlFlow::Break(entry.clone())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            } else {
+                ControlFlow::Continue(())
+            }
+        })? {
+            ControlFlow::Break(entry) => Ok(entry),
+            ControlFlow::Continue(()) => Err(FsError::NotFound),
+        }
+    }
+
+    /// Read a file from a given DirEntry
+    pub fn read_file(&self, entry: &DirEntry) -> Result<Vec<u8>, FsError> {
+        if entry.file_size == 0 {
+            return Ok(Vec::new());
+        }
+        let mut content = Vec::<u8>::new();
+        let mut current_cluster = entry.first_cluster;
+        let mut buf = [0u8; 512];
+        loop {
+            let start_sector = self.bpb.cluster_to_sector(current_cluster);
+            for s in 0..self.bpb.sectors_per_cluster as u32 {
+                read_block(start_sector as u32 + s, &mut buf).map_err(FsError::DeviceError)?;
+                content.extend_from_slice(&buf);
+            }
+            let next_cluster = self.fat_entry(current_cluster)?;
+
+            match next_cluster {
+                0xFFF8..=0xFFFF => break,
+                _ => current_cluster = next_cluster,
+            }
+        }
+        content.truncate(entry.file_size as usize);
+        Ok(content)
+    }
+}
+
+pub fn with_volume<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Volume) -> R,
+{
+    let mut guard = VOLUME.lock();
+    let vol = guard.as_mut().expect("FAT16 not initialized");
+    f(vol)
+}
+
+pub fn fat16_init() {
+    let vol = Volume::new().expect("FAT16 init failed");
+    *VOLUME.lock() = Some(vol);
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // =========================================================================
+    // Volume::open tests
+    // =========================================================================
+
+    #[test_case]
+    fn open_finds_hello_txt() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    #[test_case]
+    fn open_case_insensitive() {
+        with_volume(|vol| {
+            let entry = vol.open("hello.txt").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    #[test_case]
+    fn open_not_found() {
+        with_volume(|vol| {
+            let result = vol.open("NOPE.TXT");
+            assert!(matches!(result, Err(FsError::NotFound)));
+        });
+    }
+
+    #[test_case]
+    fn open_empty_file() {
+        with_volume(|vol| {
+            let entry = vol.open("EMPTY.TXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn open_no_extension() {
+        with_volume(|vol| {
+            let entry = vol.open("SHORT").unwrap();
+            assert!(entry.file_size > 0);
+        });
+    }
+
+    // =========================================================================
+    // Volume::read_file tests
+    // =========================================================================
+
+    #[test_case]
+    fn read_file_hello_txt() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "Text file contents\n");
+        });
+    }
+
+    #[test_case]
+    fn read_file_empty() {
+        with_volume(|vol| {
+            let entry = vol.open("EMPTY.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 0);
+        });
+    }
+
+    #[test_case]
+    fn read_file_short() {
+        with_volume(|vol| {
+            let entry = vol.open("SHORT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "This is a file with a short name.\n");
+        });
+    }
+
+    #[test_case]
+    fn read_file_size_matches_dir_entry() {
+        with_volume(|vol| {
+            let entry = vol.open("HELLO.TXT").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), entry.file_size as usize);
+        });
+    }
+
+    #[test_case]
+    fn read_file_longname() {
+        with_volume(|vol| {
+            let entry = vol.open("LONGNAME.END").unwrap();
+            let content = vol.read_file(&entry).unwrap();
+            let text = core::str::from_utf8(&content).unwrap();
+            assert_eq!(text, "This is a file with a long name.\n");
+        });
+    }
+
+    #[test_case]
+    fn read_file_64kb() {
+        // 64KB file spans many clusters — tests cluster chain following at scale
+        with_volume(|vol| {
+            let entry = vol.open("BIG.TXT").unwrap();
+            assert_eq!(entry.file_size, 64 * 1024);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 64 * 1024);
+            // Verify first line content
+            let first_line_end = content.iter().position(|&b| b == b'\n').unwrap();
+            let first_line = core::str::from_utf8(&content[..first_line_end]).unwrap();
+            assert_eq!(
+                first_line,
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 abcdefghijklmnopqrstuvwxyz"
+            );
+            // Verify last byte
+            assert_eq!(content[content.len() - 1], b'X');
+        });
+    }
+
+    #[test_case]
+    fn open_multi_cluster_file() {
+        // The PDF is ~7.9MB — too large to read into heap, but verify open finds it
+        // and the dir entry has the expected size.
+        with_volume(|vol| {
+            let entry = vol.open("RP-008~1.PDF").unwrap();
+            assert_eq!(entry.file_size, 7_968_417);
+        });
+    }
+
+    #[test_case]
+    fn disk_image_fat_entry_hello_txt() {
+        // HELLO.TXT is a small file — its first cluster should be end-of-chain
+        with_volume(|vol| {
+            // Find HELLO.TXT's first cluster from the directory
+            let result = vol
+                .read_root_dir(|entry| {
+                    if entry.filename().as_str() == Ok("HELLO.TXT") {
+                        ControlFlow::Break(entry.first_cluster)
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .unwrap();
+            let first_cluster = match result {
+                ControlFlow::Break(c) => c,
+                ControlFlow::Continue(()) => panic!("HELLO.TXT not found"),
+            };
+            assert!(first_cluster >= 2, "invalid cluster");
+            // Small file should be a single cluster (end-of-chain)
+            let next = vol.fat_entry(first_cluster).unwrap();
+            assert!(
+                next >= 0xFFF8,
+                "expected EOC for small file, got {:#06x}",
+                next
+            );
+        });
+    }
+
+    #[test_case]
+    fn disk_image_root_dir_contains_hello_txt() {
+        with_volume(|vol| {
+            let result = vol
+                .read_root_dir(|entry| {
+                    if entry.filename().as_str() == Ok("HELLO.TXT") {
+                        assert!(entry.file_size > 0, "HELLO.TXT should not be empty");
+                        ControlFlow::Break(())
+                    } else {
+                        ControlFlow::Continue(())
+                    }
+                })
+                .unwrap();
+            assert!(
+                matches!(result, ControlFlow::Break(())),
+                "HELLO.TXT not found in root directory"
+            );
+        });
+    }
+
+    #[test_case]
+    fn disk_image_root_dir_no_volume_label_entries() {
+        // read_root_dir should skip volume labels — none should come through
+        with_volume(|vol| {
+            let _ = vol
+                .read_root_dir(|entry| {
+                    assert_eq!(
+                        entry.attributes & 0x08,
+                        0,
+                        "volume label entry should not be returned"
+                    );
+                    ControlFlow::<()>::Continue(())
+                })
+                .unwrap();
+        });
+    }
+
+    #[test_case]
+    fn disk_image_fat_entry_reserved() {
+        // FAT entries 0 and 1 are reserved
+        with_volume(|vol| {
+            let entry0 = vol.fat_entry(0).unwrap();
+            assert!(
+                entry0 >= 0xFFF8,
+                "FAT[0] should be media descriptor, got {:#06x}",
+                entry0
+            );
+            let entry1 = vol.fat_entry(1).unwrap();
+            assert!(
+                entry1 >= 0xFFF8,
+                "FAT[1] should be reserved/EOC, got {:#06x}",
+                entry1
+            );
+        });
+    }
+}
