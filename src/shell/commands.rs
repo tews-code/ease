@@ -65,9 +65,7 @@ pub fn time(console: &mut Console) {
 
 /// Panics the system.
 pub fn panic(_console: &mut Console) {
-    unsafe {
-        core::arch::asm!("unimp");
-    }
+    panic!("user requested panic");
 }
 
 /// Prints an error message for an unrecognised command.

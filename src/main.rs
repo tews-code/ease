@@ -44,25 +44,6 @@ mod kernel;
 mod qemu;
 mod shell;
 
-#[cfg(not(test))]
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("PANIC! {info}");
-    loop {
-        unsafe {
-            core::arch::asm!("wfi");
-        }
-    }
-}
-
-#[cfg(test)]
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    println!("\x1b[31mfailed\x1b[0m");
-    println!("Error: {}", info);
-    qemu::exit_failure();
-}
-
 // =============================================================================
 // Entry Points
 // =============================================================================
