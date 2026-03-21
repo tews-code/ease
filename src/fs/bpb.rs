@@ -7,10 +7,10 @@ use crate::fs::{FsError, SECTOR_SIZE};
 pub(super) struct Bpb {
     pub(super) sectors_per_cluster: usize,
     reserved_sectors: usize,
-    fat_count: usize,
+    pub(super) fat_count: usize,
     root_entry_count: usize,
     total_sectors_16: usize,
-    sectors_per_fat: usize,
+    pub(super) sectors_per_fat: usize,
 }
 
 impl Bpb {

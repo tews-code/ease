@@ -45,6 +45,28 @@ impl Volume {
         Ok(u16::from_le_bytes([buf[offset], buf[offset + 1]]))
     }
 
+    /// Set FAT entry to a value
+    fn set_fat_entry(&self, cluster: u16, value: u16) -> Result<(), FsError> {
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        // A FAT is a flat array of u16 bits, one for each FAT cluster.
+        // First find which sector the cluster number refers to
+        let num_entries = SECTOR_SIZE / core::mem::size_of::<u16>(); // In a 512 byte block there are 256 entries
+        let fat_sector = self.bpb.fat_start_sector() + (cluster as usize / num_entries);
+        // Now read the block which holds that sector
+        read_block(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+        // Write the value at that offset
+        let offset = (cluster as usize % num_entries) * core::mem::size_of::<u16>();
+        buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        // Write back
+        write_block(fat_sector as u32, &buf).map_err(FsError::DeviceError)?;
+        if self.bpb.fat_count == 2 {
+            // Write to 2nd copy of FAT
+            let second_fat_sector = fat_sector + self.bpb.sectors_per_fat;
+            write_block(second_fat_sector as u32, &buf).map_err(FsError::DeviceError)?;
+        }
+        Ok(())
+    }
+
     /// Read entry from root directory
     ///
     /// The method reads sectors from root_dir_start_sector for root_dir_sectors count,
@@ -156,6 +178,62 @@ impl Volume {
             }
         }
         Err(FsError::DirFull)
+    }
+
+    // Finds file by name and returns sector and offset
+    //
+    // Helper function for rm and file write
+    fn find_dir_entry_location(&self, filename: &str) -> Result<(u32, usize), FsError> {
+        let mut buf = [0u8; SECTOR_SIZE];
+        let start = self.bpb.root_dir_start_sector();
+        let count = self.bpb.root_dir_sectors();
+        for sector in start..start + count {
+            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+
+            for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
+                let offset = entry * DIR_ENTRY_BYTES;
+                let bytes: &[u8; 32] = buf[offset..offset + DIR_ENTRY_BYTES].try_into().unwrap();
+                match DirEntry::parse(bytes) {
+                    DirParseResult::Parsed(dir_entry) => {
+                        if let Ok(name) = dir_entry.filename().as_str()
+                            && name.eq_ignore_ascii_case(filename)
+                        {
+                            return Ok((sector as u32, offset));
+                        }
+                    }
+                    DirParseResult::End => return Err(FsError::NotFound),
+                    DirParseResult::Skip => continue,
+                }
+            }
+        }
+        Err(FsError::NotFound)
+    }
+
+    // Delete a file
+    pub fn delete_file(&mut self, filename: &str) -> Result<(), FsError> {
+        // Get the sector and offset of the file by file name
+        let (sector, offset) = self.find_dir_entry_location(filename)?;
+        // First read the sector
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        read_block(sector, &mut buf).map_err(FsError::DeviceError)?;
+        // Find the directory entry details
+        let first_cluster = u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
+        if first_cluster != 0 {
+            let mut cluster = first_cluster;
+            loop {
+                let next = self.fat_entry(cluster)?;
+                self.set_fat_entry(cluster, 0x0000)?;
+                match next {
+                    0xFFF8..=0xFFFF => break, // was end of chain, done
+                    _ => cluster = next,      // keep walking
+                }
+            }
+        }
+        // Change the directory entry to deleted 0xE5
+        buf[offset] = 0xE5;
+        // Write back the change
+        write_block(sector, &buf).map_err(FsError::DeviceError)?;
+        Ok(())
     }
 }
 
@@ -442,6 +520,86 @@ mod test {
                 found,
                 "created file should appear in root directory listing"
             );
+        });
+    }
+
+    // =========================================================================
+    // Volume::delete_file tests
+    // =========================================================================
+
+    #[test_case]
+    fn delete_empty_file() {
+        with_volume(|vol| {
+            vol.create_empty_file("DEL1.TXT").unwrap();
+            assert!(vol.open("DEL1.TXT").is_ok());
+            vol.delete_file("DEL1.TXT").unwrap();
+            assert!(matches!(vol.open("DEL1.TXT"), Err(FsError::NotFound)));
+        });
+    }
+
+    #[test_case]
+    fn delete_file_not_found() {
+        with_volume(|vol| {
+            let result = vol.delete_file("NOPE.TXT");
+            assert!(matches!(result, Err(FsError::NotFound)));
+        });
+    }
+
+    #[test_case]
+    fn delete_file_with_content() {
+        // DELETE.ME exists solely for this test — no other test depends on it
+        with_volume(|vol| {
+            let entry = vol.open("DELETE.ME").unwrap();
+            let first_cluster = entry.first_cluster;
+            assert!(first_cluster >= 2);
+
+            vol.delete_file("DELETE.ME").unwrap();
+
+            // File should no longer be found
+            assert!(matches!(vol.open("DELETE.ME"), Err(FsError::NotFound)));
+
+            // Cluster should be freed (0x0000)
+            let fat_val = vol.fat_entry(first_cluster).unwrap();
+            assert_eq!(fat_val, 0x0000, "cluster should be freed after delete");
+        });
+    }
+
+    #[test_case]
+    fn delete_then_recreate() {
+        with_volume(|vol| {
+            vol.create_empty_file("REUSE.TXT").unwrap();
+            vol.delete_file("REUSE.TXT").unwrap();
+            // Slot marked 0xE5 should be reusable
+            vol.create_empty_file("REUSE.TXT").unwrap();
+            let entry = vol.open("REUSE.TXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    // =========================================================================
+    // set_fat_entry tests
+    // =========================================================================
+
+    #[test_case]
+    fn set_fat_entry_roundtrip() {
+        with_volume(|vol| {
+            // Find a free cluster to test with
+            let mut test_cluster = 0u16;
+            for c in 2..100 {
+                if vol.fat_entry(c).unwrap() == 0x0000 {
+                    test_cluster = c;
+                    break;
+                }
+            }
+            assert!(test_cluster >= 2, "no free cluster found for test");
+
+            // Write a value, read it back
+            vol.set_fat_entry(test_cluster, 0x1234).unwrap();
+            assert_eq!(vol.fat_entry(test_cluster).unwrap(), 0x1234);
+
+            // Clean up — set it back to free
+            vol.set_fat_entry(test_cluster, 0x0000).unwrap();
+            assert_eq!(vol.fat_entry(test_cluster).unwrap(), 0x0000);
         });
     }
 }

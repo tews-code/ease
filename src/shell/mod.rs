@@ -145,6 +145,7 @@ impl Shell {
             "panic" => commands::panic(console),
             "time" => commands::time(console),
             "touch" => commands::touch(console, &args),
+            "rm" => commands::rm(console, &args),
             _ => commands::unknown(console, cmd),
         }
     }

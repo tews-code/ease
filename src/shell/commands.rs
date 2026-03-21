@@ -57,6 +57,7 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  ls    - List files in directory");
     let _ = writeln!(console, "  time  - Show system ticks");
     let _ = writeln!(console, "  touch - Create empty file");
+    let _ = writeln!(console, "  rm    - Delete file");
 }
 
 /// Lists files in current directory
@@ -107,6 +108,23 @@ pub fn touch(console: &mut Console, args: &Args) {
                     _ => "device error",
                 };
                 let _ = writeln!(console, "touch: {}: {}", filename, msg);
+            }
+        });
+    }
+}
+
+/// Deletes a file
+pub fn rm(console: &mut Console, args: &Args) {
+    for filename in args.positionals.as_slice().iter() {
+        crate::fs::volume::with_volume(|vol| match vol.delete_file(filename) {
+            Ok(()) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::InvalidName => "invalid file name",
+                    FsError::NotFound => "file not found",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "rm: {}: {}", filename, msg);
             }
         });
     }

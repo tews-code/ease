@@ -12,5 +12,6 @@ mcopy -i disk.img disk/EMPTY.TXT ::EMPTY.TXT
 mcopy -i disk.img disk/SHORT ::SHORT
 mcopy -i disk.img disk/LONGNAME.END ::LONGNAME.END
 mcopy -i disk.img disk/BIG.TXT ::BIG.TXT
+mcopy -i disk.img disk/DELETE.ME ::DELETE.ME
 mcopy -i disk.img disk/RP-008373-DS-2-rp2350-datasheet.pdf ::RP-008373-DS-2-rp2350-datasheet.pdf
 
