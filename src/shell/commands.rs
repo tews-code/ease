@@ -1,5 +1,7 @@
 //! Shell commands
 
+use alloc::string::String;
+
 use core::fmt::Write;
 use core::ops::ControlFlow;
 
@@ -38,13 +40,7 @@ pub fn clear(console: &mut Console) {
 
 /// Prints arguments to the console.
 pub fn echo(console: &mut Console, args: &Args) {
-    for (i, arg) in args.positionals.as_slice().iter().enumerate() {
-        if i > 0 {
-            let _ = write!(console, " ");
-        }
-        let _ = write!(console, "{arg}");
-    }
-    let _ = writeln!(console);
+    let _ = writeln!(console, "{}", args.rest);
 }
 
 /// Prints the list of available commands.
@@ -59,6 +55,7 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  time    - Show system ticks");
     let _ = writeln!(console, "  touch   - Create empty file");
     let _ = writeln!(console, "  rm      - Delete file");
+    let _ = writeln!(console, "  write   - Write text to file");
 }
 
 /// Shows the raw file details in hex format
@@ -202,6 +199,32 @@ pub fn rm(console: &mut Console, args: &Args) {
             }
         });
     }
+}
+
+/// Write text to file
+pub fn write(console: &mut Console, args: &Args) {
+    let rest = args.rest.trim();
+    let (filename, content) = match rest.find(' ') {
+        Some(pos) => (&rest[..pos], &rest[pos + 1..]),
+        None => {
+            let _ = writeln!(console, "write: usage: write FILENAME text...");
+            return;
+        }
+    };
+    let mut data = String::from(content);
+    data.push('\n');
+    crate::fs::volume::with_volume(|vol| match vol.write_file(filename, data.as_bytes()) {
+        Ok(_) => {}
+        Err(fs_error) => {
+            let msg = match fs_error {
+                FsError::DiskFull => "disk full",
+                FsError::DirFull => "directory full",
+                FsError::InvalidName => "invalid file name",
+                _ => "device error",
+            };
+            let _ = writeln!(console, "write: {}: {}", filename, msg);
+        }
+    });
 }
 
 /// Prints an error message for an unrecognised command.

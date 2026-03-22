@@ -147,6 +147,10 @@ impl Volume {
 
     // Create an empty file ("touch")
     pub fn create_empty_file(&mut self, filename: &str) -> Result<(), FsError> {
+        if self.open(filename).is_ok() {
+            return Ok(()); // file already exists, nothing to do
+        }
+
         // First parse the file name for FAT16 8.3 validity
         let (name, ext) = DirEntry::parse_83_name(filename)?;
 
@@ -234,6 +238,80 @@ impl Volume {
         // Write back the change
         write_block(sector, &buf).map_err(FsError::DeviceError)?;
         Ok(())
+    }
+
+    /// Helper file write function to allocate the first cluster of a new file
+    pub fn allocate_cluster(&self) -> Result<u16, FsError> {
+        for cluster in 2..2 + self.bpb.total_data_clusters() as u16 {
+            if self.fat_entry(cluster)? == 0x0000 {
+                // read from FAT table
+                self.set_fat_entry(cluster, 0xFFFF)?; // write to FAT table
+                return Ok(cluster);
+            }
+        }
+        Err(FsError::DiskFull)
+    }
+
+    /// Write file to disk
+    pub fn write_file(&mut self, filename: &str, data: &[u8]) -> Result<(), FsError> {
+        // Remove existing file if present (ignore NotFound)
+        match self.delete_file(filename) {
+            Ok(()) | Err(FsError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        // First parse the file name for FAT16 8.3 validity
+        let (name, ext) = DirEntry::parse_83_name(filename)?;
+
+        let mut prev_cluster = 0u16;
+        let mut first_cluster = 0u16;
+        let bytes_per_cluster = self.bpb.sectors_per_cluster * SECTOR_SIZE;
+        for (ci, data_chunk) in data.chunks(bytes_per_cluster).enumerate() {
+            let cluster = self.allocate_cluster()?;
+            if ci == 0 {
+                first_cluster = cluster;
+            } else {
+                self.set_fat_entry(prev_cluster, cluster)?;
+            }
+            let start_sector = self.bpb.cluster_to_sector(cluster);
+            for (si, sector) in data_chunk.chunks(SECTOR_SIZE).enumerate() {
+                let mut sector_buf = [0u8; SECTOR_SIZE];
+                sector_buf[..sector.len()].copy_from_slice(sector);
+                write_block((start_sector + si) as u32, &sector_buf)
+                    .map_err(FsError::DeviceError)?;
+            }
+            prev_cluster = cluster;
+        }
+        // Loop through root dir to find empty slot (first byte is 0x00 or 0xE5)
+        let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
+        let start = self.bpb.root_dir_start_sector();
+        let count = self.bpb.root_dir_sectors();
+        for sector in start..start + count {
+            // First read the sector
+            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+
+            // 16 entries per sector (512 / 32)
+            for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
+                let offset = entry * DIR_ENTRY_BYTES;
+                if buf[offset] != 0x00 && buf[offset] != 0xE5 {
+                    continue;
+                } else {
+                    // Found a free slot
+                    buf[offset..offset + 8].copy_from_slice(&name);
+                    buf[offset + 8..offset + 11].copy_from_slice(&ext);
+                    buf[offset + 11] = 0x20; // Attributes
+                    // Zero out (cluster = 0, size = 0, timestamps, etc.)
+                    buf[offset + 12..offset + 26].fill(0);
+                    buf[offset + 26..offset + 28].copy_from_slice(&first_cluster.to_le_bytes());
+                    buf[offset + 28..offset + 32]
+                        .copy_from_slice(&(data.len() as u32).to_le_bytes());
+
+                    // Write back
+                    write_block(sector as u32, &buf).map_err(FsError::DeviceError)?;
+                    return Ok(());
+                }
+            }
+        }
+        Err(FsError::DirFull)
     }
 }
 
@@ -600,6 +678,106 @@ mod test {
             // Clean up — set it back to free
             vol.set_fat_entry(test_cluster, 0x0000).unwrap();
             assert_eq!(vol.fat_entry(test_cluster).unwrap(), 0x0000);
+        });
+    }
+
+    // =========================================================================
+    // Volume::write_file tests
+    // =========================================================================
+
+    #[test_case]
+    fn write_file_and_read_back() {
+        with_volume(|vol| {
+            vol.write_file("WTEST1.TXT", b"hello world\n").unwrap();
+            let entry = vol.open("WTEST1.TXT").unwrap();
+            assert_eq!(entry.file_size, 12);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(&content, b"hello world\n");
+        });
+    }
+
+    #[test_case]
+    fn write_file_empty_data() {
+        with_volume(|vol| {
+            vol.write_file("WTEST2.TXT", b"").unwrap();
+            let entry = vol.open("WTEST2.TXT").unwrap();
+            assert_eq!(entry.file_size, 0);
+        });
+    }
+
+    #[test_case]
+    fn write_file_overwrite() {
+        with_volume(|vol| {
+            vol.write_file("WTEST3.TXT", b"first").unwrap();
+            vol.write_file("WTEST3.TXT", b"second").unwrap();
+            let entry = vol.open("WTEST3.TXT").unwrap();
+            assert_eq!(entry.file_size, 6);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(&content, b"second");
+        });
+    }
+
+    #[test_case]
+    fn write_file_multi_sector() {
+        // Write more than one sector (512 bytes)
+        with_volume(|vol| {
+            let data = [b'A'; 1024];
+            vol.write_file("WTEST4.TXT", &data).unwrap();
+            let entry = vol.open("WTEST4.TXT").unwrap();
+            assert_eq!(entry.file_size, 1024);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 1024);
+            assert!(content.iter().all(|&b| b == b'A'));
+        });
+    }
+
+    #[test_case]
+    fn write_file_multi_cluster() {
+        // Write more than one cluster (sectors_per_cluster * 512 = 2048 bytes)
+        with_volume(|vol| {
+            let data = [b'B'; 4096];
+            vol.write_file("WTEST5.TXT", &data).unwrap();
+            let entry = vol.open("WTEST5.TXT").unwrap();
+            assert_eq!(entry.file_size, 4096);
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(content.len(), 4096);
+            assert!(content.iter().all(|&b| b == b'B'));
+        });
+    }
+
+    #[test_case]
+    fn write_file_invalid_name() {
+        with_volume(|vol| {
+            let result = vol.write_file("TOOLONGNAME.TXT", b"data");
+            assert!(matches!(result, Err(FsError::InvalidName)));
+        });
+    }
+
+    #[test_case]
+    fn touch_does_not_overwrite_existing() {
+        with_volume(|vol| {
+            vol.write_file("WTEST6.TXT", b"keep this").unwrap();
+            vol.create_empty_file("WTEST6.TXT").unwrap();
+            let entry = vol.open("WTEST6.TXT").unwrap();
+            assert_eq!(entry.file_size, 9); // unchanged
+            let content = vol.read_file(&entry).unwrap();
+            assert_eq!(&content, b"keep this");
+        });
+    }
+
+    // =========================================================================
+    // Volume::allocate_cluster tests
+    // =========================================================================
+
+    #[test_case]
+    fn allocate_cluster_returns_valid() {
+        with_volume(|vol| {
+            let cluster = vol.allocate_cluster().unwrap();
+            assert!(cluster >= 2);
+            // Verify it's marked as end-of-chain
+            assert_eq!(vol.fat_entry(cluster).unwrap(), 0xFFFF);
+            // Clean up
+            vol.set_fat_entry(cluster, 0x0000).unwrap();
         });
     }
 }

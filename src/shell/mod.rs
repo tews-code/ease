@@ -40,6 +40,7 @@ pub struct Shell {
 pub struct Args<'a> {
     flags: StackVec<u8, 8>,
     positionals: StackVec<&'a str, 8>,
+    rest: &'a str,
 }
 
 impl Args<'_> {
@@ -120,7 +121,11 @@ impl Shell {
                 let _ = positionals.push(token);
             }
         }
-        Args { flags, positionals }
+        Args {
+            flags,
+            positionals,
+            rest,
+        }
     }
 
     fn execute(console: &mut Console, line: &str) {
@@ -147,6 +152,7 @@ impl Shell {
             "time" => commands::time(console),
             "touch" => commands::touch(console, &args),
             "rm" => commands::rm(console, &args),
+            "write" => commands::write(console, &args),
             _ => commands::unknown(console, cmd),
         }
     }

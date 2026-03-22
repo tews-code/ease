@@ -81,6 +81,7 @@ const SECTOR_SIZE: usize = 512;
 pub enum FsError {
     DeviceError(BlkError),
     DirFull,
+    DiskFull,
     InvalidBpb,
     InvalidName,
     NotFat16,

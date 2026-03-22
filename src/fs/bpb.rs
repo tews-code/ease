@@ -59,6 +59,10 @@ impl Bpb {
     pub(super) fn cluster_to_sector(&self, cluster: u16) -> usize {
         self.data_start_sector() + (cluster as usize - 2) * self.sectors_per_cluster
     }
+
+    pub(super) fn total_data_clusters(&self) -> usize {
+        (self.total_sectors_16 - self.data_start_sector()) / self.sectors_per_cluster
+    }
 }
 
 #[cfg(test)]
