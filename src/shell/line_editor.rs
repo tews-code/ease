@@ -5,7 +5,7 @@ use crate::shell::ascii;
 use crate::shell::keyboard::KeyEvent;
 use crate::shell::vt_parse::Key;
 
-pub const LINE_LEN: usize = 256;
+pub const LINE_LEN: usize = 74; // 80 columns - 6 char prompt
 const HISTORY_SIZE: usize = 10;
 
 /// Result of processing a key event. The caller uses `line()` and `cursor()` to
