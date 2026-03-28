@@ -43,6 +43,10 @@ static BUMP_ALLOCATOR: Allocator = Allocator {
 
 #[cfg(test)]
 static ALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static DEALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
 
 struct Allocator {
     next: AtomicUsize,
@@ -50,7 +54,7 @@ struct Allocator {
 
 impl Allocator {
     #[cfg(all(test, feature = "test-alloc"))]
-    pub fn reset(&self) {
+    pub unsafe fn reset(&self) {
         self.next
             .store(&raw const __heap_start as usize, Ordering::Relaxed);
     }
@@ -87,6 +91,8 @@ unsafe impl GlobalAlloc for Allocator {
                 Ok(_) => {
                     #[cfg(test)]
                     let _ = ALLOCATED_BYTES.fetch_add(layout.size() as u32, Ordering::Relaxed);
+                    #[cfg(test)]
+                    let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
 
                     return next as *mut u8;
                 }
@@ -95,7 +101,10 @@ unsafe impl GlobalAlloc for Allocator {
         }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
+        #[cfg(test)]
+        let _ = DEALLOCATED_BYTES.fetch_add(_layout.size() as u32, Ordering::Relaxed);
+    }
 }
 
 fn align_up(addr: usize, align: usize) -> usize {
@@ -106,6 +115,8 @@ fn align_up(addr: usize, align: usize) -> usize {
 #[cfg(all(test, feature = "test-alloc"))]
 pub mod test {
     use alloc::boxed::Box;
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
     use core::alloc::Layout;
     use core::hint::black_box;
 
@@ -149,6 +160,24 @@ pub mod test {
         );
     }
 
+    // Simulate allocations typical of shell activity
+    fn allocator_benchmark() {
+        let s = "This is a string that contains characters that fill most of the line";
+        for _ in 0..11 {
+            let _b = Box::new([1u8; 1024]);
+            for _ in 0..5 {
+                let _s = s.to_string();
+                let mut v = Vec::new();
+                for n in 0..512 {
+                    v.push(n);
+                }
+                for _ in 0..512 {
+                    let _ = v.pop();
+                }
+            }
+        }
+    }
+
     #[test_case]
     fn alloc_benchmarks() {
         println!();
@@ -156,7 +185,7 @@ pub mod test {
         println!();
         // check_regression includes warm up call which will also initialise if needs be; no need for additional initialisation
         crate::bench::check_regression(
-            "bump_alloc_one_byte",
+            "alloc_one_byte",
             baseline::ONE_BYTE_ALLOC,
             TOLERANCE_PERC,
             baseline::ONE_BYTE_ALLOC_ITERS,
@@ -164,27 +193,28 @@ pub mod test {
         );
 
         println!();
-        BUMP_ALLOCATOR.reset();
+        //Safety: No live pointers between benchmarks
+        unsafe { BUMP_ALLOCATOR.reset() };
         ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        ALLOC_COUNT.store(0, Ordering::Relaxed);
 
         crate::bench::check_regression(
-            "bump_alloc_awkward",
+            "alloc_awkward",
             baseline::AWKWARD_ALLOC,
             TOLERANCE_PERC,
             baseline::AWKWARD_ALLOC_ITERS,
             || allocate_deallocate_awkward(),
         );
 
-        println!();
-        BUMP_ALLOCATOR.reset();
-
         let total_heap_used =
             BUMP_ALLOCATOR.next.load(Ordering::Relaxed) - &raw const __heap_start as usize;
         let padding = total_heap_used - ALLOCATED_BYTES.load(Ordering::Relaxed) as usize;
-        println!("Total padding: {}", padding);
         println!();
+        println!("  Total padding: {}", padding);
 
-        println!();
+        //Safety: No live pointers between benchmarks
+        unsafe { BUMP_ALLOCATOR.reset() };
+
         crate::bench::check_regression(
             "core_sync_timing",
             baseline::CORE_SYNC_BASE,
@@ -193,7 +223,26 @@ pub mod test {
             || bare_sync_timing(),
         );
 
-        BUMP_ALLOCATOR.reset();
+        //Safety: No live pointers between benchmarks
+        unsafe { BUMP_ALLOCATOR.reset() };
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        ALLOC_COUNT.store(0, Ordering::Relaxed);
+
+        println!();
+        allocator_benchmark();
+        println!();
+        println!(
+            "  Allocation count: {}",
+            ALLOC_COUNT.load(Ordering::Relaxed)
+        );
+        println!(
+            "  Allocated: {} bytes",
+            ALLOCATED_BYTES.load(Ordering::Relaxed) - DEALLOCATED_BYTES.load(Ordering::Relaxed)
+        );
+        let heap_used =
+            BUMP_ALLOCATOR.next.load(Ordering::Relaxed) - &raw const __heap_start as usize;
+        println!("  Heap used: {} bytes", heap_used);
 
         println!();
         println!("===================== ");
