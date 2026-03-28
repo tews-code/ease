@@ -1,69 +1,101 @@
-//! Bump Allocator
-//!
-//! Simple bump allocator
+//! Allocator
 
-use core::alloc::GlobalAlloc;
+// Rough Diagram of memory layout fo SRAM
+//
+// 0x8000_0000          +-------------------+       SRAM start
+//                      |                   |
+//                      |       text        |
+//                      |       rodata      |
+//                      |       data        |
+//                      |       bss         |
+//
+//                      ~      ~100kb       ~
+//                      +-------------------+
+// 0x8002_0000          |     String        |       Heap start (aligns to 16 - ends 0 in hex) - linker symbol
+//                      |     Vec           |
+// 0x8002_0132          |                   |   <-  Next heap allocation
+//                      ~                   ~           "
+//                      |                   |           v (Grows upwards to end of SRAM)
+//                      |                   |
+// 0x8006_0000          |-------------------|   <- Top of heap
+// 0x8006_0004          |                   |   <- Stack guard
+//                      |                   |
+//                      ~                   ~           ^ (Grows downwards toward start of SRAM)
+//                      |                   |           "
+//                      |   StackVec        |   <- Current stack pointer
+//                      |   TrapFrame       |
+// 0x80082000           +-------------------+   <- End of SRAM
 
-use super::sync::IrqSpinLock;
+use core::alloc::{GlobalAlloc, Layout};
+#[cfg(test)]
+use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Bump allocator
+unsafe extern "C" {
+    static __heap_start: u8;
+    static __heap_end: u8;
+}
+
 #[global_allocator]
-pub static BUMP_ALLOCATOR: BumpAllocator = BumpAllocator::new();
+static BUMP_ALLOCATOR: Allocator = Allocator {
+    next: AtomicUsize::new(0),
+};
 
-pub struct BumpAllocator {
-    inner: IrqSpinLock<BumpAllocatorInner>,
+#[cfg(test)]
+static ALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+
+struct Allocator {
+    next: AtomicUsize,
 }
 
-impl BumpAllocator {
-    pub const fn new() -> Self {
-        Self {
-            inner: IrqSpinLock::new(BumpAllocatorInner {
-                heap_start: 0,
-                heap_end: 0,
-                next: 0,
-            }),
-        }
-    }
-
-    fn init(&self) {
-        unsafe extern "C" {
-            static __heap_start: u8;
-            static __heap_end: u8;
-        }
-
-        let mut allocator = self.inner.lock();
-        allocator.heap_start = &raw const __heap_start as usize;
-        allocator.heap_end = &raw const __heap_end as usize;
-        allocator.next = &raw const __heap_start as usize;
+impl Allocator {
+    #[cfg(all(test, feature = "test-alloc"))]
+    pub fn reset(&self) {
+        self.next
+            .store(&raw const __heap_start as usize, Ordering::Relaxed);
     }
 }
 
-unsafe impl GlobalAlloc for BumpAllocator {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        let mut allocator = self.inner.lock();
-        let start = align_up(allocator.next, layout.align());
-        let end = start + layout.size();
-
-        if end > allocator.heap_end {
-            return core::ptr::null_mut();
+unsafe impl GlobalAlloc for Allocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let mut current = self.next.load(Ordering::Relaxed);
+        if current == 0 {
+            // Needs initialisation
+            let start = &raw const __heap_start as usize;
+            current =
+                match self
+                    .next
+                    .compare_exchange(0, start, Ordering::Relaxed, Ordering::Relaxed)
+                {
+                    Ok(_) => start,
+                    Err(actual) => actual,
+                };
         }
+        loop {
+            let next = align_up(current, layout.align());
+            // OOM check
+            let new = next.saturating_add(layout.size());
+            if new > &raw const __heap_end as usize {
+                return core::ptr::null_mut();
+            }
+            match self.next.compare_exchange_weak(
+                current,
+                new,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    #[cfg(test)]
+                    let _ = ALLOCATED_BYTES.fetch_add(layout.size() as u32, Ordering::Relaxed);
 
-        allocator.next = end;
-        start as *mut u8
+                    return next as *mut u8;
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
-}
-
-struct BumpAllocatorInner {
-    heap_start: usize,
-    heap_end: usize,
-    next: usize,
-}
-
-/// Initialize the global allocator. Call once at boot.
-pub fn init() {
-    BUMP_ALLOCATOR.init();
+    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
 fn align_up(addr: usize, align: usize) -> usize {
@@ -71,77 +103,100 @@ fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(test, feature = "test-alloc"))]
+pub mod test {
+    use alloc::boxed::Box;
+    use core::alloc::Layout;
+    use core::hint::black_box;
 
-    // TESTS
+    use super::*;
 
-    #[test_case]
-    fn test_vec_allocation() {
-        use alloc::vec::Vec;
-        let mut v = Vec::new();
-        v.push(1);
-        v.push(2);
-        v.push(3);
-        assert_eq!(v.len(), 3);
-        assert_eq!(v[0], 1);
+    use crate::println;
+
+    mod baseline {
+        pub(super) const ONE_BYTE_ALLOC: u64 = 500;
+        pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
+        pub(super) const AWKWARD_ALLOC: u64 = 20_000;
+        pub(super) const AWKWARD_ALLOC_ITERS: u32 = 20;
+        pub(super) const CORE_SYNC_BASE: u64 = 300;
+        pub(super) const CORE_SYNC_ITERS: u32 = 200_000;
     }
 
-    #[test_case]
-    fn test_string_allocation() {
-        use alloc::string::String;
-        let s = String::from("hello heap!");
-        assert!(s.contains("heap"));
+    const TOLERANCE_PERC: u64 = 50;
+
+    fn allocate_one_byte() {
+        let layout = Layout::new::<u8>();
+        let _ = black_box(unsafe { BUMP_ALLOCATOR.alloc(layout) });
     }
 
-    // BENCHMARKS
-
-    use crate::bench;
-
-    const ITERATIONS: u32 = 10;
-
-    mod baselines {
-        pub const BOX_NEW_U64: u64 = 360_000;
-        pub const VEC_PUSH_100_ITEMS: u64 = 2_000_000;
-        pub const STRING_FROM_SHORT: u64 = 240_000;
+    fn allocate_deallocate_awkward() {
+        let _ = black_box(Box::new([0x5u128; 13]));
+        let _ = black_box(Box::new([0x3u16; 1_001]));
+        let _ = black_box(Box::new(true));
+        let _ = black_box(Box::new([0x7u64; 513]));
+        let _ = black_box(Box::new(false));
+        let _ = black_box(Box::new([0x9u32; 257]));
+        let _ = black_box(Box::new([0xbu8; 2_017]));
     }
 
-    #[test_case]
-    fn bench_small_allocation() {
-        use alloc::vec::Vec;
-        use core::hint::black_box;
-        bench::check(
-            "Vec::push 100 items",
-            baselines::VEC_PUSH_100_ITEMS,
-            ITERATIONS,
-            || {
-                let mut v: Vec<u32> = Vec::new();
-                for i in 0..100 {
-                    v.push(black_box(i));
-                }
-            },
+    fn bare_sync_timing() {
+        let current = BUMP_ALLOCATOR.next.load(Ordering::Relaxed);
+        let _ = BUMP_ALLOCATOR.next.compare_exchange_weak(
+            current,
+            current + 1,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
         );
     }
 
     #[test_case]
-    fn bench_string_allocation() {
-        use alloc::string::String;
-        bench::check(
-            "String::from short",
-            baselines::STRING_FROM_SHORT,
-            ITERATIONS,
-            || {
-                let _ = String::from("hello");
-            },
+    fn alloc_benchmarks() {
+        println!();
+        println!("====== ALLOCATOR ====== ");
+        println!();
+        // check_regression includes warm up call which will also initialise if needs be; no need for additional initialisation
+        crate::bench::check_regression(
+            "bump_alloc_one_byte",
+            baseline::ONE_BYTE_ALLOC,
+            TOLERANCE_PERC,
+            baseline::ONE_BYTE_ALLOC_ITERS,
+            || allocate_one_byte(),
         );
-    }
 
-    #[test_case]
-    fn bench_box_allocation() {
-        use alloc::boxed::Box;
-        use core::hint::black_box;
-        bench::check("Box::new u64", baselines::BOX_NEW_U64, ITERATIONS, || {
-            let _ = Box::new(black_box(42u64));
-        });
+        println!();
+        BUMP_ALLOCATOR.reset();
+        ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+
+        crate::bench::check_regression(
+            "bump_alloc_awkward",
+            baseline::AWKWARD_ALLOC,
+            TOLERANCE_PERC,
+            baseline::AWKWARD_ALLOC_ITERS,
+            || allocate_deallocate_awkward(),
+        );
+
+        println!();
+        BUMP_ALLOCATOR.reset();
+
+        let total_heap_used =
+            BUMP_ALLOCATOR.next.load(Ordering::Relaxed) - &raw const __heap_start as usize;
+        let padding = total_heap_used - ALLOCATED_BYTES.load(Ordering::Relaxed) as usize;
+        println!("Total padding: {}", padding);
+        println!();
+
+        println!();
+        crate::bench::check_regression(
+            "core_sync_timing",
+            baseline::CORE_SYNC_BASE,
+            TOLERANCE_PERC,
+            baseline::CORE_SYNC_ITERS,
+            || bare_sync_timing(),
+        );
+
+        BUMP_ALLOCATOR.reset();
+
+        println!();
+        println!("===================== ");
+        println!();
     }
 }

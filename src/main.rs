@@ -27,6 +27,7 @@
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 
+#[allow(unused_imports)]
 use core::fmt::Write;
 
 use crate::drivers::ramfb::FrameBuffer;
@@ -50,7 +51,6 @@ mod shell;
 
 fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
-    kernel::alloc::init();
     kernel::timer::init();
 
     // Configure PLIC
