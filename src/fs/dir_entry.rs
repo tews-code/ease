@@ -107,7 +107,7 @@ impl DirEntry {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-fs"))]
 mod test {
     use super::*;
 

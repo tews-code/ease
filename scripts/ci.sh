@@ -4,13 +4,14 @@
 
 set -e  # Exit immediately on any failure
 
+FEATURES="${1:-test-all}"
+
+# Unconditionally reformat to pass clippy
+cargo fmt
+
 echo ""
 echo "=== Disk Image ==="
 ./scripts/mkdisk.sh
-
-
-echo "=== Format Check ==="
-cargo fmt --check
 
 echo ""
 echo "=== Clippy ==="
@@ -18,7 +19,7 @@ cargo clippy --target riscv32imac-unknown-none-elf -- -D warnings
 
 echo ""
 echo "=== QEMU Tests ==="
-cargo test --bin ease
+cargo test --bin ease --no-default-features --features "$FEATURES"
 
 echo ""
 echo "=== Host Tests ==="

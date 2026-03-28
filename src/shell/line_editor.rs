@@ -183,7 +183,7 @@ mod tests {
     // Helper: type a string into the editor
     fn type_str(ed: &mut LineEditor, s: &str) {
         for b in s.bytes() {
-            ed.process(byte(b));
+            let _ = ed.process(byte(b));
         }
     }
 
@@ -224,7 +224,7 @@ mod tests {
     fn test_enter_preserves_line_until_reset() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "test");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         assert_eq!(ed.line(), b"test");
         assert_eq!(ed.cursor(), 0);
         ed.reset();
@@ -263,7 +263,7 @@ mod tests {
         assert!(matches!(result, EditResult::CursorMove));
         assert_eq!(ed.cursor(), 2);
         // Insert in middle
-        ed.process(byte(b'X'));
+        let _ = ed.process(byte(b'X'));
         assert_eq!(ed.line(), b"abXc");
         assert_eq!(ed.cursor(), 3);
     }
@@ -287,8 +287,8 @@ mod tests {
     fn test_arrow_right_moves_cursor() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "abc");
-        ed.process(key(Key::ArrowLeft));
-        ed.process(key(Key::ArrowLeft));
+        let _ = ed.process(key(Key::ArrowLeft));
+        let _ = ed.process(key(Key::ArrowLeft));
         assert_eq!(ed.cursor(), 1);
         let result = ed.process(key(Key::ArrowRight));
         assert!(matches!(result, EditResult::CursorMove));
@@ -299,8 +299,8 @@ mod tests {
     fn test_insert_in_middle() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "ac");
-        ed.process(key(Key::ArrowLeft));
-        ed.process(byte(b'b'));
+        let _ = ed.process(key(Key::ArrowLeft));
+        let _ = ed.process(byte(b'b'));
         assert_eq!(ed.line(), b"abc");
     }
 
@@ -308,8 +308,8 @@ mod tests {
     fn test_backspace_in_middle() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "abcd");
-        ed.process(key(Key::ArrowLeft));
-        ed.process(key(Key::Backspace));
+        let _ = ed.process(key(Key::ArrowLeft));
+        let _ = ed.process(key(Key::Backspace));
         assert_eq!(ed.line(), b"abd");
         assert_eq!(ed.cursor(), 2);
     }
@@ -328,10 +328,10 @@ mod tests {
     fn test_esc_resets_history_browsing() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "first");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
-        ed.process(key(Key::ArrowUp)); // browsing history
-        ed.process(key(Key::Esc)); // should reset
+        let _ = ed.process(key(Key::ArrowUp)); // browsing history
+        let _ = ed.process(key(Key::Esc)); // should reset
         // ArrowDown should reject (not browsing anymore)
         let result = ed.process(key(Key::ArrowDown));
         assert!(matches!(result, EditResult::Reject));
@@ -341,10 +341,10 @@ mod tests {
     fn test_history_stores_on_enter() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "first");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         type_str(&mut ed, "second");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         // Arrow up should show "second" (most recent)
         let result = ed.process(key(Key::ArrowUp));
@@ -356,19 +356,19 @@ mod tests {
     fn test_history_navigate_up_down() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "first");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         type_str(&mut ed, "second");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         // Up once -> "second"
-        ed.process(key(Key::ArrowUp));
+        let _ = ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line(), b"second");
         // Up again -> "first"
-        ed.process(key(Key::ArrowUp));
+        let _ = ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line(), b"first");
         // Down -> back to "second"
-        ed.process(key(Key::ArrowDown));
+        let _ = ed.process(key(Key::ArrowDown));
         assert_eq!(ed.line(), b"second");
     }
 
@@ -376,14 +376,14 @@ mod tests {
     fn test_history_down_restores_current_line() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "old");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         type_str(&mut ed, "current");
         // Browse into history
-        ed.process(key(Key::ArrowUp));
+        let _ = ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line(), b"old");
         // Come back — should restore "current"
-        ed.process(key(Key::ArrowDown));
+        let _ = ed.process(key(Key::ArrowDown));
         assert_eq!(ed.line(), b"current");
     }
 
@@ -391,7 +391,7 @@ mod tests {
     fn test_history_down_at_bottom_reject() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "test");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         // Not browsing history — down should reject
         let result = ed.process(key(Key::ArrowDown));
@@ -410,9 +410,9 @@ mod tests {
     fn test_history_up_at_oldest_reject() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "only");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
-        ed.process(key(Key::ArrowUp)); // "only"
+        let _ = ed.process(key(Key::ArrowUp)); // "only"
         // Already at oldest — should reject
         let result = ed.process(key(Key::ArrowUp));
         assert!(matches!(result, EditResult::Reject));
@@ -422,10 +422,10 @@ mod tests {
     fn test_history_sets_cursor_to_end() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "long command");
-        ed.process(key(Key::Enter));
+        let _ = ed.process(key(Key::Enter));
         ed.reset();
         type_str(&mut ed, "hi");
-        ed.process(key(Key::ArrowUp));
+        let _ = ed.process(key(Key::ArrowUp));
         assert_eq!(ed.line(), b"long command");
         assert_eq!(ed.cursor(), 12); // cursor at end of recalled line
     }
@@ -434,7 +434,7 @@ mod tests {
     fn test_full_line_rejects_input() {
         let mut ed = LineEditor::new();
         for _ in 0..LINE_LEN {
-            ed.process(byte(b'x'));
+            let _ = ed.process(byte(b'x'));
         }
         assert_eq!(ed.line().len(), LINE_LEN);
         let result = ed.process(byte(b'y'));

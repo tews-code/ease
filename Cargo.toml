@@ -13,8 +13,14 @@ name = "ease"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["test-all"]
 qemu = []  # For QEMU-specific code
+test-fs = []
+test-virtio = []
+test-collections = []
+test-alloc = []
+test-shell = []
+test-all = ["test-fs", "test-virtio", "test-collections", "test-alloc", "test-shell"]
 
 [profile.test]
 opt-level = 1

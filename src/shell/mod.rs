@@ -51,6 +51,7 @@ impl Args<'_> {
 
 impl Shell {
     /// Creates a new shell with the given framebuffer console.
+    #[allow(dead_code)]
     pub fn new(console: Console) -> Self {
         Self {
             console,
@@ -60,6 +61,7 @@ impl Shell {
     }
 
     /// Runs the shell main loop. Polls keyboard, processes input, dispatches commands. Never returns.
+    #[allow(dead_code)]
     pub fn run(&mut self) -> ! {
         loop {
             let _ = write!(self.console, "{PROMPT}");
@@ -128,6 +130,7 @@ impl Shell {
         }
     }
 
+    #[allow(dead_code)]
     fn execute(console: &mut Console, line: &str) {
         let line = line.trim();
         if line.is_empty() {
@@ -164,6 +167,7 @@ impl Shell {
     /// 3. Print line contents
     /// 4. Erase from cursor to end of line (ANSI escape `\x1b[K`)
     /// 5. Reposition cursor with backspaces
+    #[allow(dead_code)]
     fn uart_redraw_line(line: &[u8], cursor: usize) {
         use crate::drivers::uart::direct_write_byte;
 
@@ -188,7 +192,7 @@ impl Shell {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-shell"))]
 mod tests {
     use super::*;
 

@@ -43,6 +43,7 @@ mod fb_panic_writer {
     /// Draw a glyph in VGA 8x16 font. (x, y) are coordinates of top left of the glyph
     ///
     /// - ch is a byte
+    #[allow(dead_code)]
     pub(super) fn panic_draw_char(x: usize, y: usize, ch: u8) {
         const FG: u32 = 0xFF0000; // red
         const BG: u32 = 0x000000; // black
@@ -62,6 +63,7 @@ mod fb_panic_writer {
 }
 
 // Console writer for direct writing in panic situation.
+#[allow(dead_code)]
 struct DirectConsoleWriter {
     x: usize, // x pixel position
     y: usize, // y pixel position

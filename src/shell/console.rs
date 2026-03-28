@@ -242,6 +242,7 @@ impl Console {
     }
 
     /// Redraws a line overwriting the previous content, starting at `cursor`
+    #[allow(dead_code)]
     pub fn redraw_line(&mut self, line: &[u8], cursor: usize) {
         // Covers mid line insert and delete, Esc line clear and history recall by redrawing
         self.hide_cursor();
@@ -264,6 +265,7 @@ impl Console {
         self.prev_cursor = cursor;
     }
 
+    #[allow(dead_code)]
     pub fn reset_line(&mut self) {
         self.prev_cursor = 0;
         self.prev_line_len = 0;
@@ -289,7 +291,7 @@ impl core::fmt::Write for Console {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-shell"))]
 mod benchmarks {
     use crate::bench;
     use crate::drivers::ramfb::FrameBuffer;

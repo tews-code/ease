@@ -329,7 +329,7 @@ pub fn fat16_init() {
     *VOLUME.lock() = Some(vol);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-fs"))]
 mod test {
     use super::*;
 

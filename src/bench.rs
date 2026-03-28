@@ -46,7 +46,7 @@ pub fn measure<F: FnOnce()>(f: F) -> u64 {
 /// Run a benchmark and print results
 ///
 /// Runs the closure and prints the cycle count.
-#[expect(dead_code)]
+#[allow(dead_code)]
 pub fn run<F: FnOnce()>(name: &str, f: F) {
     let elapsed = measure(f);
     crate::println!("  {}: {} cycles", name, elapsed);

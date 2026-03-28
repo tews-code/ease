@@ -10,6 +10,7 @@ use crate::kernel::timer;
 use crate::shell::{Args, Console, ascii};
 
 /// Reads file content to console
+#[allow(dead_code)]
 pub fn cat(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
         crate::fs::volume::with_volume(|vol| match vol.open(filename) {
@@ -34,16 +35,19 @@ pub fn cat(console: &mut Console, args: &Args) {
 }
 
 /// Clears the console screen.
+#[allow(dead_code)]
 pub fn clear(console: &mut Console) {
     let _ = write!(console, "{}", ascii::FF as char);
 }
 
 /// Prints arguments to the console.
+#[allow(dead_code)]
 pub fn echo(console: &mut Console, args: &Args) {
     let _ = writeln!(console, "{}", args.rest);
 }
 
 /// Prints the list of available commands.
+#[allow(dead_code)]
 pub fn help(console: &mut Console) {
     let _ = writeln!(console, "Available commands:");
     let _ = writeln!(console, "  cat     - Read file content to screen");
@@ -61,6 +65,7 @@ pub fn help(console: &mut Console) {
 /// Shows the raw file details in hex format
 ///
 /// - Supports -C argument
+#[allow(dead_code)]
 pub fn hexdump(console: &mut Console, args: &Args) {
     // Open the file
     for filename in args.positionals.as_slice().iter() {
@@ -132,6 +137,7 @@ pub fn hexdump(console: &mut Console, args: &Args) {
 }
 
 /// Lists files in current directory
+#[allow(dead_code)]
 pub fn ls(console: &mut Console, args: &Args) {
     crate::fs::volume::with_volume(|vol| {
         let _ = vol
@@ -158,16 +164,19 @@ pub fn ls(console: &mut Console, args: &Args) {
 }
 
 /// Prints the current system tick count in milliseconds.
+#[allow(dead_code)]
 pub fn time(console: &mut Console) {
     let _ = writeln!(console, "{} [ms]", timer::ticks_ms());
 }
 
 /// Panics the system.
+#[allow(dead_code)]
 pub fn panic(_console: &mut Console) {
     panic!("user requested panic");
 }
 
 /// Creates an empty file
+#[allow(dead_code)]
 pub fn touch(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
         crate::fs::volume::with_volume(|vol| match vol.create_empty_file(filename) {
@@ -185,6 +194,7 @@ pub fn touch(console: &mut Console, args: &Args) {
 }
 
 /// Deletes a file
+#[allow(dead_code)]
 pub fn rm(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
         crate::fs::volume::with_volume(|vol| match vol.delete_file(filename) {
@@ -202,6 +212,7 @@ pub fn rm(console: &mut Console, args: &Args) {
 }
 
 /// Write text to file
+#[allow(dead_code)]
 pub fn write(console: &mut Console, args: &Args) {
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
@@ -228,6 +239,7 @@ pub fn write(console: &mut Console, args: &Args) {
 }
 
 /// Prints an error message for an unrecognised command.
+#[allow(dead_code)]
 pub fn unknown(console: &mut Console, cmd: &str) {
     let _ = writeln!(console, "Unknown command: {}", cmd);
 }

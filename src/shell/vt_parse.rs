@@ -128,7 +128,7 @@ impl EscapeParser {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-shell"))]
 mod tests {
     use super::*;
 

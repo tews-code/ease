@@ -328,7 +328,7 @@ impl<T: Copy, const N: usize> SpscRingBuf<T, N> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-collections"))]
 mod tests {
     use super::*;
 

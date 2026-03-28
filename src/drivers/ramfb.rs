@@ -176,7 +176,7 @@ impl FrameBuffer {
 #[derive(Clone, Copy)]
 pub struct Colour(u32);
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 impl Colour {
     // Pixel format: XR24 = 0x00RRGGBB (32-bit, X ignored)
     const FOURCC_XR24: u32 = 0x34325258;

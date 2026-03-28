@@ -325,7 +325,7 @@ pub fn handle_virtio_interrupt() {
     VIRTIO_COMPLETE.store(true, Ordering::Release);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-virtio"))]
 mod test {
     use super::*;
 
