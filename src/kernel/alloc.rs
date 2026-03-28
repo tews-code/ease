@@ -122,7 +122,7 @@ pub mod test {
 
     use super::*;
 
-    use crate::println;
+    use crate::{print, println};
 
     mod baseline {
         pub(super) const ONE_BYTE_ALLOC: u64 = 500;
@@ -174,6 +174,16 @@ pub mod test {
                 for _ in 0..512 {
                     let _ = v.pop();
                 }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn allocate_or_bust() {
+        for i in 0..1_000_000 {
+            let _b = black_box(Box::new([1u8; 1024]));
+            if i % 50 == 0 {
+                println!("  allocate_or_bust: {} allocations", i);
             }
         }
     }
@@ -243,6 +253,14 @@ pub mod test {
         let heap_used =
             BUMP_ALLOCATOR.next.load(Ordering::Relaxed) - &raw const __heap_start as usize;
         println!("  Heap used: {} bytes", heap_used);
+
+        // Comment out to continue CI
+        //Safety: No live pointers between benchmarks
+        // unsafe { BUMP_ALLOCATOR.reset() };
+        // ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        // DEALLOCATED_BYTES.store(0, Ordering::Relaxed);
+        // ALLOC_COUNT.store(0, Ordering::Relaxed);
+        // allocate_or_bust();
 
         println!();
         println!("===================== ");
