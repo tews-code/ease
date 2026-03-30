@@ -170,6 +170,7 @@ pub struct Console {
 
 impl Console {
     /// Creates a new console with green-on-black text and cursor enabled.
+    #[allow(dead_code)]
     pub fn new(fb: FrameBuffer) -> Self {
         Self {
             fb,

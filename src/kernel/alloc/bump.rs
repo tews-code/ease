@@ -1,4 +1,4 @@
-//! Allocator
+//! Bump Allocator
 
 // Rough Diagram of memory layout fo SRAM
 //
@@ -30,6 +30,8 @@ use core::alloc::{GlobalAlloc, Layout};
 #[cfg(test)]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::kernel::alloc::align_up;
 
 unsafe extern "C" {
     static __heap_start: u8;
@@ -107,11 +109,6 @@ unsafe impl GlobalAlloc for Allocator {
     }
 }
 
-fn align_up(addr: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    (addr + align - 1) & !(align - 1)
-}
-
 #[cfg(all(test, feature = "test-alloc"))]
 pub mod test {
     use alloc::boxed::Box;
@@ -122,7 +119,7 @@ pub mod test {
 
     use super::*;
 
-    use crate::{print, println};
+    use crate::println;
 
     mod baseline {
         pub(super) const ONE_BYTE_ALLOC: u64 = 500;

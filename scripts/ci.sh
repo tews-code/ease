@@ -4,7 +4,8 @@
 
 set -e  # Exit immediately on any failure
 
-FEATURES="${1:-test-all}"
+ALLOCATOR="${ALLOCATOR:-alloc-freelist}"
+FEATURES="${1:-test-all},$ALLOCATOR"
 
 # Unconditionally reformat to pass clippy
 cargo fmt

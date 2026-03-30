@@ -55,6 +55,7 @@ pub fn run<F: FnOnce()>(name: &str, f: F) {
 /// Run a benchmark multiple times and print average
 ///
 /// Useful for reducing noise in measurements.
+#[allow(dead_code)]
 pub fn run_avg<F: FnMut()>(name: &str, iterations: u32, mut f: F) {
     // Warm-up run (not counted)
     f();
