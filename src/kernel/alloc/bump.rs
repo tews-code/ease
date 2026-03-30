@@ -55,6 +55,14 @@ struct Allocator {
 }
 
 impl Allocator {
+    fn init(&self) {
+        let current = self.next.load(Ordering::Relaxed);
+        debug_assert!(current == 0);
+        // Needs initialisation
+        let start = &raw const __heap_start as usize;
+        self.next.store(start, Ordering::Relaxed);
+    }
+
     #[cfg(all(test, feature = "test-alloc"))]
     pub unsafe fn reset(&self) {
         self.next
@@ -65,18 +73,7 @@ impl Allocator {
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let mut current = self.next.load(Ordering::Relaxed);
-        if current == 0 {
-            // Needs initialisation
-            let start = &raw const __heap_start as usize;
-            current =
-                match self
-                    .next
-                    .compare_exchange(0, start, Ordering::Relaxed, Ordering::Relaxed)
-                {
-                    Ok(_) => start,
-                    Err(actual) => actual,
-                };
-        }
+        debug_assert!(current != 0);
         loop {
             let next = align_up(current, layout.align());
             // OOM check
@@ -107,6 +104,10 @@ unsafe impl GlobalAlloc for Allocator {
         #[cfg(test)]
         let _ = DEALLOCATED_BYTES.fetch_add(_layout.size() as u32, Ordering::Relaxed);
     }
+}
+
+pub fn init() {
+    BUMP_ALLOCATOR.init();
 }
 
 #[cfg(all(test, feature = "test-alloc"))]

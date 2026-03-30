@@ -93,6 +93,21 @@ struct FreeList {
     head: IrqSpinLock<Option<NonNull<FreeBlock>>>,
 }
 
+impl FreeList {
+    pub fn init(&self) {
+        let mut free_list = self.head.lock();
+        debug_assert!(free_list.is_none());
+        // Initialise - set entire memory to free block at heap start
+        let free_block_ptr = &raw const __heap_start as *mut FreeBlock;
+        // Safety: Heap start is valid for writes and aligned
+        unsafe {
+            (*free_block_ptr).next = None;
+            (*free_block_ptr).size =
+                &raw const __heap_end as usize - &raw const __heap_start as usize;
+        }
+        *free_list = Some(unsafe { NonNull::new_unchecked(free_block_ptr) });
+    }
+}
 // FREE_LIST is static, must be Sync
 // Safety: A reference to the FreeList struct is safe to share between threads
 unsafe impl Sync for FreeList {}
@@ -107,23 +122,13 @@ struct FreeBlock {
 }
 
 unsafe impl GlobalAlloc for FreeList {
+    // Don't forget to call init() first!
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         // Need a minimum of 8 bytes to store FreeBlock
         // For simplicity, make sure *any* allocation is at least this size
         const ALLOC_MIN_BYTES: usize = 8;
 
         let mut free_list = self.head.lock();
-        if free_list.is_none() {
-            // Initialise - set entire memory to free block at heap start
-            let free_block_ptr = &raw const __heap_start as *mut FreeBlock;
-            // Safety: Heap start is valid for writes and aligned
-            unsafe {
-                (*free_block_ptr).next = None;
-                (*free_block_ptr).size =
-                    &raw const __heap_end as usize - &raw const __heap_start as usize;
-            }
-            *free_list = Some(unsafe { NonNull::new_unchecked(free_block_ptr) });
-        }
         // Work out the allocation size needed
         // Regardless of request size, the minimum allocation is ALLOC_MIN_BYTES
         // We always round up to ALLOC_MIN_BYTES alignment to simplify next allocation
@@ -171,4 +176,8 @@ unsafe impl GlobalAlloc for FreeList {
     }
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: core::alloc::Layout) {}
+}
+
+pub fn init() {
+    FREE_LIST.init();
 }

@@ -52,6 +52,7 @@ mod shell;
 fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::timer::init();
+    kernel::alloc::init();
 
     // Configure PLIC
     drivers::plic::set_threshold(0);
