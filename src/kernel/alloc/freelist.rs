@@ -121,7 +121,9 @@ impl FreeList {
     }
 }
 // FREE_LIST is static, must be Sync
-// Safety: A reference to the FreeList struct is safe to share between threads
+// Safety: FreeList is Sync because IrqSpinLock means that even if a ref to a FreeList
+// is passed to another thread, the locking mechanism ensures only one user can access
+// the free list at a time
 unsafe impl Sync for FreeList {}
 
 #[repr(C)]
@@ -137,6 +139,9 @@ struct FreeBlock {
 // For simplicity, make sure *any* allocation is at least this size
 const ALLOC_MIN_BYTES: usize = core::mem::size_of::<FreeBlock>();
 
+// Safety: The IrqSpinLock ensures mutual exclusion, alloc returns properly aligned
+// non-overlapping blocks or null on OOM, and dealloc [will eventually] return blocks
+// to the free list.
 unsafe impl GlobalAlloc for FreeList {
     // Don't forget to call init() first!
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
