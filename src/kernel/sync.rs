@@ -194,7 +194,7 @@ impl<T> SpinLock<T> {
         SpinLockGuard { lock: self }
     }
 
-    #[expect(dead_code)]
+    #[allow(dead_code)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Only attempt CAS
         if self
@@ -229,5 +229,121 @@ impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+// Host-runnable tests for SpinLock. Run with
+//     cargo test --lib --target $HOST_TARGET
+// and verified clean under Miri:
+//     cargo +nightly miri test --lib --target $HOST_TARGET
+//
+// The headline test (`spinlock_concurrent_counter`) spawns multiple
+// threads that each take the lock and increment a shared counter. Miri
+// verifies that the Acquire/Release ordering on the inner AtomicBool
+// correctly synchronises the data access — if the orderings were too
+// weak (e.g. Relaxed in place of Acquire on the load), Miri would
+// report a data race on the counter.
+//
+// IrqSpinLock is not tested here because its `disable_interrupts` /
+// `restore_interrupts` calls are stubbed out in the lib crate's
+// `mod arch` (they're no-ops on the host). The interesting algorithmic
+// behaviour — the AtomicBool spin loop, the guard semantics — is
+// shared with SpinLock, so testing SpinLock here covers it.
+//
+// Gated on `not(target_os = "none")` so the kernel build is unaffected.
+#[cfg(all(test, not(target_os = "none")))]
+mod host_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::vec::Vec;
+
+    #[test]
+    fn spinlock_basic_lock_unlock() {
+        let lock = SpinLock::new(42u32);
+        {
+            let guard = lock.lock();
+            assert_eq!(*guard, 42);
+        }
+        // After the first guard drops, the lock can be acquired again.
+        let guard2 = lock.lock();
+        assert_eq!(*guard2, 42);
+    }
+
+    #[test]
+    fn spinlock_mutation_through_deref_mut() {
+        let lock = SpinLock::new(0u32);
+        {
+            let mut guard = lock.lock();
+            *guard = 100;
+            *guard += 1;
+        }
+        let guard = lock.lock();
+        assert_eq!(*guard, 101);
+    }
+
+    #[test]
+    fn spinlock_try_lock_when_locked_returns_none() {
+        let lock = SpinLock::new(7u32);
+        let _guard = lock.lock();
+        // While `_guard` is alive, try_lock must fail. The CAS sees
+        // `locked = true` and returns Err — no spurious-failure window
+        // because the actual stored value is `true`, not `false`.
+        assert!(
+            lock.try_lock().is_none(),
+            "try_lock should fail while another guard is held"
+        );
+    }
+
+    #[test]
+    fn spinlock_drop_releases_lock() {
+        let lock = SpinLock::new(0u32);
+        {
+            let _guard = lock.lock();
+            assert!(
+                lock.try_lock().is_none(),
+                "lock should be held inside scope"
+            );
+        }
+        // Once the guard's scope ends, the lock is released and a new
+        // lock() call must succeed. We use lock() here rather than
+        // try_lock() because compare_exchange_weak inside try_lock can
+        // spuriously fail; lock() retries until success so it's a
+        // reliable post-condition.
+        let guard = lock.lock();
+        assert_eq!(*guard, 0);
+    }
+
+    #[test]
+    fn spinlock_concurrent_counter() {
+        // Headline Miri test: N threads each increment a shared counter
+        // K times via the lock. The total must equal N*K. Miri checks
+        // the Acquire/Release ordering on the inner AtomicBool against
+        // the actual reads and writes of the counter through the guard.
+        //
+        // What this catches if the lock were buggy:
+        //   - Wrong memory ordering (e.g. Relaxed on the CAS) → data race
+        //     on the counter, reported by Miri
+        //   - Forgetting to release on guard drop → deadlock under Miri
+        //   - Releasing before the data write completes → stale-write race
+        //
+        // Thread/iteration counts are kept small so Miri finishes quickly.
+        const THREADS: usize = 4;
+        const ITERS: u32 = 50;
+        let lock: Arc<SpinLock<u32>> = Arc::new(SpinLock::new(0));
+        let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
+            let lock = Arc::clone(&lock);
+            handles.push(thread::spawn(move || {
+                for _ in 0..ITERS {
+                    *lock.lock() += 1;
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+        let final_value = *lock.lock();
+        assert_eq!(final_value, (THREADS as u32) * ITERS);
     }
 }
