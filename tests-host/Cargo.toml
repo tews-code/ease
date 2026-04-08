@@ -1,0 +1,10 @@
+[package]
+name = "freelist-host-test"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Host-runnable test harness for the freelist allocator (run under Miri)"
+
+[[bin]]
+name = "freelist-host-test"
+path = "src/main.rs"
