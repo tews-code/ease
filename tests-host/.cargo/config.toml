@@ -1,8 +1,0 @@
-# This sub-project tests the allocator on the host (not the kernel target)
-# so it can run under Miri. Override the parent project's RISC-V target.
-#
-# If your host triple is different (e.g. x86_64-unknown-linux-gnu on Intel,
-# aarch64-apple-darwin on Apple Silicon), update this line. You can find
-# your host triple with: rustc -vV | grep host
-[build]
-target = "aarch64-unknown-linux-gnu"
