@@ -18,12 +18,6 @@ const _: () = assert!(BASE_ALIGN >= core::mem::align_of::<FreeBlock>());
 // BASE_ALIGN is must be power of two
 const _: () = assert!(BASE_ALIGN.is_power_of_two());
 
-// Safety: Symbols are created in linker script with valid addresses and are aligned
-unsafe extern "C" {
-    static __heap_start: u8;
-    static __heap_end: u8;
-}
-
 #[cfg(test)]
 static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
@@ -35,16 +29,8 @@ static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
-#[global_allocator]
-static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList {
-    sentinel: IrqSpinLock::new(FreeBlock {
-        next: FreeBlockPtr(None),
-        size: 0,
-    }),
-};
-
 // Each freed memory block has a size and a link to the next free block
-struct FreeBlock {
+pub(crate) struct FreeBlock {
     next: FreeBlockPtr,
     size: usize,
 }
@@ -94,38 +80,61 @@ struct FreeBlockPtr(Option<NonNull<FreeBlock>>);
 unsafe impl Send for FreeBlockPtr {}
 
 // Protect the list with a spinlock that disables interrupts to serialise access
-struct FreeBlockList {
-    sentinel: IrqSpinLock<FreeBlock>,
+pub struct FreeBlockList {
+    pub(crate) sentinel: IrqSpinLock<FreeBlock>,
 }
 
 impl FreeBlockList {
-    fn init(&self) {
+    /// Construct an uninitialised allocator. Call `init` before any
+    /// `alloc`/`dealloc` operations.
+    pub const fn new() -> Self {
+        Self {
+            sentinel: IrqSpinLock::new(FreeBlock {
+                next: FreeBlockPtr(None),
+                size: 0,
+            }),
+        }
+    }
+
+    /// Initialise the allocator with a heap region of `size` bytes
+    /// starting at `start`. Must be called exactly once before any
+    /// allocations.
+    ///
+    /// # Safety
+    /// Caller must guarantee:
+    ///   - `[start, start + size)` is valid for reads and writes for
+    ///     the entire lifetime of the allocator.
+    ///   - The region is exclusively owned by this allocator.
+    ///   - `start` is aligned to `align_of::<FreeBlock>()`.
+    ///   - `size >= size_of::<FreeBlock>()`.
+    pub unsafe fn init(&self, start: *mut u8, size: usize) {
         let mut free_block_list_head = self.sentinel.lock();
         // Ensure this is the only initialisation
         assert!(free_block_list_head.next.0.is_none());
-        // Initialise the entire heap memory as a free block
-        let new_free_block_ptr = &raw const __heap_start as *mut FreeBlock;
-        let next = None;
-        let size = &raw const __heap_end as usize - &raw const __heap_start as usize;
-        // Safety: pointer is aligned at heap start by linker script and valid for writes
+        assert!(
+            (start as usize).is_multiple_of(core::mem::align_of::<FreeBlock>()),
+            "heap start must be FreeBlock-aligned"
+        );
+        assert!(
+            size >= core::mem::size_of::<FreeBlock>(),
+            "heap too small to hold a FreeBlock"
+        );
+        let new_free_block_ptr = start as *mut FreeBlock;
+        // Safety: caller guarantees the region is valid for writes and aligned
         unsafe {
             core::ptr::write(
                 new_free_block_ptr,
                 FreeBlock {
-                    next: FreeBlockPtr(next),
+                    next: FreeBlockPtr(None),
                     size,
                 },
             );
         }
-        // Safety: new_free_block_ptr is a non-null aligned pointer from linker script
+        // Safety: new_free_block_ptr is non-null and now points at an
+        // initialised FreeBlock.
         free_block_list_head.next =
             unsafe { FreeBlockPtr(Some(NonNull::new_unchecked(new_free_block_ptr))) };
     }
-}
-
-// External init access
-pub fn init() {
-    FREE_BLOCK_LIST.init();
 }
 
 // Safety: Allocations and deallocations are implemented in these functions
@@ -325,8 +334,8 @@ pub mod test {
 
     fn allocate_one_byte() {
         let layout = Layout::new::<u8>();
-        let alloc_ptr = black_box(unsafe { FREE_BLOCK_LIST.alloc(layout) });
-        let _ = black_box(unsafe { FREE_BLOCK_LIST.dealloc(alloc_ptr, layout) });
+        let alloc_ptr = black_box(unsafe { crate::FREE_BLOCK_LIST.alloc(layout) });
+        let _ = black_box(unsafe { crate::FREE_BLOCK_LIST.dealloc(alloc_ptr, layout) });
     }
 
     #[repr(C, align(4096))]
@@ -345,7 +354,7 @@ pub mod test {
     }
 
     fn bare_sync_timing() {
-        let _ = black_box(FREE_BLOCK_LIST.sentinel.lock());
+        let _ = black_box(crate::FREE_BLOCK_LIST.sentinel.lock());
     }
 
     // Simulate allocations typical of shell activity
@@ -422,7 +431,7 @@ pub mod test {
             "  Allocated: {} bytes",
             ALLOCATED_BYTES.load(Ordering::Relaxed) - DEALLOCATED_BYTES.load(Ordering::Relaxed)
         );
-        let heap_used = HEAP_TOP.load(Ordering::Relaxed) - &raw const __heap_start as usize;
+        let heap_used = HEAP_TOP.load(Ordering::Relaxed) - crate::heap_start_addr();
         println!("  Heap used: {} bytes", heap_used);
 
         // Comment out to continue CI

@@ -31,6 +31,7 @@
 use core::fmt::Write;
 
 use crate::drivers::ramfb::FrameBuffer;
+use crate::kernel::alloc::freelist::FreeBlockList;
 
 extern crate alloc;
 
@@ -46,12 +47,52 @@ mod qemu;
 mod shell;
 
 // =============================================================================
+// Heap and Global Allocator
+// =============================================================================
+//
+// The global allocator instance lives here in the binary crate (not in
+// kernel/alloc/freelist.rs) so that the `#[global_allocator]` attribute and
+// the linker-symbol references stay confined to code that is only ever
+// compiled for the kernel target. This keeps the FreeBlockList type itself
+// host-testable without polluting the lib crate.
+
+// Safety: Symbols are created in the linker script with valid addresses
+// and are FreeBlock-aligned (16-byte ALIGN in the .heap section).
+unsafe extern "C" {
+    static __heap_start: u8;
+    static __heap_end: u8;
+}
+
+#[global_allocator]
+pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
+
+/// Initialise the global allocator from the linker-defined heap region.
+/// Must be called exactly once during boot, before any allocations.
+fn init_global_allocator() {
+    let start = &raw const __heap_start as *mut u8;
+    let size = &raw const __heap_end as usize - start as usize;
+    // Safety: The heap region is defined by the linker, exclusively owned
+    // by the allocator, FreeBlock-aligned, and large enough to hold a
+    // FreeBlock header.
+    unsafe { FREE_BLOCK_LIST.init(start, size) };
+}
+
+/// Returns the address of `__heap_start` for diagnostics (e.g. computing
+/// heap-used in benchmarks). Only referenced from the `#[cfg(test)]`
+/// allocator benchmarks.
+#[cfg(all(test, feature = "test-alloc"))]
+pub(crate) fn heap_start_addr() -> usize {
+    &raw const __heap_start as usize
+}
+
+// =============================================================================
 // Entry Points
 // =============================================================================
 
 fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::timer::init();
+    init_global_allocator();
     kernel::alloc::init();
 
     // Configure PLIC
