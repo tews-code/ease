@@ -93,6 +93,7 @@ fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::timer::init();
     init_global_allocator();
+    #[cfg(feature = "alloc-bump")]
     kernel::alloc::init();
 
     // Configure PLIC

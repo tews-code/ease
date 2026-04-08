@@ -1,6 +1,7 @@
 //! Synchronisation primitives
 
 use core::cell::UnsafeCell;
+#[cfg(target_os = "none")]
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};

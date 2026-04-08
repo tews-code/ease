@@ -5,11 +5,11 @@ pub mod bump;
 #[cfg(feature = "alloc-freelist")]
 pub mod freelist;
 
+// Note: the freelist allocator is initialised from main.rs via
+// `init_global_allocator()`, since the global static and linker
+// symbols live in the binary crate.
+#[cfg(feature = "alloc-bump")]
 pub fn init() {
-    // Note: the freelist allocator is initialised from main.rs via
-    // `init_global_allocator()`, since the global static and linker
-    // symbols live in the binary crate.
-    #[cfg(feature = "alloc-bump")]
     bump::init();
 }
 

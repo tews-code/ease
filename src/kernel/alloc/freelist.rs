@@ -8,14 +8,20 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use crate::kernel::alloc::align_up;
 use crate::kernel::sync::AllocatorLock;
 
-// Choose a base multiple for alignments to prevent padding mem leaks on 32-bit system
-const BASE_ALIGN: usize = 8;
+// Base alignment for every allocation. Derived from `FreeBlock` so the
+// padding-split invariant holds on every target: any non-zero padding is
+// always at least as large as a `FreeBlock`, so the padding-split branch
+// in `alloc` can always materialise a free block in the padding region
+// rather than leaking it.
+//
+// On 32-bit RISC-V this evaluates to 8 (matching the original hardcoded
+// value); on 64-bit hosts it evaluates to 16 so the host tests work too.
+const BASE_ALIGN: usize = core::mem::size_of::<FreeBlock>();
 
-// BASE_ALIGN is chosen to have enough space for a free block
-const _: () = assert!(BASE_ALIGN >= core::mem::size_of::<FreeBlock>());
-// BASE_ALIGN is chosen to have the same alignment as a free block
+// BASE_ALIGN must satisfy FreeBlock's natural alignment so a FreeBlock
+// header can be written at any BASE_ALIGN-aligned address.
 const _: () = assert!(BASE_ALIGN >= core::mem::align_of::<FreeBlock>());
-// BASE_ALIGN is must be power of two
+// BASE_ALIGN must be a power of two for the alignment math (`align_up`).
 const _: () = assert!(BASE_ALIGN.is_power_of_two());
 
 #[cfg(test)]
@@ -311,7 +317,224 @@ unsafe impl GlobalAlloc for FreeBlockList {
     }
 }
 
-#[cfg(all(test, feature = "test-alloc"))]
+// Host-runnable unit tests for the FreeBlockList algorithm. These exercise
+// the same `alloc` and `dealloc` code as the kernel uses, but against a
+// host-allocated heap region. They are gated on `not(target_os = "none")`
+// so they only build inside the lib crate (`cargo test --lib`) and not in
+// the kernel binary build.
+//
+// Run with:
+//     cargo test --lib --target $HOST_TARGET
+// Run under Miri to verify soundness:
+//     cargo +nightly miri test --lib --target $HOST_TARGET
+#[cfg(all(test, not(target_os = "none")))]
+mod host_tests {
+    use super::*;
+    use core::alloc::Layout;
+
+    /// Owns a chunk of host memory that the test allocator treats as the heap.
+    /// Freed automatically when the helper goes out of scope.
+    struct TestHeap {
+        ptr: *mut u8,
+        size: usize,
+        layout: Layout,
+    }
+
+    impl TestHeap {
+        fn new(size: usize) -> Self {
+            // 4096-aligned so high-alignment allocation tests have somewhere to land
+            let layout = Layout::from_size_align(size, 4096).unwrap();
+            // SAFETY: Layout is non-zero and aligned; std::alloc returns
+            // a region we own until we call dealloc with the same layout.
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            assert!(!ptr.is_null(), "host alloc failed");
+            Self { ptr, size, layout }
+        }
+    }
+
+    impl Drop for TestHeap {
+        fn drop(&mut self) {
+            // SAFETY: ptr/layout match the values returned by std::alloc::alloc
+            // in `new`, and the region is no longer in use.
+            unsafe {
+                std::alloc::dealloc(self.ptr, self.layout);
+            }
+        }
+    }
+
+    fn make_allocator(heap: &TestHeap) -> FreeBlockList {
+        let allocator = FreeBlockList::new();
+        // SAFETY: The TestHeap region is exclusively owned by the
+        // returned allocator for as long as the test holds a reference.
+        unsafe { allocator.init(heap.ptr, heap.size) };
+        allocator
+    }
+
+    #[test]
+    fn basic_alloc_dealloc() {
+        let heap = TestHeap::new(4096);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(8, 8).unwrap();
+        let p1 = unsafe { a.alloc(layout) };
+        let p2 = unsafe { a.alloc(layout) };
+        assert!(!p1.is_null());
+        assert!(!p2.is_null());
+        assert_ne!(p1, p2);
+        assert!(p2 as usize > p1 as usize);
+        unsafe {
+            a.dealloc(p1, layout);
+            a.dealloc(p2, layout);
+        }
+    }
+
+    #[test]
+    fn alloc_returns_unique_writable_memory() {
+        // Each returned pointer must be a distinct, writable region.
+        // We stamp each block with a recognisable pattern, then verify
+        // the patterns are still intact at the end — proves no two
+        // allocations overlap.
+        let heap = TestHeap::new(4096);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let mut ptrs = Vec::new();
+        for i in 0..8 {
+            let p = unsafe { a.alloc(layout) };
+            assert!(!p.is_null());
+            unsafe { core::ptr::write_bytes(p, (i + 1) as u8, 64) };
+            ptrs.push(p);
+        }
+        for (i, p) in ptrs.iter().enumerate() {
+            let expected = (i + 1) as u8;
+            for off in 0..64 {
+                let byte = unsafe { *p.add(off) };
+                assert_eq!(byte, expected, "block {} corrupted at offset {}", i, off);
+            }
+        }
+        for p in ptrs {
+            unsafe { a.dealloc(p, layout) };
+        }
+    }
+
+    #[test]
+    fn alloc_until_oom_then_recover() {
+        let heap = TestHeap::new(1024);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let mut allocations = Vec::new();
+        loop {
+            let p = unsafe { a.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            allocations.push(p);
+        }
+        assert!(!allocations.is_empty(), "did not allocate even one block");
+        for &p in &allocations {
+            unsafe { a.dealloc(p, layout) };
+        }
+        // After freeing everything we should be able to allocate again.
+        let p = unsafe { a.alloc(layout) };
+        assert!(!p.is_null(), "could not allocate after freeing all blocks");
+        unsafe { a.dealloc(p, layout) };
+    }
+
+    #[test]
+    fn coalesce_all_three_orders() {
+        // Allocate three adjacent blocks, then free them in different
+        // orders to exercise: free-only, merge-left, merge-right, merge-both.
+        for free_order in &[[0, 1, 2], [2, 1, 0], [1, 0, 2], [1, 2, 0]] {
+            let heap = TestHeap::new(4096);
+            let a = make_allocator(&heap);
+            let layout = Layout::from_size_align(64, 8).unwrap();
+            let p = [
+                unsafe { a.alloc(layout) },
+                unsafe { a.alloc(layout) },
+                unsafe { a.alloc(layout) },
+            ];
+            assert!(p.iter().all(|p| !p.is_null()));
+            for &i in free_order {
+                unsafe { a.dealloc(p[i], layout) };
+            }
+            // Coalescing must have succeeded — a 2 KiB allocation must fit.
+            let big = Layout::from_size_align(2048, 8).unwrap();
+            let bp = unsafe { a.alloc(big) };
+            assert!(
+                !bp.is_null(),
+                "coalesce failed for free order {:?}",
+                free_order
+            );
+            unsafe { a.dealloc(bp, big) };
+        }
+    }
+
+    #[test]
+    fn high_alignment_padding() {
+        let heap = TestHeap::new(8192);
+        let a = make_allocator(&heap);
+
+        // Bump the cursor with a small alloc so the next 4096-aligned
+        // allocation needs significant padding.
+        let small_layout = Layout::from_size_align(8, 8).unwrap();
+        let small = unsafe { a.alloc(small_layout) };
+        assert!(!small.is_null());
+
+        let big_layout = Layout::from_size_align(64, 4096).unwrap();
+        let big = unsafe { a.alloc(big_layout) };
+        assert!(!big.is_null(), "high-alignment alloc failed");
+        assert_eq!(big as usize % 4096, 0, "alignment not honoured");
+
+        unsafe {
+            a.dealloc(big, big_layout);
+            a.dealloc(small, small_layout);
+        }
+        // After everything is freed, the padding block must have coalesced
+        // back into the surrounding free space — a large allocation must fit.
+        let full_layout = Layout::from_size_align(4096, 8).unwrap();
+        let full = unsafe { a.alloc(full_layout) };
+        assert!(
+            !full.is_null(),
+            "padding block did not coalesce with surrounding free space"
+        );
+        unsafe { a.dealloc(full, full_layout) };
+    }
+
+    #[test]
+    fn fragmentation_pattern() {
+        let heap = TestHeap::new(4096);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(32, 8).unwrap();
+        let mut ps = Vec::new();
+        for _ in 0..16 {
+            let p = unsafe { a.alloc(layout) };
+            if !p.is_null() {
+                ps.push(p);
+            }
+        }
+        // Free even-indexed first (creates many small free blocks).
+        for (i, &p) in ps.iter().enumerate() {
+            if i % 2 == 0 {
+                unsafe { a.dealloc(p, layout) };
+            }
+        }
+        // Then free odd-indexed (each should merge with both neighbours).
+        for (i, &p) in ps.iter().enumerate() {
+            if i % 2 == 1 {
+                unsafe { a.dealloc(p, layout) };
+            }
+        }
+        // Heap should be fully consolidated; large alloc must fit.
+        let big = Layout::from_size_align(1024, 8).unwrap();
+        let bp = unsafe { a.alloc(big) };
+        assert!(!bp.is_null(), "fragmented heap did not consolidate");
+        unsafe { a.dealloc(bp, big) };
+    }
+}
+
+// QEMU benchmark suite for the global allocator. Runs as part of
+// `cargo test --bin ease`. Gated additionally on `target_os = "none"` so
+// it does not get pulled into the lib crate's host test build, which has
+// no global allocator and no `crate::println!` / `crate::bench`.
+#[cfg(all(test, target_os = "none", feature = "test-alloc"))]
 pub mod test {
     use alloc::boxed::Box;
     use alloc::string::ToString;

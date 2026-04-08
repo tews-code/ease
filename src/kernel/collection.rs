@@ -328,7 +328,10 @@ impl<T: Copy, const N: usize> SpscRingBuf<T, N> {
     }
 }
 
-#[cfg(all(test, feature = "test-collections"))]
+// QEMU tests: gated on target_os = "none" so the kernel-only `#[test_case]`
+// custom test framework does not collide with libtest when this file is
+// compiled as part of the lib crate's host tests.
+#[cfg(all(test, target_os = "none", feature = "test-collections"))]
 mod tests {
     use super::*;
 
