@@ -6,7 +6,7 @@ use core::{alloc::GlobalAlloc, ptr::NonNull};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::kernel::alloc::align_up;
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sync::AllocatorLock;
 
 // Choose a base multiple for alignments to prevent padding mem leaks on 32-bit system
 const BASE_ALIGN: usize = 8;
@@ -79,9 +79,11 @@ struct FreeBlockPtr(Option<NonNull<FreeBlock>>);
 //Safety: Free blocks point only to heap memory and hold no thread local information hence Send
 unsafe impl Send for FreeBlockPtr {}
 
-// Protect the list with a spinlock that disables interrupts to serialise access
+// Protect the list with the kernel's allocator lock. On the kernel target
+// this is `IrqSpinLock` (disables interrupts in the critical section); on
+// host builds it is a plain `SpinLock`.
 pub struct FreeBlockList {
-    pub(crate) sentinel: IrqSpinLock<FreeBlock>,
+    pub(crate) sentinel: AllocatorLock<FreeBlock>,
 }
 
 impl FreeBlockList {
@@ -89,7 +91,7 @@ impl FreeBlockList {
     /// `alloc`/`dealloc` operations.
     pub const fn new() -> Self {
         Self {
-            sentinel: IrqSpinLock::new(FreeBlock {
+            sentinel: AllocatorLock::new(FreeBlock {
                 next: FreeBlockPtr(None),
                 size: 0,
             }),

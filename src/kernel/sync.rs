@@ -5,16 +5,36 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(target_os = "none")]
 use crate::arch::{disable_interrupts, restore_interrupts};
+
+/// Lock used by kernel-wide singletons such as the global allocator.
+///
+/// On the kernel target this is the interrupt-disabling spinlock
+/// (`IrqSpinLock`) so that critical sections can run safely from inside
+/// trap handlers. On a host build (e.g. running unit tests under Miri)
+/// it is a plain `SpinLock`, which has the same `lock()` interface and
+/// guard semantics, so the surrounding code is identical.
+#[cfg(target_os = "none")]
+pub type AllocatorLock<T> = IrqSpinLock<T>;
+#[cfg(not(target_os = "none"))]
+pub type AllocatorLock<T> = SpinLock<T>;
+
+// IrqSpinLock and the interrupt-disabling primitives are only meaningful on
+// the kernel target. They are gated out of host builds because they depend
+// on RISC-V inline assembly via `arch::disable_interrupts`. SpinLock (below)
+// is target-independent and provides the host substitute via `AllocatorLock`.
 
 /// Zero-sized proof that interrupts are disabled.
 /// Private constructor — only `with_interrupts_disabled` can create one.
+#[cfg(target_os = "none")]
 #[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub struct CriticalSection<'cs> {
     _lifetime: PhantomData<&'cs ()>, // lifetime linked to struct existence
 }
 
+#[cfg(target_os = "none")]
 impl<'cs> CriticalSection<'cs> {
     // # Safety
     // Interrupts must be disabled for the duration of 'cs.
@@ -27,6 +47,7 @@ impl<'cs> CriticalSection<'cs> {
 
 /// Runs the closure with interrupts disabled, providing a `CriticalSection` token
 /// as proof. Interrupts are restored to their previous state when the closure returns.
+#[cfg(target_os = "none")]
 #[allow(dead_code)]
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
@@ -40,14 +61,18 @@ where
 }
 
 /// SpinLock which disables interrupts and restores on exit
+#[cfg(target_os = "none")]
 pub struct IrqSpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,
 }
 
+#[cfg(target_os = "none")]
 unsafe impl<T: Send> Sync for IrqSpinLock<T> {}
+#[cfg(target_os = "none")]
 unsafe impl<T: Send> Send for IrqSpinLock<T> {}
 
+#[cfg(target_os = "none")]
 impl<T> IrqSpinLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
@@ -103,11 +128,13 @@ impl<T> IrqSpinLock<T> {
     }
 }
 
+#[cfg(target_os = "none")]
 pub struct IrqSpinLockGuard<'a, T> {
     lock: &'a IrqSpinLock<T>,
     prev_interrupt_status: usize,
 }
 
+#[cfg(target_os = "none")]
 impl<'a, T> Deref for IrqSpinLockGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -115,12 +142,14 @@ impl<'a, T> Deref for IrqSpinLockGuard<'a, T> {
     }
 }
 
+#[cfg(target_os = "none")]
 impl<'a, T> DerefMut for IrqSpinLockGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.lock.value.get() }
     }
 }
 
+#[cfg(target_os = "none")]
 impl<'a, T> Drop for IrqSpinLockGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
