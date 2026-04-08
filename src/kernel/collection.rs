@@ -328,20 +328,22 @@ impl<T: Copy, const N: usize> SpscRingBuf<T, N> {
     }
 }
 
-// Host-runnable concurrency tests for SpscRingBuf. These run under
+// Host-runnable tests for the collection types. Run with
 //     cargo test --lib --target $HOST_TARGET
-// and are verified clean under Miri:
+// and verified clean under Miri:
 //     cargo +nightly miri test --lib --target $HOST_TARGET
 //
-// The headline test (`spsc_concurrent_producer_consumer`) spawns a
-// real producer + consumer thread pair and pushes a stream of values
-// across them. Miri can simulate multi-threaded execution and check
-// the atomic ordering on push()/pop() against the actual reads and
-// writes of the underlying storage cells; this is the kind of bug
-// that real hardware almost never reproduces because x86 / aarch64
-// have stronger native ordering than the language model permits.
+// The SpscRingBuf concurrency test is the headline value-add: Miri can
+// simulate multi-threaded execution and check the atomic ordering on
+// push()/pop() against the actual reads and writes of the underlying
+// storage cells. The StackVec / RingBuf tests cover the MaybeUninit
+// safety invariants — that no `assume_init_*` is ever called on a slot
+// that wasn't written, and that `as_slice` only covers initialised
+// elements. Both sets of types use `T: Copy`, so there are no Drop
+// concerns to test.
 //
-// To stress-test more interleavings, run with
+// To stress-test more interleavings of the concurrent SpscRingBuf
+// test, run with
 //     MIRIFLAGS="-Zmiri-many-seeds=0..32" cargo +nightly miri test --lib ...
 //
 // Gated on `not(target_os = "none")` so the kernel build (and the
@@ -442,6 +444,224 @@ mod host_tests {
         // Producer pushed 0..COUNT in order; SPSC must preserve that.
         let expected: Vec<u32> = (0..COUNT).collect();
         assert_eq!(received, expected, "FIFO order violated");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // StackVec
+    //
+    // The Miri-relevant invariant is MaybeUninit safety: every
+    // `assume_init_*` call inside push/pop/insert/remove/index/as_slice
+    // must access a slot that was previously written. Each test below
+    // exercises one or more of those unsafe paths and asserts the
+    // expected values; Miri additionally verifies that no read sees
+    // uninit memory.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn stackvec_push_pop_lifo() {
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        assert!(v.is_empty());
+        assert!(v.push(10).is_ok());
+        assert!(v.push(20).is_ok());
+        assert!(v.push(30).is_ok());
+        assert_eq!(v.len(), 3);
+        // pop in LIFO order
+        assert_eq!(v.pop(), Some(30));
+        assert_eq!(v.pop(), Some(20));
+        assert_eq!(v.pop(), Some(10));
+        assert_eq!(v.pop(), None);
+        assert!(v.is_empty());
+    }
+
+    #[test]
+    fn stackvec_push_full_returns_value() {
+        let mut v: StackVec<u32, 2> = StackVec::new();
+        assert!(v.push(1).is_ok());
+        assert!(v.push(2).is_ok());
+        assert!(v.is_full());
+        // push to a full StackVec must hand the value back, not write
+        // past the end of the buffer.
+        assert_eq!(v.push(3), Err(3));
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn stackvec_clear_then_reuse_does_not_read_stale() {
+        // After clear() the length resets to 0 but the underlying slots
+        // still hold the old values. This test makes sure that pushing
+        // a fresh value and then popping it returns the *new* value,
+        // not the stale bytes left over. Miri also verifies that a pop
+        // after clear/push only reads the slot that was just written.
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        let _ = v.push(0xAAAA_AAAA);
+        let _ = v.push(0xBBBB_BBBB);
+        v.clear();
+        assert_eq!(v.len(), 0);
+        let _ = v.push(0xDEAD);
+        assert_eq!(v.pop(), Some(0xDEAD));
+        assert_eq!(v.pop(), None);
+    }
+
+    #[test]
+    fn stackvec_insert_shifts_right() {
+        let mut v: StackVec<u32, 5> = StackVec::new();
+        let _ = v.push(1);
+        let _ = v.push(3);
+        let _ = v.push(5);
+        // insert 2 at index 1: [1, 3, 5] -> [1, 2, 3, 5]
+        // exercises the copy_within shift inside insert().
+        assert!(v.insert(1, 2).is_ok());
+        assert_eq!(v.as_slice(), &[1, 2, 3, 5]);
+        // insert 4 at index 3: [1, 2, 3, 5] -> [1, 2, 3, 4, 5]
+        assert!(v.insert(3, 4).is_ok());
+        assert_eq!(v.as_slice(), &[1, 2, 3, 4, 5]);
+        assert!(v.is_full());
+        // insert into a full StackVec must hand the value back.
+        assert_eq!(v.insert(0, 99), Err(99));
+        // insert past len must fail too.
+        let mut small: StackVec<u32, 4> = StackVec::new();
+        let _ = small.push(1);
+        assert_eq!(small.insert(5, 99), Err(99));
+    }
+
+    #[test]
+    fn stackvec_remove_shifts_left() {
+        let mut v: StackVec<u32, 5> = StackVec::new();
+        for i in [1, 2, 3, 4, 5] {
+            let _ = v.push(i);
+        }
+        // remove the middle element: [1, 2, 3, 4, 5] -> [1, 2, 4, 5]
+        // exercises both assume_init_read AND copy_within left-shift.
+        assert_eq!(v.remove(2), Some(3));
+        assert_eq!(v.as_slice(), &[1, 2, 4, 5]);
+        // remove past len must return None, not read uninit.
+        assert_eq!(v.remove(99), None);
+    }
+
+    #[test]
+    fn stackvec_as_slice_only_covers_initialised() {
+        // as_slice() casts the buffer pointer to *const T and creates
+        // a slice of length self.len. Miri verifies that all `len`
+        // elements of the resulting slice are within initialised memory.
+        let mut v: StackVec<u32, 8> = StackVec::new();
+        for i in 0..5 {
+            let _ = v.push(i);
+        }
+        let s = v.as_slice();
+        assert_eq!(s.len(), 5);
+        // Materially read every element to make sure Miri actually
+        // visits the initialised range.
+        let sum: u32 = s.iter().sum();
+        assert_eq!(sum, 0 + 1 + 2 + 3 + 4);
+    }
+
+    #[test]
+    fn stackvec_indexing() {
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        let _ = v.push(10);
+        let _ = v.push(20);
+        let _ = v.push(30);
+        // Index calls assume_init_ref on each slot.
+        assert_eq!(v[0], 10);
+        assert_eq!(v[1], 20);
+        assert_eq!(v[2], 30);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // RingBuf
+    //
+    // RingBuf is the overwrite-when-full variant: pushing into a full
+    // buffer overwrites the oldest element rather than failing. Usable
+    // capacity is N - 1 (one slot is sacrificed to distinguish empty
+    // from full via head == tail).
+    //
+    // The Miri-relevant invariant is the same as StackVec — every
+    // `assume_init_ref` inside get/iter/newest must access a slot that
+    // was previously written. The interesting bug class here is
+    // *wraparound off-by-one*, where head/tail arithmetic could read
+    // a slot that was already logically discarded.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn ringbuf_basic_get_oldest_to_newest() {
+        let mut rb: RingBuf<u32, 5> = RingBuf::new();
+        // Push three values; usable capacity is 4 (= N - 1).
+        rb.push(10);
+        rb.push(20);
+        rb.push(30);
+        assert_eq!(rb.len(), 3);
+        // get(0) is oldest, get(len-1) is newest.
+        assert_eq!(rb.get(0), Some(&10));
+        assert_eq!(rb.get(1), Some(&20));
+        assert_eq!(rb.get(2), Some(&30));
+        assert_eq!(rb.get(3), None);
+    }
+
+    #[test]
+    fn ringbuf_overwrites_oldest_when_full() {
+        // RingBuf with N = 4 has usable capacity 3. Pushing four
+        // values should overwrite the first one; pushing a fifth
+        // should overwrite the second; etc.
+        let mut rb: RingBuf<u32, 4> = RingBuf::new();
+        rb.push(1);
+        rb.push(2);
+        rb.push(3);
+        assert_eq!(rb.len(), 3);
+        assert!(rb.is_full());
+        // This push overwrites 1.
+        rb.push(4);
+        assert_eq!(rb.len(), 3);
+        let collected: Vec<u32> = rb.iter().copied().collect();
+        assert_eq!(collected, vec![2, 3, 4]);
+        // And another, overwriting 2.
+        rb.push(5);
+        let collected: Vec<u32> = rb.iter().copied().collect();
+        assert_eq!(collected, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn ringbuf_iter_yields_oldest_first() {
+        let mut rb: RingBuf<u32, 5> = RingBuf::new();
+        for i in [10, 20, 30, 40] {
+            rb.push(i);
+        }
+        // Each iteration step calls assume_init_ref on the visited
+        // slot; Miri verifies it's an initialised slot.
+        let collected: Vec<u32> = rb.iter().copied().collect();
+        assert_eq!(collected, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn ringbuf_newest_indexing() {
+        let mut rb: RingBuf<u32, 5> = RingBuf::new();
+        rb.push(10);
+        rb.push(20);
+        rb.push(30);
+        // newest(0) is the most recent push, newest(len-1) the oldest.
+        assert_eq!(rb.newest(0), Some(&30));
+        assert_eq!(rb.newest(1), Some(&20));
+        assert_eq!(rb.newest(2), Some(&10));
+        assert_eq!(rb.newest(3), None);
+    }
+
+    #[test]
+    fn ringbuf_wraparound_preserves_order() {
+        // Push enough values to wrap head/tail past N several times.
+        // Each push of more than capacity overwrites the oldest. After
+        // the loop the ring should hold the LAST `cap` values pushed,
+        // in oldest-to-newest order.
+        let mut rb: RingBuf<u32, 4> = RingBuf::new();
+        for i in 0..20u32 {
+            rb.push(i);
+        }
+        // usable capacity is 3, so the buffer holds [17, 18, 19].
+        let collected: Vec<u32> = rb.iter().copied().collect();
+        assert_eq!(collected, vec![17, 18, 19]);
+        // Indexing via get/newest should agree.
+        assert_eq!(rb.get(0), Some(&17));
+        assert_eq!(rb.get(2), Some(&19));
+        assert_eq!(rb.newest(0), Some(&19));
+        assert_eq!(rb.newest(2), Some(&17));
     }
 }
 
