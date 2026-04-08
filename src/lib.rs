@@ -19,6 +19,13 @@
 #![cfg_attr(not(test), no_std)]
 #![warn(missing_docs)]
 
+// fs/volume.rs uses `alloc::vec::Vec`. The kernel binary gets `alloc`
+// via main.rs's `extern crate alloc;`; the lib crate needs the same
+// declaration so the path resolves whether we're in test mode (where
+// std re-exports alloc) or no_std mode (where alloc must be brought
+// in explicitly).
+extern crate alloc;
+
 // `kernel/sync.rs` references `crate::arch::{disable_interrupts,
 // restore_interrupts}` when compiling for the kernel target. The lib
 // crate does not pull in the real `arch` module (it depends on more
@@ -38,6 +45,35 @@ mod arch {
     pub fn restore_interrupts(_prev: usize) {}
 }
 
+// `fs/mod.rs` and `fs/volume.rs` reference `crate::drivers::virtio`
+// for the BlkError type and the `read_block`/`write_block` block I/O
+// functions. The lib crate doesn't include the real virtio driver, so
+// here is a tiny stub: the BlkError variants match the real type for
+// source-level compatibility, and the block I/O functions panic if
+// actually called. Lib-crate tests never exercise volume.rs's disk
+// paths (they're gated to kernel-only), so the stubs are pure
+// type-system glue.
+#[allow(dead_code)]
+mod drivers {
+    pub mod virtio {
+        #[derive(Debug)]
+        pub enum BlkError {
+            SectorOutOfRange,
+            DeviceError(u8),
+            Timeout,
+        }
+
+        // Must match crate::hal::BLOCK_SIZE in the kernel binary.
+        pub fn read_block(_block: u32, _buf: &mut [u8; 512]) -> Result<(), BlkError> {
+            panic!("virtio::read_block stub: must not be called from the lib crate")
+        }
+
+        pub fn write_block(_block: u32, _buf: &[u8; 512]) -> Result<(), BlkError> {
+            panic!("virtio::write_block stub: must not be called from the lib crate")
+        }
+    }
+}
+
 // Pull just the host-compatible pieces of the kernel module tree into
 // the lib crate so the freelist allocator, sync primitives and
 // collections can be unit-tested. We do NOT load `kernel/mod.rs`
@@ -54,6 +90,14 @@ mod kernel {
     pub mod collection;
     pub mod sync;
 }
+
+// Pull the fs module tree in directly via fs/mod.rs (which loads bpb,
+// dir_entry, and volume). bpb.rs and dir_entry.rs are pure logic and
+// run as host tests; volume.rs's production code compiles fine against
+// the drivers stub above, but its tests are kernel-only and gated on
+// `target_os = "none"` so they don't fire here.
+#[allow(missing_docs, dead_code)]
+mod fs;
 
 #[cfg(test)]
 mod tests {

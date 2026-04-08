@@ -65,6 +65,14 @@ impl Bpb {
     }
 }
 
+// Bpb parser tests. The synthetic-sector tests below are pure logic
+// and run in BOTH contexts:
+//   - Kernel target (`cargo test --bin ease`): each test gets the
+//     custom `#[test_case]` attribute and runs in QEMU.
+//   - Host (`cargo test --lib`): each test gets the standard `#[test]`
+//     attribute and runs natively in milliseconds.
+// `cfg_attr` selects the right attribute per target. The `disk_image`
+// test at the bottom uses real virtio and is gated kernel-only.
 #[cfg(all(test, feature = "test-fs"))]
 mod test {
     use super::*;
@@ -105,10 +113,11 @@ mod test {
     }
 
     // =========================================================================
-    // Bpb tests
+    // Bpb tests (run in both QEMU and host)
     // =========================================================================
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_parse_valid() {
         let sector = make_test_bpb();
         let bpb = Bpb::parse(&sector).unwrap();
@@ -120,21 +129,24 @@ mod test {
         assert_eq!(bpb.sectors_per_fat, 32);
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_rejects_bad_jump_code() {
         let mut sector = make_test_bpb();
         sector[0] = 0x00;
         assert!(Bpb::parse(&sector).is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_rejects_missing_fat16_marker() {
         let mut sector = make_test_bpb();
         sector[54..62].copy_from_slice(b"FAT12   ");
         assert!(Bpb::parse(&sector).is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_rejects_wrong_sector_size() {
         let mut sector = make_test_bpb();
         // Set bytes_per_sector to 1024
@@ -143,7 +155,8 @@ mod test {
         assert!(Bpb::parse(&sector).is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_derived_geometry() {
         let sector = make_test_bpb();
         let bpb = Bpb::parse(&sector).unwrap();
@@ -155,7 +168,8 @@ mod test {
         assert_eq!(bpb.cluster_to_sector(3), 104);
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn bpb_accepts_alternate_jump_code() {
         let mut sector = make_test_bpb();
         sector[0] = 0xE9; // Second valid jump opcode
@@ -163,9 +177,10 @@ mod test {
     }
 
     // =========================================================================
-    // Disk image tests (require QEMU + virtio-blk)
+    // Disk image tests (kernel-only — require QEMU + virtio-blk)
     // =========================================================================
 
+    #[cfg(target_os = "none")]
     #[test_case]
     fn disk_image_bpb() {
         let mut buf = [0u8; SECTOR_SIZE];

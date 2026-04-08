@@ -107,6 +107,13 @@ impl DirEntry {
     }
 }
 
+// DirEntry tests. All tests below are pure logic with no driver
+// dependencies, so they run in BOTH contexts:
+//   - Kernel target (`cargo test --bin ease`): each test gets the
+//     custom `#[test_case]` attribute and runs in QEMU.
+//   - Host (`cargo test --lib`): each test gets the standard `#[test]`
+//     attribute and runs natively in milliseconds.
+// `cfg_attr` selects the right attribute per target.
 #[cfg(all(test, feature = "test-fs"))]
 mod test {
     use super::*;
@@ -115,7 +122,8 @@ mod test {
     // DirEntry::parse tests
     // =========================================================================
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_normal_file() {
         let bytes = make_dir_entry(b"HELLO   ", b"TXT", 0x20, 5, 1234);
         match DirEntry::parse(&bytes) {
@@ -148,7 +156,8 @@ mod test {
         e
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_no_extension() {
         let bytes = make_dir_entry(b"README  ", b"   ", 0x20, 3, 100);
         match DirEntry::parse(&bytes) {
@@ -160,33 +169,38 @@ mod test {
         }
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_empty_entry_returns_end() {
         let bytes = [0u8; 32];
         assert!(matches!(DirEntry::parse(&bytes), DirParseResult::End));
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_deleted_entry_returns_skip() {
         let mut bytes = make_dir_entry(b"OLD     ", b"TXT", 0x20, 2, 50);
         bytes[0] = 0xE5; // Mark as deleted
         assert!(matches!(DirEntry::parse(&bytes), DirParseResult::Skip));
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_lfn_entry_returns_skip() {
         let mut bytes = [0x42u8; 32]; // Non-zero first byte
         bytes[11] = 0x0F; // LFN attribute
         assert!(matches!(DirEntry::parse(&bytes), DirParseResult::Skip));
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_volume_label_returns_skip() {
         let bytes = make_dir_entry(b"MOSSVOL ", b"   ", 0x08, 0, 0);
         assert!(matches!(DirEntry::parse(&bytes), DirParseResult::Skip));
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn dir_entry_parse_volume_label_with_other_attrs_returns_skip() {
         // Volume label bit set alongside archive bit
         let bytes = make_dir_entry(b"MOSSVOL ", b"   ", 0x28, 0, 0);
@@ -197,7 +211,8 @@ mod test {
     // DirEntry::filename tests
     // =========================================================================
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn filename_with_extension() {
         let bytes = make_dir_entry(b"HELLO   ", b"TXT", 0x20, 5, 100);
         if let DirParseResult::Parsed(entry) = DirEntry::parse(&bytes) {
@@ -205,7 +220,8 @@ mod test {
         }
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn filename_no_extension() {
         let bytes = make_dir_entry(b"README  ", b"   ", 0x20, 3, 100);
         if let DirParseResult::Parsed(entry) = DirEntry::parse(&bytes) {
@@ -213,7 +229,8 @@ mod test {
         }
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn filename_full_length() {
         let bytes = make_dir_entry(b"12345678", b"ABC", 0x20, 2, 50);
         if let DirParseResult::Parsed(entry) = DirEntry::parse(&bytes) {
@@ -221,7 +238,8 @@ mod test {
         }
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn filename_short_name_short_ext() {
         let bytes = make_dir_entry(b"A       ", b"C  ", 0x20, 2, 10);
         if let DirParseResult::Parsed(entry) = DirEntry::parse(&bytes) {
@@ -233,67 +251,78 @@ mod test {
     // parse_83_name tests
     // =========================================================================
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_with_extension() {
         let (name, ext) = DirEntry::parse_83_name("TEST.TXT").unwrap();
         assert_eq!(&name, b"TEST    ");
         assert_eq!(&ext, b"TXT");
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_no_extension() {
         let (name, ext) = DirEntry::parse_83_name("README").unwrap();
         assert_eq!(&name, b"README  ");
         assert_eq!(&ext, b"   ");
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_lowercased() {
         let (name, ext) = DirEntry::parse_83_name("a.b").unwrap();
         assert_eq!(&name, b"A       ");
         assert_eq!(&ext, b"B  ");
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_full_length() {
         let (name, ext) = DirEntry::parse_83_name("12345678.ABC").unwrap();
         assert_eq!(&name, b"12345678");
         assert_eq!(&ext, b"ABC");
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_single_char() {
         let (name, ext) = DirEntry::parse_83_name("X.Y").unwrap();
         assert_eq!(&name, b"X       ");
         assert_eq!(&ext, b"Y  ");
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_empty() {
         assert!(DirEntry::parse_83_name("").is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_long_name() {
         assert!(DirEntry::parse_83_name("TOOLONGNAME.TXT").is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_long_ext() {
         assert!(DirEntry::parse_83_name("TEST.LONG").is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_multiple_dots() {
         assert!(DirEntry::parse_83_name("A.B.C").is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_non_ascii() {
         assert!(DirEntry::parse_83_name("café.txt").is_err());
     }
 
-    #[test_case]
+    #[cfg_attr(target_os = "none", test_case)]
+    #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_dot_only_name() {
         // ".TXT" has empty name part
         assert!(DirEntry::parse_83_name(".TXT").is_err());

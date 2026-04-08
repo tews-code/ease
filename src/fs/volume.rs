@@ -329,7 +329,13 @@ pub fn fat16_init() {
     *VOLUME.lock() = Some(vol);
 }
 
-#[cfg(all(test, feature = "test-fs"))]
+// Volume tests are kernel-only because they exercise the real virtio
+// block device. The lib crate stubs out `read_block`/`write_block` so
+// volume.rs's production code compiles, but its tests can't run on
+// host without a disk mock — that's a follow-up refactor (the
+// "BlockDevice trait" approach). For now this gate keeps lib-test
+// builds clean.
+#[cfg(all(test, target_os = "none", feature = "test-fs"))]
 mod test {
     use super::*;
 
