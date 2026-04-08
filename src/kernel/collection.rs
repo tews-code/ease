@@ -328,6 +328,123 @@ impl<T: Copy, const N: usize> SpscRingBuf<T, N> {
     }
 }
 
+// Host-runnable concurrency tests for SpscRingBuf. These run under
+//     cargo test --lib --target $HOST_TARGET
+// and are verified clean under Miri:
+//     cargo +nightly miri test --lib --target $HOST_TARGET
+//
+// The headline test (`spsc_concurrent_producer_consumer`) spawns a
+// real producer + consumer thread pair and pushes a stream of values
+// across them. Miri can simulate multi-threaded execution and check
+// the atomic ordering on push()/pop() against the actual reads and
+// writes of the underlying storage cells; this is the kind of bug
+// that real hardware almost never reproduces because x86 / aarch64
+// have stronger native ordering than the language model permits.
+//
+// To stress-test more interleavings, run with
+//     MIRIFLAGS="-Zmiri-many-seeds=0..32" cargo +nightly miri test --lib ...
+//
+// Gated on `not(target_os = "none")` so the kernel build (and the
+// existing QEMU `#[test_case]` framework) is unaffected.
+#[cfg(all(test, not(target_os = "none")))]
+mod host_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+    use std::vec::Vec;
+
+    #[test]
+    fn spsc_basic_push_pop_fifo() {
+        // Single-threaded sanity: push to capacity, pop in FIFO order.
+        // SpscRingBuf<_, N> has usable capacity N-1 because one slot is
+        // sacrificed to distinguish empty from full.
+        let rb: SpscRingBuf<u32, 8> = SpscRingBuf::new();
+        for i in 0..7u32 {
+            assert!(rb.push(i).is_ok(), "push {} unexpectedly failed", i);
+        }
+        // Buffer is now full
+        assert!(rb.is_full());
+        assert_eq!(rb.push(99), Err(99), "push to full should return value");
+        // Pop them back in order
+        for i in 0..7u32 {
+            assert_eq!(rb.pop(), Some(i));
+        }
+        assert!(rb.is_empty());
+        assert_eq!(rb.pop(), None);
+    }
+
+    #[test]
+    fn spsc_wraparound_preserves_fifo() {
+        // Exercise wraparound by repeatedly pushing/popping batches that
+        // don't divide the buffer size evenly. Each batch advances head
+        // and tail by 3, so over many iterations they cross the modulus
+        // boundary several times.
+        let rb: SpscRingBuf<u32, 4> = SpscRingBuf::new();
+        for batch in 0..20u32 {
+            let base = batch * 3;
+            assert!(rb.push(base).is_ok());
+            assert!(rb.push(base + 1).is_ok());
+            assert!(rb.push(base + 2).is_ok());
+            assert_eq!(rb.pop(), Some(base));
+            assert_eq!(rb.pop(), Some(base + 1));
+            assert_eq!(rb.pop(), Some(base + 2));
+        }
+        assert!(rb.is_empty());
+    }
+
+    #[test]
+    fn spsc_concurrent_producer_consumer() {
+        // The headline Miri test. Producer pushes 0..COUNT in order on
+        // one thread; consumer pops COUNT values on another. SPSC must
+        // preserve FIFO order regardless of how the threads interleave.
+        //
+        // What Miri verifies here:
+        //   - No data race on the storage cells (would happen if Acquire
+        //     /Release ordering on head/tail were too weak — e.g. Relaxed)
+        //   - No read of an uninitialised slot (would happen if the
+        //     consumer's "is there data" check synced incorrectly)
+        //   - FIFO order across all observed interleavings
+        //
+        // COUNT is small enough that Miri finishes in a few seconds even
+        // when stressed with many seeds.
+        const COUNT: u32 = 100;
+        let rb: Arc<SpscRingBuf<u32, 8>> = Arc::new(SpscRingBuf::new());
+
+        let producer = {
+            let rb = Arc::clone(&rb);
+            thread::spawn(move || {
+                for i in 0..COUNT {
+                    while rb.push(i).is_err() {
+                        std::hint::spin_loop();
+                    }
+                }
+            })
+        };
+
+        let consumer = {
+            let rb = Arc::clone(&rb);
+            thread::spawn(move || {
+                let mut received: Vec<u32> = Vec::with_capacity(COUNT as usize);
+                while received.len() < COUNT as usize {
+                    if let Some(v) = rb.pop() {
+                        received.push(v);
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+                received
+            })
+        };
+
+        producer.join().expect("producer panicked");
+        let received = consumer.join().expect("consumer panicked");
+
+        // Producer pushed 0..COUNT in order; SPSC must preserve that.
+        let expected: Vec<u32> = (0..COUNT).collect();
+        assert_eq!(received, expected, "FIFO order violated");
+    }
+}
+
 // QEMU tests: gated on target_os = "none" so the kernel-only `#[test_case]`
 // custom test framework does not collide with libtest when this file is
 // compiled as part of the lib crate's host tests.
