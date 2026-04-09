@@ -32,6 +32,14 @@ cargo test --package ease --lib --target "$HOST_TARGET"
 # cargo test --package ease --tests --target "$HOST_TARGET"
 
 echo ""
+echo "=== Miri (host) ==="
+if rustup +nightly component list --installed 2>/dev/null | grep -q '^miri'; then
+    cargo +nightly miri test --package ease --lib --target "$HOST_TARGET"
+else
+    echo "skipped: 'rustup +nightly component add miri' to enable"
+fi
+
+echo ""
 echo "=== Documentation ==="
 cargo doc --no-deps --target riscv32imac-unknown-none-elf
 
