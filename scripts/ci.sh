@@ -4,8 +4,15 @@
 
 set -e  # Exit immediately on any failure
 
-ALLOCATOR="${ALLOCATOR:-alloc-freelist}"
-FEATURES="${1:-test-all},$ALLOCATOR"
+ALLOCATOR="${1:-alloc-slab}"
+FEATURES="${TEST_SET:-test-all},$ALLOCATOR"
+
+case "$ALLOCATOR" in
+    alloc-slab|alloc-freelist|alloc-bump) ;;
+    *) echo "error: unknown allocator '$ALLOCATOR'" >&2
+       echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump" >&2
+       exit 1 ;;
+esac
 
 # Unconditionally reformat to pass clippy
 cargo fmt

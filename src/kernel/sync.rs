@@ -17,8 +17,10 @@ use crate::arch::{disable_interrupts, restore_interrupts};
 /// it is a plain `SpinLock`, which has the same `lock()` interface and
 /// guard semantics, so the surrounding code is identical.
 #[cfg(target_os = "none")]
+#[allow(dead_code)]
 pub type AllocatorLock<T> = IrqSpinLock<T>;
 #[cfg(not(target_os = "none"))]
+#[allow(dead_code)]
 pub type AllocatorLock<T> = SpinLock<T>;
 
 // IrqSpinLock and the interrupt-disabling primitives are only meaningful on

@@ -1,9 +1,8 @@
 // Free list allocator
 
-use core::{alloc::GlobalAlloc, ptr::NonNull};
-
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use core::{alloc::GlobalAlloc, ptr::NonNull};
 
 use crate::kernel::alloc::align_up;
 use crate::kernel::sync::AllocatorLock;
@@ -25,15 +24,15 @@ const _: () = assert!(BASE_ALIGN >= core::mem::align_of::<FreeBlock>());
 const _: () = assert!(BASE_ALIGN.is_power_of_two());
 
 #[cfg(test)]
-static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
+pub(crate) static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static ALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+pub(crate) static ALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static DEALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
+pub(crate) static DEALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
+pub(crate) static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
-static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
 // Each freed memory block has a size and a link to the next free block
 pub(crate) struct FreeBlock {
@@ -58,7 +57,7 @@ impl FreeBlock {
     // a new block gets the remainder and is linked after self.
     // Returns a pointer to the newly create free block
     unsafe fn split_right(&mut self, offset: usize) -> *mut FreeBlock {
-        let new_ptr = (self.addr() + offset) as *mut FreeBlock;
+        let new_ptr = unsafe { (self as *mut FreeBlock).byte_add(offset) };
         unsafe {
             core::ptr::write(
                 new_ptr,
@@ -172,8 +171,8 @@ unsafe impl GlobalAlloc for FreeBlockList {
         while let Some(free_block) = current_free_block.0 {
             let mut current = unsafe { &mut *free_block.as_ptr() };
             // Aligning against this address may result in padding
-            let padding_size =
-                align_up(current.addr(), BASE_ALIGN.max(layout.align())) - current.addr();
+            let aligned_addr = align_up(current.addr(), BASE_ALIGN.max(layout.align()));
+            let padding_size = aligned_addr - current.addr();
             if current.size >= aligned_size + padding_size {
                 // Found a free block big enough for the allocation
                 // Avoid leaking padding - create a free block before the allocation
@@ -204,13 +203,11 @@ unsafe impl GlobalAlloc for FreeBlockList {
                 #[cfg(test)]
                 let _ = PADDING_BYTES.fetch_add(padding_size as u32, Ordering::Relaxed);
                 #[cfg(test)]
-                let _ = HEAP_TOP.fetch_max(
-                    current.addr() + padding_size + aligned_size,
-                    Ordering::Relaxed,
-                );
+                let _ = HEAP_TOP.fetch_max(current.addr() + aligned_size, Ordering::Relaxed);
 
                 // Return the allocation pointer
-                return align_up(current.addr(), layout.align().max(BASE_ALIGN)) as *mut u8;
+                let offset = aligned_addr - current.addr();
+                return unsafe { (current as *mut FreeBlock).byte_add(offset).cast::<u8>() };
             } else {
                 // Advance the cursor
                 prev_free_block = current_free_block;
@@ -527,143 +524,5 @@ mod host_tests {
         let bp = unsafe { a.alloc(big) };
         assert!(!bp.is_null(), "fragmented heap did not consolidate");
         unsafe { a.dealloc(bp, big) };
-    }
-}
-
-// QEMU benchmark suite for the global allocator. Runs as part of
-// `cargo test --bin ease`. Gated additionally on `target_os = "none"` so
-// it does not get pulled into the lib crate's host test build, which has
-// no global allocator and no `crate::println!` / `crate::bench`.
-#[cfg(all(test, target_os = "none", feature = "test-alloc"))]
-pub mod test {
-    use alloc::boxed::Box;
-    use alloc::string::ToString;
-    use alloc::vec::Vec;
-    use core::alloc::Layout;
-    use core::hint::black_box;
-
-    use super::*;
-
-    use crate::println;
-
-    mod baseline {
-        pub(super) const ONE_BYTE_ALLOC: u64 = 1_000;
-        pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
-        pub(super) const AWKWARD_ALLOC: u64 = 50_000;
-        pub(super) const AWKWARD_ALLOC_ITERS: u32 = 20;
-        pub(super) const CORE_SYNC_BASE: u64 = 300;
-        pub(super) const CORE_SYNC_ITERS: u32 = 200_000;
-    }
-
-    const TOLERANCE_PERC: u64 = 50;
-
-    fn allocate_one_byte() {
-        let layout = Layout::new::<u8>();
-        let alloc_ptr = black_box(unsafe { crate::FREE_BLOCK_LIST.alloc(layout) });
-        let _ = black_box(unsafe { crate::FREE_BLOCK_LIST.dealloc(alloc_ptr, layout) });
-    }
-
-    #[repr(C, align(4096))]
-    struct BigAlloc {
-        val: bool,
-    }
-    fn allocate_deallocate_awkward() {
-        let _a = black_box(Box::new([0x5u128; 13]));
-        let _b = black_box(Box::new([0x3u16; 1_001]));
-        let _c = black_box(Box::new(true));
-        let _d = black_box(Box::new([0x7u64; 513]));
-        let _e = black_box(Box::new(false));
-        let _f = black_box(Box::new([0x9u32; 257]));
-        let _g = black_box(Box::new([0xbu8; 2_017]));
-        let _h = black_box(Box::new(BigAlloc { val: true }));
-    }
-
-    fn bare_sync_timing() {
-        let _ = black_box(crate::FREE_BLOCK_LIST.sentinel.lock());
-    }
-
-    // Simulate allocations typical of shell activity
-    fn allocator_benchmark() {
-        let s = "This is a string that contains characters that fill most of the line";
-        for _ in 0..11 {
-            let _b = Box::new([1u8; 1024]);
-            for _ in 0..5 {
-                let _s = s.to_string();
-                let mut v = Vec::new();
-                for n in 0..512 {
-                    v.push(n);
-                }
-                for _ in 0..512 {
-                    let _ = v.pop();
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    fn allocate_or_bust() {
-        for i in 0..1_000_000 {
-            let _b = black_box(Box::new([1u8; 1024]));
-            if i % 50 == 0 {
-                println!("  allocate_or_bust: {} allocations", i);
-            }
-        }
-    }
-
-    #[test_case]
-    fn alloc_benchmarks() {
-        println!();
-        println!("====== ALLOCATOR ====== ");
-        println!();
-        // check_regression includes warm up call which will also initialise if needs be; no need for additional initialisation
-        crate::bench::check_regression(
-            "alloc_one_byte",
-            baseline::ONE_BYTE_ALLOC,
-            TOLERANCE_PERC,
-            baseline::ONE_BYTE_ALLOC_ITERS,
-            || allocate_one_byte(),
-        );
-
-        println!();
-
-        crate::bench::check_regression(
-            "alloc_awkward",
-            baseline::AWKWARD_ALLOC,
-            TOLERANCE_PERC,
-            baseline::AWKWARD_ALLOC_ITERS,
-            || allocate_deallocate_awkward(),
-        );
-
-        println!();
-        println!("  Total padding: {}", PADDING_BYTES.load(Ordering::Relaxed));
-
-        crate::bench::check_regression(
-            "core_sync_timing",
-            baseline::CORE_SYNC_BASE,
-            TOLERANCE_PERC,
-            baseline::CORE_SYNC_ITERS,
-            || bare_sync_timing(),
-        );
-
-        println!();
-        allocator_benchmark();
-        println!();
-        println!(
-            "  Allocation count: {}",
-            ALLOC_COUNT.load(Ordering::Relaxed)
-        );
-        println!(
-            "  Allocated: {} bytes",
-            ALLOCATED_BYTES.load(Ordering::Relaxed) - DEALLOCATED_BYTES.load(Ordering::Relaxed)
-        );
-        let heap_used = HEAP_TOP.load(Ordering::Relaxed) - crate::heap_start_addr();
-        println!("  Heap used: {} bytes", heap_used);
-
-        // Comment out to continue CI
-        //allocate_or_bust();
-
-        println!();
-        println!("===================== ");
-        println!();
     }
 }

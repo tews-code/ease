@@ -31,7 +31,12 @@
 use core::fmt::Write;
 
 use crate::drivers::ramfb::FrameBuffer;
+#[cfg(feature = "alloc-bump")]
+use crate::kernel::alloc::bump::Bump;
+#[cfg(feature = "alloc-freelist")]
 use crate::kernel::alloc::freelist::FreeBlockList;
+#[cfg(feature = "alloc-slab")]
+use crate::kernel::alloc::slab::Slab;
 
 extern crate alloc;
 
@@ -64,7 +69,16 @@ unsafe extern "C" {
 }
 
 #[global_allocator]
+#[cfg(feature = "alloc-freelist")]
 pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
+
+#[global_allocator]
+#[cfg(feature = "alloc-slab")]
+pub(crate) static SLAB: Slab = Slab::new();
+
+#[global_allocator]
+#[cfg(feature = "alloc-bump")]
+pub(crate) static BUMP: Bump = Bump::new();
 
 /// Initialise the global allocator from the linker-defined heap region.
 /// Must be called exactly once during boot, before any allocations.
@@ -74,7 +88,18 @@ fn init_global_allocator() {
     // Safety: The heap region is defined by the linker, exclusively owned
     // by the allocator, FreeBlock-aligned, and large enough to hold a
     // FreeBlock header.
-    unsafe { FREE_BLOCK_LIST.init(start, size) };
+    #[cfg(feature = "alloc-freelist")]
+    unsafe {
+        FREE_BLOCK_LIST.init(start, size)
+    };
+    #[cfg(feature = "alloc-slab")]
+    unsafe {
+        SLAB.init(start, size)
+    };
+    #[cfg(feature = "alloc-bump")]
+    unsafe {
+        BUMP.init(start, size)
+    };
 }
 
 /// Returns the address of `__heap_start` for diagnostics (e.g. computing
@@ -93,8 +118,6 @@ fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::timer::init();
     init_global_allocator();
-    #[cfg(feature = "alloc-bump")]
-    kernel::alloc::init();
 
     // Configure PLIC
     drivers::plic::set_threshold(0);
