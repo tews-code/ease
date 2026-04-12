@@ -41,7 +41,7 @@ impl UartWriter {
             mmio::read8(uart::BASE, IER) | THRE_INTERRUPT,
         );
 
-        #[cfg(test)]
+        #[cfg(all(test, feature = "test-io"))]
         crate::io::test_io::capture(byte);
     }
 
@@ -66,7 +66,7 @@ pub fn direct_write_byte(byte: u8) {
     }
     mmio::write8(uart::BASE, THR, byte);
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-io"))]
     crate::io::test_io::capture(byte);
 }
 

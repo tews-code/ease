@@ -60,7 +60,7 @@ pub fn busy_wait_ms(ms: usize) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-timer"))]
 mod tests {
     use super::*;
 

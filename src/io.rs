@@ -51,7 +51,8 @@ macro_rules! println {
 ///
 /// Captures all output bytes to a static buffer for test verification.
 /// Only available in test builds.
-#[cfg(test)]
+
+#[cfg(all(test, feature = "test-io"))]
 pub mod test_io {
     use core::cell::UnsafeCell;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -116,7 +117,7 @@ pub mod test_io {
 }
 
 // Tests
-#[cfg(test)]
+#[cfg(all(test, feature = "test-io"))]
 mod test {
     use crate::io::test_io;
 

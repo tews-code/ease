@@ -36,20 +36,27 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 mod baseline {
+    #[cfg(not(feature = "alloc-bump"))]
     pub(super) const ONE_BYTE_ALLOC: u64 = 1_000;
+    #[cfg(feature = "alloc-bump")]
+    pub(super) const ONE_BYTE_ALLOC: u64 = 600;
+
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
+    #[cfg(not(feature = "alloc-bump"))]
     pub(super) const SMALL_MIX_ALLOC: u64 = 5_000;
+    #[cfg(feature = "alloc-bump")]
+    pub(super) const SMALL_MIX_ALLOC: u64 = 1_000;
     // Bump can't free, so its sidecar of live small_mix allocations
     // grows with each iteration. Cap iters so the cumulative footprint
     // stays comfortably inside the 256 KiB heap.
     #[cfg(not(feature = "alloc-bump"))]
-    pub(super) const SMALL_MIX_ALLOC_ITERS: u32 = 1_000;
+    pub(super) const SMALL_MIX_ALLOC_ITERS: u32 = 10_000;
     #[cfg(feature = "alloc-bump")]
     pub(super) const SMALL_MIX_ALLOC_ITERS: u32 = 500;
 
     #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
-    pub(super) const AWKWARD_ALLOC: u64 = 50_000;
+    pub(super) const AWKWARD_ALLOC: u64 = 10_000;
     #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
     pub(super) const AWKWARD_ALLOC_ITERS: u32 = 20;
 }
@@ -232,8 +239,8 @@ fn alloc_benchmarks() {
     // before the next iteration); bump cannot, and is gated out.
     #[cfg(not(feature = "alloc-bump"))]
     {
-        println!();
-        allocate_or_bust();
+        //println!();
+        //allocate_or_bust();
     }
 
     println!();

@@ -66,7 +66,7 @@ where
     f(&mut clint)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-clint"))]
 mod tests {
     use crate::drivers::clint::Clint;
 

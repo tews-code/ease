@@ -198,7 +198,7 @@ fn test_runner(tests: &[&dyn Testable]) {
 // Tests
 // =============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-bss"))]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
 

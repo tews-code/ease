@@ -91,7 +91,7 @@ struct TerminalEmulator {
 }
 
 impl TerminalEmulator {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "test-shell"))]
     fn cursor_pos(&self) -> (usize, usize) {
         (self.buffer.cy, self.buffer.cx)
     }
@@ -401,7 +401,7 @@ mod benchmarks {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-shell"))]
 mod tests {
     use super::*;
     use crate::kernel::collection::StackVec;

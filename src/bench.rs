@@ -69,6 +69,7 @@ pub fn run_avg<F: FnMut()>(name: &str, iterations: u32, mut f: F) {
 }
 
 /// Default tolerance for regression detection (20%)
+#[allow(dead_code)]
 pub const DEFAULT_TOLERANCE_PERCENT: u64 = 20;
 
 /// Check for performance regression
@@ -135,6 +136,7 @@ pub fn check_regression<F: FnMut()>(
 }
 
 /// Check for regression with default tolerance (20%)
+#[allow(dead_code)]
 pub fn check<F: FnMut()>(name: &str, baseline: u64, iterations: u32, f: F) {
     check_regression(name, baseline, DEFAULT_TOLERANCE_PERCENT, iterations, f);
 }

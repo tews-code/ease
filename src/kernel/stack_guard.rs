@@ -12,7 +12,7 @@ pub fn check() -> bool {
     unsafe { core::ptr::read_volatile(&raw const __stack_guard as *const usize) == 0xDEAD_BEEF }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-stack-guard"))]
 mod tests {
     use super::*;
     use crate::arch::{disable_interrupts, restore_interrupts};
