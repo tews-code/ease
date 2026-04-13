@@ -1,8 +1,86 @@
 // Free list allocator
 
+// Memory (1 byte wide)
+//
+// __heap_start/
+// 0x8001_0000  +-----------+
+//              |0  next    |   next = NonNull pointer to 0x8001_0014 (4 bytes)
+//              +-----------+
+//              |1  next    |
+//              +-----------+
+//              |2  next    |
+//              +-----------+
+//              |3  next    |
+//              +-----------+
+//              |4  size    |   size = 12 bytes - Note count of 12 starts at 0x8001_0000 index 0, not from size's address
+//              +-----------+
+//              |5  size    |
+//              +-----------+
+//              |6  size    |
+//              +-----------+
+//              |7  size    |   Free block is 8 bytes in total
+//              +-----------+
+//              |8 garbage  |
+//              +-----------+
+//              |9 garbage  |
+//              +-----------+
+//              |10 garbage |
+//              +-----------+
+//              |11 garbage |
+// 0x8001_000c  +-----------+
+//              |   alloc   |   1 byte allocated
+//              +-----------+
+//              |   pad     |   Minimum allocation is 8 bytes to accommodate a free block on dealloc
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+// 0x8001_0014  +-----------+
+//              |0  next    |  next = None
+//              +-----------+
+//              |1  next    |
+//              +-----------+
+//              |2  next    |
+//              +-----------+
+//              |3  next    |
+//              +-----------+
+//              |4  size    |   size = 8 bytes (minimum size)
+//              +-----------+
+//              |5  size    |
+//              +-----------+
+//              |6  size    |
+//              +-----------+
+//              |7  size    |   Free block is 8 bytes in total
+// 0x8001_001c  +-----------+
+//              |   alloc   |   2 byte allocation
+//              +-----------+
+//              |   alloc   |
+//              +-----------+
+//              |   pad     |   Padding
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+//              +-----------+
+//              |   pad     |
+// 0x8001_0024/ +-----------+
+// __heap_end
+
+use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use core::{alloc::GlobalAlloc, ptr::NonNull};
 
 use crate::kernel::alloc::align_up;
 use crate::kernel::sync::AllocatorLock;
@@ -36,53 +114,56 @@ pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
 // Each freed memory block has a size and a link to the next free block
 pub(crate) struct FreeBlock {
-    next: FreeBlockPtr,
+    next: *mut FreeBlock,
     size: usize,
 }
 
 impl FreeBlock {
-    fn addr(&self) -> usize {
-        (self as *const FreeBlock) as usize
-    }
-
-    fn as_ptr(&mut self) -> *mut FreeBlock {
-        self as *mut FreeBlock
-    }
-
-    fn as_free_block_ptr(&mut self) -> FreeBlockPtr {
-        unsafe { FreeBlockPtr(Some(NonNull::new_unchecked(self.as_ptr()))) }
-    }
-
     // Split this block at `offset` bytes. This block shrinks to `offset`,
     // a new block gets the remainder and is linked after self.
     // Returns a pointer to the newly create free block
-    unsafe fn split_right(&mut self, offset: usize) -> *mut FreeBlock {
-        let new_ptr = unsafe { (self as *mut FreeBlock).byte_add(offset) };
+    //
+    // Safety: Caller must ensure `this` points to a valid FreeBlock
+    // and offset must be larger than a free block to allow for a valid split
+    unsafe fn split_right(this: *mut FreeBlock, offset: usize) -> (*mut FreeBlock, *mut FreeBlock) {
+        assert!(
+            offset >= core::mem::size_of::<FreeBlock>(),
+            "split offset too small for a FreeBlock"
+        );
+        assert!(
+            unsafe { (*this).size - offset >= core::mem::size_of::<FreeBlock>() },
+            "split remainder too small for a FreeBlock"
+        );
+        // Safety: This is a valid aligned pointer to deference and `next` and `size` are valid struct members
         unsafe {
+            let new = this.byte_add(offset);
             core::ptr::write(
-                new_ptr,
+                new,
                 FreeBlock {
-                    next: self.next,
-                    size: self.size - offset,
+                    next: (*this).next,
+                    size: (*this).size - offset,
                 },
             );
+            (*this).next = new;
+            (*this).size = offset;
+            (this, new)
         }
-        self.next = unsafe { FreeBlockPtr(Some(NonNull::new_unchecked(new_ptr))) };
-        self.size = offset;
-        new_ptr
     }
 
-    fn end_addr(&self) -> usize {
-        self.addr() + self.size
+    // Computes the end address of a free block for comparison to next block or dealloc address
+    //
+    // Note - associated function to take *mut, in order to maintain pointer provenance
+    //
+    // Safety: Caller must ensure that `this` is a pointer to a valid FreeBlock
+    #[allow(dead_code)]
+    unsafe fn end_addr(this: *mut FreeBlock) -> usize {
+        // Safety: All free blocks are aligned and valid for reading the `size` struct member
+        unsafe { this.addr() + (*this).size }
     }
 }
 
-// Pointer to a free block
-#[derive(Clone, Copy)]
-struct FreeBlockPtr(Option<NonNull<FreeBlock>>);
-
-//Safety: Free blocks point only to heap memory and hold no thread local information hence Send
-unsafe impl Send for FreeBlockPtr {}
+// Safety: Free Block only references heap memory and holds no thread-local data, so Send
+unsafe impl Send for FreeBlock {}
 
 // Protect the list with the kernel's allocator lock. On the kernel target
 // this is `IrqSpinLock` (disables interrupts in the critical section); on
@@ -97,7 +178,7 @@ impl FreeBlockList {
     pub const fn new() -> Self {
         Self {
             sentinel: AllocatorLock::new(FreeBlock {
-                next: FreeBlockPtr(None),
+                next: core::ptr::null_mut(),
                 size: 0,
             }),
         }
@@ -115,9 +196,13 @@ impl FreeBlockList {
     ///   - `start` is aligned to `align_of::<FreeBlock>()`.
     ///   - `size >= size_of::<FreeBlock>()`.
     pub unsafe fn init(&self, start: *mut u8, size: usize) {
-        let mut free_block_list_head = self.sentinel.lock();
-        // Ensure this is the only initialisation
-        assert!(free_block_list_head.next.0.is_none());
+        // Initialise the sentinel (in the BSS segment) and the first free block covering the whole heap
+        let mut sentinel_guard = self.sentinel.lock();
+        // Only initialise once
+        assert!(
+            sentinel_guard.next.is_null(),
+            "trying to initialise free list twice"
+        );
         assert!(
             (start as usize).is_multiple_of(core::mem::align_of::<FreeBlock>()),
             "heap start must be FreeBlock-aligned"
@@ -126,21 +211,23 @@ impl FreeBlockList {
             size >= core::mem::size_of::<FreeBlock>(),
             "heap too small to hold a FreeBlock"
         );
-        let new_free_block_ptr = start as *mut FreeBlock;
-        // Safety: caller guarantees the region is valid for writes and aligned
+        // First create the free block that covers the empty heap
+        // Derive provenance from the heap via `start`
+        let new = start as *mut FreeBlock;
+        // Safety: Heap start is aligned and save for writes from linker script
         unsafe {
             core::ptr::write(
-                new_free_block_ptr,
+                new,
                 FreeBlock {
-                    next: FreeBlockPtr(None),
+                    next: core::ptr::null_mut(),
                     size,
                 },
-            );
+            )
         }
-        // Safety: new_free_block_ptr is non-null and now points at an
-        // initialised FreeBlock.
-        free_block_list_head.next =
-            unsafe { FreeBlockPtr(Some(NonNull::new_unchecked(new_free_block_ptr))) };
+        // Now link this new block to the sentinel
+        // Safety: new is non null as just created from heap pointer
+        sentinel_guard.next = new;
+        sentinel_guard.size = 0;
     }
 }
 
@@ -158,105 +245,93 @@ unsafe impl GlobalAlloc for FreeBlockList {
     //            prev_free_block (copy)
 
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        // First walk the free list looking for a valid free block to reuse
-        let mut free_block_list_head_guard = self.sentinel.lock();
-        // Manual cursor for walking the list as using a while loop
-        let mut current_free_block = free_block_list_head_guard.next;
-        // Track previous block for linking / unlinking
-        let mut prev_free_block = free_block_list_head_guard.as_free_block_ptr();
+        let mut sentinel_guard = self.sentinel.lock();
+        // Walk the free list looking for a valid slot to reuse; block at end is all remaining memory; otherwise OOM
+        // Use pointers to keep heap provenance
+        // At start the current needs to be the `.next` of the sentinel, while prev is the sentinel itself
+        let mut prev = core::ptr::addr_of_mut!(*sentinel_guard);
+        let mut current = unsafe { (*prev).next };
+        // Work out the aligned size
+        let alloc_size = align_up(layout.size(), BASE_ALIGN);
 
-        // First work out the aligned up size we are looking to insert
-        let aligned_size = align_up(layout.size(), BASE_ALIGN);
-
-        while let Some(free_block) = current_free_block.0 {
-            let mut current = unsafe { &mut *free_block.as_ptr() };
-            // Aligning against this address may result in padding
-            let aligned_addr = align_up(current.addr(), BASE_ALIGN.max(layout.align()));
-            let padding_size = aligned_addr - current.addr();
-            if current.size >= aligned_size + padding_size {
-                // Found a free block big enough for the allocation
-                // Avoid leaking padding - create a free block before the allocation
-                // Note on 32 bit with BASE_ALIGN of 8, this only applies to x128 and higher repr
+        while !current.is_null() {
+            // Padding requirement if we were reuse this free block to allocate
+            let mut padding_size =
+                align_up(current.addr(), BASE_ALIGN.max(layout.align())) - current.addr();
+            // Can padding and alloc fit into the free block?
+            if unsafe { (*current).size } >= padding_size + alloc_size {
+                // It fits!
+                // Is the padding large enough to split off as its own block?
                 if padding_size >= core::mem::size_of::<FreeBlock>() {
-                    // Split the block
-                    let next_ptr = unsafe { current.split_right(padding_size) };
-                    // Manually move the cursor over the padding free block we have just created
-                    prev_free_block = current_free_block;
-                    current = unsafe { &mut *next_ptr };
+                    // We can split off the padding as a new free block - waste not, want not
+                    (prev, current) = unsafe { FreeBlock::split_right(current, padding_size) };
+                    padding_size = 0;
                 }
-                // We can allocate memory here
-                // Create a free block at the end of the allocation if there is enough space
-                if current.size - aligned_size >= BASE_ALIGN {
-                    // We have enough space to add a new free block at the end of this space
-                    let _ = unsafe { current.split_right(aligned_size) };
+                // Is there enough left over space at the end of the allocation to fit another free block?
+                if unsafe { (*current).size } - alloc_size >= core::mem::size_of::<FreeBlock>() {
+                    // We can add a free block after the allocation
+                    (current, _) = unsafe { FreeBlock::split_right(current, alloc_size) };
                 }
-                // Allocation fits perfectly into the current free block
-                // Unlink the current free block
-                // SAFETY: prev_free_block is always Some — sentinel guarantees it
-                let prev = unsafe { &mut *prev_free_block.0.unwrap_unchecked().as_ptr() };
-                prev.next = current.next;
+                // Now link previous to next, skipping over current which will be allocated
+                unsafe { (*prev).next = (*current).next };
 
                 #[cfg(test)]
                 let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
                 #[cfg(test)]
-                let _ = ALLOCATED_BYTES.fetch_add(aligned_size as u32, Ordering::Relaxed);
+                let _ = ALLOCATED_BYTES.fetch_add(alloc_size as u32, Ordering::Relaxed);
                 #[cfg(test)]
                 let _ = PADDING_BYTES.fetch_add(padding_size as u32, Ordering::Relaxed);
                 #[cfg(test)]
-                let _ = HEAP_TOP.fetch_max(current.addr() + aligned_size, Ordering::Relaxed);
+                let _ =
+                    HEAP_TOP.fetch_max(unsafe { FreeBlock::end_addr(current) }, Ordering::Relaxed);
 
-                // Return the allocation pointer
-                let offset = aligned_addr - current.addr();
-                return unsafe { (current as *mut FreeBlock).byte_add(offset).cast::<u8>() };
+                // Return the allocated pointer
+                return unsafe { current.byte_add(padding_size) } as *mut u8;
             } else {
-                // Advance the cursor
-                prev_free_block = current_free_block;
-                current_free_block = current.next;
+                // Move the cursor forward
+                prev = current;
+                current = unsafe { (*current).next };
             }
         }
-        // We have reached the tail of the list without finding a suitable free block
-        // OOM
+        // We are out of free blocks and out of memory
         core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
-        // Walk the free list so that we can add the new free block at an address-related point
-        let mut free_block_list_head_guard = self.sentinel.lock();
-        // Create a manual cursor as we will use a while loop
-        let mut current_free_block = free_block_list_head_guard.next;
-        // Also keep track of previous free block for coalescing
-        let mut prev_free_block = free_block_list_head_guard.as_free_block_ptr();
-
+        let mut sentinel_guard = self.sentinel.lock();
+        // Walk the free list looking for the address-related position to free;
+        // Use pointers to keep heap provenance
+        // At start the current needs to be the `.next` of the sentinel, while prev is the sentinel itself
+        let mut prev = core::ptr::addr_of_mut!(*sentinel_guard);
+        let mut current = unsafe { (*prev).next };
         // Deallocation size we're trying to fit
         let dealloc_size = align_up(layout.size(), BASE_ALIGN);
 
-        while let Some(free_block) = current_free_block.0 {
-            let current = unsafe { &mut *free_block.as_ptr() };
-
-            // Safety: prev is defined as Some in the sentinel and never set to None
-            let prev = unsafe { &mut *prev_free_block.0.unwrap_unchecked().as_ptr() };
-
+        while !current.is_null() {
             // Check if current free block address is after the dealloc address
-            if current.addr() > dealloc_ptr as usize {
+            if current.addr() > dealloc_ptr.addr() {
                 // We have found the right place to add the new free block
                 // Sandwiched between two free blocks:  prev | dealloc | current
                 // Check if we can merge with previous free block
-                let can_merge_left = prev.end_addr() == dealloc_ptr as usize;
+                let can_merge_left = unsafe { FreeBlock::end_addr(prev) } == dealloc_ptr.addr();
                 // Check if we can merge with the next free block
-                let can_merge_right =
-                    dealloc_ptr as usize + dealloc_size == current.as_ptr() as usize;
+                let can_merge_right = dealloc_ptr.addr() + dealloc_size == current.addr();
 
                 if can_merge_left {
                     if can_merge_right {
                         // We can extend the prev block across the dealloc region and the current block
-                        prev.size += dealloc_size + current.size;
-                        prev.next = current.next;
+                        // Safety: both current and prev have been identified as valid free blocks
+                        unsafe {
+                            (*prev).size += dealloc_size + (*current).size;
+                            (*prev).next = (*current).next;
+                        }
                         #[cfg(test)]
                         let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
                         return;
                     } else {
                         // We can extend the previous block over the dealloc region
-                        prev.size += dealloc_size;
+                        // Safety: prev points to a valid free block
+                        unsafe { (*prev).size += dealloc_size };
                         #[cfg(test)]
                         let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
                         return;
@@ -264,25 +339,33 @@ unsafe impl GlobalAlloc for FreeBlockList {
                 } else {
                     if can_merge_right {
                         // Create a new block that extends over current
-                        let new_ptr = dealloc_ptr as *mut FreeBlock;
-                        let size = dealloc_size + current.size;
-                        let next = current.next;
+                        let new = dealloc_ptr as *mut FreeBlock;
+                        // Safety: current is valid free block
                         unsafe {
-                            core::ptr::write(new_ptr, FreeBlock { next, size });
-                        };
-                        prev.next = unsafe { (*new_ptr).as_free_block_ptr() };
+                            let size = dealloc_size + (*current).size;
+                            let next = (*current).next;
+                            core::ptr::write(new, FreeBlock { next, size });
+                            (*prev).next = new;
+                        }
                         #[cfg(test)]
                         let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
                         return;
                     } else {
                         // Create a new block for the dealloc region and link it
-                        let new_ptr = dealloc_ptr as *mut FreeBlock;
-                        let size = dealloc_size;
-                        let next = current.as_free_block_ptr();
+                        let new = dealloc_ptr as *mut FreeBlock;
+                        // Safety: current is valid free block
                         unsafe {
-                            core::ptr::write(new_ptr, FreeBlock { next, size });
-                        };
-                        prev.next = unsafe { (*new_ptr).as_free_block_ptr() };
+                            let size = dealloc_size;
+                            let next_ptr = current;
+                            core::ptr::write(
+                                new,
+                                FreeBlock {
+                                    next: next_ptr,
+                                    size,
+                                },
+                            );
+                            (*prev).next = new;
+                        }
                         #[cfg(test)]
                         let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
                         return;
@@ -290,27 +373,29 @@ unsafe impl GlobalAlloc for FreeBlockList {
                 }
             } else {
                 // Advance the cursor
-                prev_free_block = current.as_free_block_ptr();
-                current_free_block = current.next;
+                prev = current;
+                // Safety: We know that next is not null and safe to derefence on a valid current block
+                current = unsafe { (*current).next };
             }
         }
         // Reached the tail
         // Check if we can stretch previous block across the dealloc region
-        // Safety: Prev is set to Some in the sentinel and never updated to None
-        let prev = unsafe { &mut *prev_free_block.0.unwrap_unchecked().as_ptr() };
-        if prev.end_addr() == dealloc_ptr as usize {
-            // Stretch prev over the dealloc region
-            prev.size += dealloc_size;
-        } else {
-            // Create a new block here and link it
-            let new_ptr = dealloc_ptr as *mut FreeBlock;
-            let size = dealloc_size;
-            let next = FreeBlockPtr(None);
-            unsafe { core::ptr::write(new_ptr, FreeBlock { next, size }) };
-            prev.next = unsafe { (*new_ptr).as_free_block_ptr() };
+        // Safety: Prev_ptr points to a valid free block
+        unsafe {
+            if FreeBlock::end_addr(prev) == dealloc_ptr.addr() {
+                // Stretch prev over the dealloc region
+                (*prev).size += dealloc_size;
+            } else {
+                // Create a new block here and link it
+                let new = dealloc_ptr as *mut FreeBlock;
+                let size = dealloc_size;
+                let next = core::ptr::null_mut();
+                core::ptr::write(new, FreeBlock { next, size });
+                (*prev).next = new;
+            }
+            #[cfg(test)]
+            let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
         }
-        #[cfg(test)]
-        let _ = DEALLOCATED_BYTES.fetch_add(dealloc_size as u32, Ordering::Relaxed);
     }
 }
 

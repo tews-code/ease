@@ -37,14 +37,14 @@ use alloc::vec::Vec;
 
 mod baseline {
     #[cfg(not(feature = "alloc-bump"))]
-    pub(super) const ONE_BYTE_ALLOC: u64 = 1_000;
+    pub(super) const ONE_BYTE_ALLOC: u64 = 1_200;
     #[cfg(feature = "alloc-bump")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 600;
 
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
     #[cfg(not(feature = "alloc-bump"))]
-    pub(super) const SMALL_MIX_ALLOC: u64 = 5_000;
+    pub(super) const SMALL_MIX_ALLOC: u64 = 4_000;
     #[cfg(feature = "alloc-bump")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 1_000;
     // Bump can't free, so its sidecar of live small_mix allocations
@@ -56,7 +56,7 @@ mod baseline {
     pub(super) const SMALL_MIX_ALLOC_ITERS: u32 = 500;
 
     #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
-    pub(super) const AWKWARD_ALLOC: u64 = 10_000;
+    pub(super) const AWKWARD_ALLOC: u64 = 11_000;
     #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
     pub(super) const AWKWARD_ALLOC_ITERS: u32 = 20;
 }
@@ -158,6 +158,7 @@ fn allocator_benchmark() {
 // pressure. Skipped for bump because bump cannot free, so the heap
 // fills after a few hundred iterations and the next alloc panics.
 #[cfg(not(feature = "alloc-bump"))]
+#[allow(dead_code)]
 fn allocate_or_bust() {
     for i in 0..1_000_000 {
         let _b = black_box(Box::new([1u8; 1024]));

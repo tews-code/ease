@@ -4,7 +4,7 @@
 
 set -e  # Exit immediately on any failure
 
-ALLOCATOR="${1:-alloc-slab}"
+ALLOCATOR="${1:-alloc-freelist}"
 FEATURES="${TEST_SET:-test-all},$ALLOCATOR"
 
 case "$ALLOCATOR" in
