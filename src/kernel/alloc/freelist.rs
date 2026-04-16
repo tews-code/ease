@@ -245,6 +245,13 @@ unsafe impl GlobalAlloc for FreeBlockList {
     //            prev_free_block (copy)
 
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        // Zero-size requests get a dangling, non-null, aligned pointer
+        // per the GlobalAlloc convention. No free block is consumed,
+        // which keeps heap capacity intact for real allocations.
+        // dealloc mirrors this with a no-op when layout.size() == 0.
+        if layout.size() == 0 {
+            return layout.align() as *mut u8;
+        }
         let mut sentinel_guard = self.sentinel.lock();
         // Walk the free list looking for a valid slot to reuse; block at end is all remaining memory; otherwise OOM
         // Use pointers to keep heap provenance
@@ -298,6 +305,14 @@ unsafe impl GlobalAlloc for FreeBlockList {
     }
 
     unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
+        // Mirror alloc's zero-size path: the pointer is dangling (not in
+        // the heap), so there's nothing to free and no free-list walk
+        // to do. Callers that received a dangling pointer from alloc
+        // must pass the same zero-size layout back here, per the
+        // GlobalAlloc contract.
+        if layout.size() == 0 {
+            return;
+        }
         let mut sentinel_guard = self.sentinel.lock();
         // Walk the free list looking for the address-related position to free;
         // Use pointers to keep heap provenance
@@ -467,6 +482,31 @@ mod host_tests {
             a.dealloc(p1, layout);
             a.dealloc(p2, layout);
         }
+    }
+
+    #[test]
+    fn zero_size_alloc_round_trips() {
+        // Zero-size requests must succeed, return a non-null aligned
+        // pointer, and round-trip through dealloc without panicking.
+        // A real block should NOT be consumed — subsequent real
+        // allocations must still succeed with the full heap available.
+        let heap = TestHeap::new(4096);
+        let a = make_allocator(&heap);
+        let zero_layout = Layout::from_size_align(0, 8).unwrap();
+        let p = unsafe { a.alloc(zero_layout) };
+        assert!(!p.is_null(), "zero-size alloc returned null");
+        assert_eq!(
+            p.addr() % 8,
+            0,
+            "zero-size pointer not aligned to requested alignment"
+        );
+        unsafe { a.dealloc(p, zero_layout) };
+
+        // Subsequent real allocation must succeed.
+        let real_layout = Layout::from_size_align(64, 8).unwrap();
+        let q = unsafe { a.alloc(real_layout) };
+        assert!(!q.is_null(), "real alloc after zero-size alloc failed");
+        unsafe { a.dealloc(q, real_layout) };
     }
 
     #[test]

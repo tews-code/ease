@@ -26,6 +26,27 @@
 // in explicitly).
 extern crate alloc;
 
+// The real `print!`/`println!` macros live in main.rs and write to UART.
+// Shared code in `kernel/alloc/` may want to emit debug prints via
+// `crate::print!`/`crate::println!`; those calls resolve against whichever
+// crate's root is currently being compiled. In the binary crate they hit
+// the UART macros; in this lib crate they need something at the root to
+// resolve to. These no-op stubs discard their arguments silently, so
+// shared code can use `crate::print!`/`crate::println!` without breaking
+// host / Miri builds.
+/// No-op stub for `print!` in the lib crate. See module docs above.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {};
+}
+
+/// No-op stub for `println!` in the lib crate. See module docs above.
+#[macro_export]
+macro_rules! println {
+    () => {};
+    ($($arg:tt)*) => {};
+}
+
 // `kernel/sync.rs` references `crate::arch::{disable_interrupts,
 // restore_interrupts}` when compiling for the kernel target. The lib
 // crate does not pull in the real `arch` module (it depends on more

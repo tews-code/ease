@@ -99,6 +99,14 @@ impl Bump {
 
 unsafe impl GlobalAlloc for Bump {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // Zero-size requests get a dangling, non-null, aligned pointer
+        // per the GlobalAlloc convention. No heap space is reserved, so
+        // dealloc can mirror this as a no-op and the cursor is never
+        // advanced for zero-size requests — avoiding aliasing with the
+        // next real allocation.
+        if layout.size() == 0 {
+            return layout.align() as *mut u8;
+        }
         let mut current = self.next.load(Ordering::Relaxed);
         debug_assert!(!current.is_null());
         let end = self.end.load(Ordering::Relaxed);
@@ -197,6 +205,32 @@ mod host_tests {
             p2 as usize > p1 as usize,
             "bump must hand out increasing addresses"
         );
+    }
+
+    #[test]
+    fn zero_size_alloc_round_trips() {
+        // Zero-size requests must succeed, return a non-null aligned
+        // pointer, and round-trip through dealloc without panicking.
+        // A real slot should NOT be consumed — subsequent real allocations
+        // must still succeed with the full heap available.
+        let heap = TestHeap::new(4096);
+        let bump = make_allocator(&heap);
+        let zero_layout = Layout::from_size_align(0, 8).unwrap();
+        let p = unsafe { bump.alloc(zero_layout) };
+        assert!(!p.is_null(), "zero-size alloc returned null");
+        assert_eq!(
+            p.addr() % 8,
+            0,
+            "zero-size pointer not aligned to requested alignment"
+        );
+        unsafe { bump.dealloc(p, zero_layout) };
+
+        // Subsequent real allocation must succeed and must not overlap
+        // with the dangling zero-size pointer.
+        let real_layout = Layout::from_size_align(64, 8).unwrap();
+        let q = unsafe { bump.alloc(real_layout) };
+        assert!(!q.is_null(), "real alloc after zero-size alloc failed");
+        assert_ne!(p, q, "real alloc overlapped with zero-size pointer");
     }
 
     #[test]

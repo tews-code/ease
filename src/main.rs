@@ -36,7 +36,7 @@ use crate::kernel::alloc::bump::Bump;
 #[cfg(feature = "alloc-freelist")]
 use crate::kernel::alloc::freelist::FreeBlockList;
 #[cfg(feature = "alloc-slab")]
-use crate::kernel::alloc::slab::Slab;
+use crate::kernel::alloc::slab::Pool;
 
 extern crate alloc;
 
@@ -74,7 +74,7 @@ pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-slab")]
-pub(crate) static SLAB: Slab = Slab::new();
+pub(crate) static POOL64: Pool</*SLOT_SIZE*/ 64, /*SLOT_COUNT*/ 4096> = Pool::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-bump")]
@@ -94,7 +94,7 @@ fn init_global_allocator() {
     };
     #[cfg(feature = "alloc-slab")]
     unsafe {
-        SLAB.init(start, size)
+        POOL64.init(start, size)
     };
     #[cfg(feature = "alloc-bump")]
     unsafe {
@@ -131,8 +131,13 @@ fn kernel_init() -> FrameBuffer {
 
     arch::enable_interrupts();
 
-    drivers::virtio::virtio_blk_init();
-    fs::volume::fat16_init();
+    // Large-allocation init — skipped when the slab is the sole allocator,
+    // because the slab cannot serve the virtq and FAT buffers these need.
+    #[cfg(not(feature = "alloc-slab"))]
+    {
+        drivers::virtio::virtio_blk_init();
+        fs::volume::fat16_init();
+    }
 
     drivers::ramfb::FrameBuffer::init()
 }

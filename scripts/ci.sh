@@ -4,7 +4,7 @@
 
 set -e  # Exit immediately on any failure
 
-ALLOCATOR="${1:-alloc-freelist}"
+ALLOCATOR="${1:-alloc-slab}"
 FEATURES="${TEST_SET:-test-all},$ALLOCATOR"
 
 case "$ALLOCATOR" in
@@ -13,6 +13,17 @@ case "$ALLOCATOR" in
        echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump" >&2
        exit 1 ;;
 esac
+
+# The slab build is a cutdown configuration that deliberately excludes
+# virtio/fs init (they need allocations larger than one slab slot), which
+# in turn leaves legitimately-unused code dead under this build. Relax
+# clippy's dead-code check for slab only.
+CLIPPY_EXTRA=""
+if [ "$ALLOCATOR" = "alloc-slab" ]; then
+    CLIPPY_EXTRA="-A dead-code"
+fi
+
+echo "Global allocator set to : $ALLOCATOR";
 
 # Unconditionally reformat to pass clippy
 cargo fmt
@@ -23,7 +34,13 @@ echo "=== Disk Image ==="
 
 echo ""
 echo "=== Clippy ==="
-cargo clippy --target riscv32imac-unknown-none-elf -- -D warnings
+# Clippy must see the same feature set as the QEMU test run, otherwise
+# cfg-gated code (e.g. virtio/fs init under alloc-slab) looks dead under
+# the Cargo.toml default but live under the tested feature set (or vice
+# versa), producing spurious dead_code errors.
+cargo clippy --target riscv32imac-unknown-none-elf \
+    --no-default-features --features "$FEATURES" \
+    -- -D warnings $CLIPPY_EXTRA
 
 echo ""
 echo "=== QEMU Tests ==="

@@ -1,13 +1,15 @@
 //! Allocators
 
-// Bump compiles unconditionally in host builds so its `host_tests`
-// module can run under `cargo test --lib` and Miri. In the kernel
-// binary build it stays gated behind `feature = "alloc-bump"`.
+// Each allocator compiles unconditionally in host builds so its
+// `host_tests` module runs under every `cargo test --lib` and Miri
+// invocation regardless of which allocator is active in the kernel
+// binary. In kernel binary builds each is gated behind its own feature,
+// so only one provides the `#[global_allocator]` static in main.rs.
 #[cfg(any(feature = "alloc-bump", not(target_os = "none")))]
 pub mod bump;
-#[cfg(feature = "alloc-freelist")]
+#[cfg(any(feature = "alloc-freelist", not(target_os = "none")))]
 pub mod freelist;
-#[cfg(feature = "alloc-slab")]
+#[cfg(any(feature = "alloc-slab", not(target_os = "none")))]
 pub mod slab;
 
 // Allocator-agnostic QEMU benchmark suite. Compiles only when one of the

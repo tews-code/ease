@@ -1,16 +1,13 @@
 //! Slab allocator
 
+use crate::kernel::sync::AllocatorLock;
 use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-#[cfg(test)]
-use crate::kernel::alloc::align_up;
-use crate::kernel::sync::AllocatorLock;
-
 // Heap is divided into equal sized slots
-const SLOT_SIZE: usize = 64; // 64 bytes per slot - this sets the minimum allocation
-const SLOT_COUNT: usize = 4096; // 4096 x 64 = 256KB - matches linker script
+// const SLOT_SIZE: usize = 64; // 64 bytes per slot - this sets the minimum allocation
+// const SLOT_COUNT: usize = 4096; // 4096 x 64 = 256KB - matches linker script
 
 #[cfg(test)]
 pub(crate) static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -24,48 +21,51 @@ pub(crate) static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
 //  Heap Memory
-//  +------+------+------+------+------+------+
-//  | slot0| slot1| slot2| slot3| ...  | slotN|
-//  |      |      |      |      |      |      |
-//  |  64B |  64B |  64B |  64B |      |  64B |
-//  +------+------+------+------+------+------+
+//  +------+------+------+------+------+--------+----------+
+//  | slot0| slot1| slot2| slot3| slot4| slotN-1|  slotN   |
+//  |      |      |      |      |      |        |          |
+//  |  64B |  64B |  64B |  64B |      |  64B   |          |
+//  |      |      |      |      |      |        |          |
+//  | used |ptr->3| used |ptr->4|ptr->9| used   | ptr:Null |
+//  +------+------+------+------+------+--------+----------+
+//         ^      ^
+//         |      + dealloc_ptr points to start of used slab
+//         |
+//         +--- head is pointer to start of free list
 //
-//  Free index array tracking used slots
-//  +------+------+------+------+------+------+-------------+
-//  | used |  3   | used |  4   | 17   | ...  | usize::MAX  |
-//  +------+------+------+------+------+------+-------------+
-//
-//              ^
-//              |
-//              +--- free_head is index to start of free list
-//  Index0 is used
-//  Index1 points to next free slot index 3 (and free_head points here)
-//  Index2 is used
-//  Index3 points to next free slot index 4
+//  Slot0 is used
+//  Slot1 points to next free slot index 3 (and free_head points here)
+//  Slot2 is used
+//  Slot3 points to next free slot 4 etc.
+//  Null pointer marks end of list
 
-// Free index array
-struct SlabInner {
-    next_free: [u16; SLOT_COUNT],
-    free_head: u16,
-    heap: *mut [u8; SLOT_SIZE * SLOT_COUNT],
+/// Free slab pointer
+struct FreeSlab {
+    next: *mut FreeSlab,
 }
 
+// Inner is protected by lock and allows interior mutability
+struct SlabInner {
+    heap: *mut u8, // base, for validation and provenance
+    head: *mut FreeSlab,
+}
+
+// FreeList only references data on the heap
+// No thread-local references
+// Note that if SlabInner is Send, Slab is Sync from AllocatorLock
+unsafe impl Send for SlabInner {}
+
 // Slab allocator
-pub(crate) struct Slab {
+pub(crate) struct Pool<const SLOT_SIZE: usize, const SLOT_COUNT: usize> {
     inner: AllocatorLock<SlabInner>,
 }
 
-// SlabInner only references data on the heap or the sidecar
-// No thread-local references
-unsafe impl Send for SlabInner {}
-
-impl Slab {
+impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Pool<SLOT_SIZE, SLOT_COUNT> {
     pub const fn new() -> Self {
         Self {
             inner: AllocatorLock::new(SlabInner {
-                next_free: [0u16; SLOT_COUNT],
-                free_head: 0u16,
                 heap: core::ptr::null_mut(),
+                head: core::ptr::null_mut(),
             }),
         }
     }
@@ -82,23 +82,41 @@ impl Slab {
     pub unsafe fn init(&self, heap_ptr: *mut u8, size: usize) {
         let mut inner = self.inner.lock();
         // Only initialise once
+        assert!(inner.head.is_null());
         assert!(inner.heap.is_null());
         // Derive heap provenance from the heap pointer
-        inner.heap = heap_ptr as *mut [u8; SLOT_COUNT * SLOT_SIZE];
+        inner.heap = heap_ptr;
+        inner.head = heap_ptr as *mut FreeSlab;
         // Heap slot array must match size of the heap from the linker script
-        assert!(SLOT_COUNT * SLOT_SIZE == size);
+        assert_eq!(SLOT_COUNT * SLOT_SIZE, size);
         // Set up the free list
-        for i in 0..inner.next_free.len() - 1 {
-            inner.next_free[i] = (i + 1) as u16;
+        unsafe {
+            let base = inner.heap as *mut FreeSlab;
+            for i in 0..SLOT_COUNT {
+                let current = base.with_addr(base.addr() + i * SLOT_SIZE);
+                let next = if i + 1 < SLOT_COUNT {
+                    base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
+                } else {
+                    core::ptr::null_mut()
+                };
+                core::ptr::write(current, FreeSlab { next });
+            }
         }
-        inner.next_free[SLOT_COUNT - 1] = u16::MAX;
-        // Set up the list head
-        inner.free_head = 0;
     }
 }
 
-unsafe impl GlobalAlloc for Slab {
+unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
+    for Pool<SLOT_SIZE, SLOT_COUNT>
+{
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+        // Zero-size requests get a dangling, non-null, aligned pointer
+        // per the GlobalAlloc convention. No slot is consumed, which
+        // keeps the slab's full capacity available for real
+        // allocations. dealloc mirrors this as a no-op when
+        // layout.size() == 0.
+        if layout.size() == 0 {
+            return layout.align() as *mut u8;
+        }
         // Early panic if allocation request is too large
         if layout.size() > SLOT_SIZE {
             return core::ptr::null_mut();
@@ -108,43 +126,60 @@ unsafe impl GlobalAlloc for Slab {
         }
         // Get the top of the list
         let mut inner = self.inner.lock();
-        let current_head = inner.free_head;
-        if current_head == u16::MAX {
+        // Ensure we are not using alloc before init
+        assert!(!inner.heap.is_null());
+        let current = inner.head;
+        // OOM check - current is pointing to last slab
+        if current.is_null() {
             return core::ptr::null_mut();
         }
-        inner.free_head = inner.next_free[current_head as usize];
+
+        // Allocate a slab
+        // List head points to what current is pointing to
+        inner.head = unsafe { (*current).next };
 
         #[cfg(test)]
         let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
-        let _ = ALLOCATED_BYTES.fetch_add(layout.size() as u32, Ordering::Relaxed);
+        let _ = ALLOCATED_BYTES.fetch_add(SLOT_SIZE as u32, Ordering::Relaxed);
         #[cfg(test)]
-        let _ = PADDING_BYTES.fetch_add(
-            (align_up(layout.size(), SLOT_SIZE) - layout.size()) as u32,
-            Ordering::Relaxed,
-        );
+        let _ = PADDING_BYTES.fetch_add((SLOT_SIZE - layout.size()) as u32, Ordering::Relaxed);
         #[cfg(test)]
-        let _ = HEAP_TOP.fetch_max(
-            (inner.heap as *mut u8).wrapping_add(SLOT_SIZE * current_head as usize) as usize
-                + SLOT_SIZE,
-            Ordering::Relaxed,
-        );
+        let _ = HEAP_TOP.fetch_max(current.addr() + SLOT_SIZE, Ordering::Relaxed);
 
-        (inner.heap as *mut u8).wrapping_add(SLOT_SIZE * current_head as usize)
+        // Return a pointer to the current slab
+        current as *mut u8
     }
 
-    unsafe fn dealloc(&self, dealloc_ptr: *mut u8, _layout: core::alloc::Layout) {
-        // Get the index from the dealloc_ptr
+    unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
+        // Mirror alloc's zero-size path: the pointer is dangling (not
+        // in the heap), so there's nothing to free and the free-list
+        // must not be touched. Callers that received a dangling
+        // pointer from alloc must pass the same zero-size layout
+        // back here per the GlobalAlloc contract.
+        if layout.size() == 0 {
+            return;
+        }
+        // Calculate the number of slabs for dealloc_ptr's offset
         let mut inner = self.inner.lock();
-        let current_head = inner.free_head;
-        let dealloc_offset = dealloc_ptr as usize - inner.heap as *mut u8 as usize;
+        let dealloc_offset = dealloc_ptr.addr() - inner.heap.addr();
         // Is the pointer within the heap range?
         assert!(dealloc_offset < SLOT_COUNT * SLOT_SIZE);
         // Is the offset aligned to SLOT_SIZE?
         assert!(dealloc_offset.is_multiple_of(SLOT_SIZE));
-        let dealloc_index = dealloc_offset / SLOT_SIZE;
-        inner.next_free[dealloc_index] = current_head;
-        inner.free_head = dealloc_index as u16;
+
+        // SAFETY: `dealloc_ptr` was returned by a prior `alloc` on this
+        // allocator (GlobalAlloc contract), so it points to a valid
+        // SLOT_SIZE-byte slot within the heap. We re-derive the write
+        // pointer from `inner.heap` to guarantee heap-wide provenance
+        // regardless of the caller's pointer history — writing through
+        // `dealloc_ptr` directly would use only the caller's (possibly
+        // narrower) tag.
+        unsafe {
+            let slot_ptr = inner.heap.with_addr(dealloc_ptr.addr()) as *mut FreeSlab;
+            core::ptr::write(slot_ptr, FreeSlab { next: inner.head });
+            inner.head = slot_ptr;
+        }
         #[cfg(test)]
         let _ = DEALLOCATED_BYTES.fetch_add(SLOT_SIZE as u32, Ordering::Relaxed);
     }
@@ -165,9 +200,16 @@ mod host_tests {
     use super::*;
     use core::alloc::Layout;
 
-    // The slab is hard-coded to a heap of `SLOT_COUNT * SLOT_SIZE` bytes,
-    // so every host test hands it exactly that much.
+    // Values for the test pool. Small enough that Miri finishes quickly
+    // (each test allocates at most SLOT_COUNT slots and under Miri every
+    // alloc/dealloc is slow), large enough to exercise OOM, free-order
+    // independence, and the 32-iteration alignment test below. Kernel
+    // production values are picked separately in main.rs.
+    const SLOT_SIZE: usize = 64;
+    const SLOT_COUNT: usize = 32;
     const HEAP_BYTES: usize = SLOT_COUNT * SLOT_SIZE;
+
+    type TestPool = Pool<SLOT_SIZE, SLOT_COUNT>;
 
     /// Owns a chunk of host memory that the test allocator treats as the heap.
     /// Freed automatically when the helper goes out of scope.
@@ -199,8 +241,8 @@ mod host_tests {
         }
     }
 
-    fn make_allocator(heap: &TestHeap) -> Slab {
-        let allocator = Slab::new();
+    fn make_allocator(heap: &TestHeap) -> TestPool {
+        let allocator = TestPool::new();
         // SAFETY: The TestHeap region is exclusively owned by the
         // returned allocator for as long as the test holds a reference.
         unsafe { allocator.init(heap.ptr, heap.size) };
@@ -221,6 +263,44 @@ mod host_tests {
         unsafe {
             a.dealloc(p1, layout);
             a.dealloc(p2, layout);
+        }
+    }
+
+    #[test]
+    fn zero_size_alloc_round_trips() {
+        // Zero-size requests must succeed, return a non-null aligned
+        // pointer, and round-trip through dealloc without panicking.
+        // A real slot should NOT be consumed — all SLOT_COUNT slots must
+        // still be available for subsequent real allocations.
+        let heap = TestHeap::new(HEAP_BYTES);
+        let a = make_allocator(&heap);
+        let zero_layout = Layout::from_size_align(0, 8).unwrap();
+        let p = unsafe { a.alloc(zero_layout) };
+        assert!(!p.is_null(), "zero-size alloc returned null");
+        assert_eq!(
+            p.addr() % 8,
+            0,
+            "zero-size pointer not aligned to requested alignment"
+        );
+        unsafe { a.dealloc(p, zero_layout) };
+
+        // Every slot must still be available — no real slot was consumed.
+        let real_layout = Layout::from_size_align(64, 8).unwrap();
+        let mut allocations = Vec::new();
+        loop {
+            let q = unsafe { a.alloc(real_layout) };
+            if q.is_null() {
+                break;
+            }
+            allocations.push(q);
+        }
+        assert_eq!(
+            allocations.len(),
+            SLOT_COUNT,
+            "zero-size alloc consumed a real slot"
+        );
+        for q in allocations {
+            unsafe { a.dealloc(q, real_layout) };
         }
     }
 
