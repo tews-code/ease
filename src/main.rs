@@ -31,6 +31,8 @@
 use core::fmt::Write;
 
 use crate::drivers::ramfb::FrameBuffer;
+#[cfg(feature = "alloc-buddy")]
+use crate::kernel::alloc::buddy::Buddy;
 #[cfg(feature = "alloc-bump")]
 use crate::kernel::alloc::bump::Bump;
 #[cfg(feature = "alloc-freelist")]
@@ -80,6 +82,10 @@ pub(crate) static POOL64: Pool</*SLOT_SIZE*/ 64, /*SLOT_COUNT*/ 4096> = Pool::ne
 #[cfg(feature = "alloc-bump")]
 pub(crate) static BUMP: Bump = Bump::new();
 
+#[global_allocator]
+#[cfg(feature = "alloc-buddy")]
+pub(crate) static BUDDY: Buddy = Buddy::new();
+
 /// Initialise the global allocator from the linker-defined heap region.
 /// Must be called exactly once during boot, before any allocations.
 fn init_global_allocator() {
@@ -99,6 +105,10 @@ fn init_global_allocator() {
     #[cfg(feature = "alloc-bump")]
     unsafe {
         BUMP.init(start, size)
+    };
+    #[cfg(feature = "alloc-buddy")]
+    unsafe {
+        BUDDY.init(start, size)
     };
 }
 

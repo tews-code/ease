@@ -30,6 +30,11 @@ use crate::kernel::alloc::bump::{
     ALLOC_COUNT, ALLOCATED_BYTES, DEALLOCATED_BYTES, HEAP_TOP, PADDING_BYTES,
 };
 
+#[cfg(feature = "alloc-buddy")]
+use crate::kernel::alloc::buddy::{
+    ALLOC_COUNT, ALLOCATED_BYTES, DEALLOCATED_BYTES, HEAP_TOP, PADDING_BYTES,
+};
+
 #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
 use alloc::string::ToString;
 #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]

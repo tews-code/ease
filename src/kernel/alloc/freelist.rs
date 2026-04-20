@@ -250,7 +250,7 @@ unsafe impl GlobalAlloc for FreeBlockList {
         // which keeps heap capacity intact for real allocations.
         // dealloc mirrors this with a no-op when layout.size() == 0.
         if layout.size() == 0 {
-            return layout.align() as *mut u8;
+            return core::ptr::without_provenance_mut(layout.align());
         }
         let mut sentinel_guard = self.sentinel.lock();
         // Walk the free list looking for a valid slot to reuse; block at end is all remaining memory; otherwise OOM

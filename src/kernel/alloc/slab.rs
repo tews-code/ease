@@ -115,7 +115,7 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         // allocations. dealloc mirrors this as a no-op when
         // layout.size() == 0.
         if layout.size() == 0 {
-            return layout.align() as *mut u8;
+            return core::ptr::without_provenance_mut(layout.align());
         }
         // Early panic if allocation request is too large
         if layout.size() > SLOT_SIZE {

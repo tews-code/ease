@@ -4,13 +4,13 @@
 
 set -e  # Exit immediately on any failure
 
-ALLOCATOR="${1:-alloc-slab}"
+ALLOCATOR="${1:-alloc-buddy}"
 FEATURES="${TEST_SET:-test-all},$ALLOCATOR"
 
 case "$ALLOCATOR" in
-    alloc-slab|alloc-freelist|alloc-bump) ;;
+    alloc-slab|alloc-freelist|alloc-bump|alloc-buddy) ;;
     *) echo "error: unknown allocator '$ALLOCATOR'" >&2
-       echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump" >&2
+       echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump, alloc-buddy" >&2
        exit 1 ;;
 esac
 

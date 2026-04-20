@@ -105,7 +105,7 @@ unsafe impl GlobalAlloc for Bump {
         // advanced for zero-size requests — avoiding aliasing with the
         // next real allocation.
         if layout.size() == 0 {
-            return layout.align() as *mut u8;
+            return core::ptr::without_provenance_mut(layout.align());
         }
         let mut current = self.next.load(Ordering::Relaxed);
         debug_assert!(!current.is_null());

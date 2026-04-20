@@ -5,6 +5,8 @@
 // invocation regardless of which allocator is active in the kernel
 // binary. In kernel binary builds each is gated behind its own feature,
 // so only one provides the `#[global_allocator]` static in main.rs.
+#[cfg(any(feature = "alloc-buddy", not(target_os = "none")))]
+pub mod buddy;
 #[cfg(any(feature = "alloc-bump", not(target_os = "none")))]
 pub mod bump;
 #[cfg(any(feature = "alloc-freelist", not(target_os = "none")))]
@@ -21,7 +23,8 @@ pub mod slab;
     any(
         feature = "alloc-slab",
         feature = "alloc-freelist",
-        feature = "alloc-bump"
+        feature = "alloc-bump",
+        feature = "alloc-buddy"
     )
 ))]
 mod bench;
