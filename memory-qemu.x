@@ -3,24 +3,30 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
 /*
  * Memory layout for QEMU `virt` machine
  *
- * We are modeling an RP2350 microcontroller with 520KB SRAM and 8MB PSRAM,
+ * We are modeling an AdaFruit Metro RP2350 with 8MB PSRAM.
+ * This board contians a RP2350 microcontroller with 520KB SRAM and 8MB PSRAM,
  * some of which is assigned to a framebuffer. QEMU is configured to provide
  * 32MB of physical RAM starting at 0x80000000.
  * We declare only 520KB as our working SRAM region. PSRAM is placed
  * at a separate address (0x81000000) to model a separate PSRAM region,
- * similar to real hardware (see e.g. Adafruit Metro RP2350 with PSRAM).
+ * similar to real hardware
  *
- * 0x80000000  +--------------------+
+ * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
  *             | .text              |
  *             | .rodata / .srodata |
- *             | .data / .sdata     |
- *             | .bss / .sbss       |
- *             | heap -->           |  Grows up (bump allocator, bounded by __heap_end)
+ * 0x2100_0000 +--------------------+
+ * 0x8000_0000 +--------------------+   Represents RP2350 520KB SRAM
  *             |                    |
+ *             | .data / .sdata     |   Data segment should be zero sized - no static mut
+ *             |                    |   or non-zero initialised statics.
+ *             | .bss / .sbss       |
+ *             | heap -->           |  Grows up (bounded by __heap_end)
+ *             |                    |
+ *             |    stack_guard     |
  *             |        <-- stack   |  Grows down from __stack_top (64KB reserved)
  * 0x80082000  +--------------------+  End of declared SRAM (520KB)
  *             :   (unused gap)     :
- * 0x81000000  +--------------------+
+ * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
  *             | PSRAM (8MB)        |
  *             |                    |
  * 0x816d4000  | 640x480x4 fb       | Framebuffer configured via QEMU ramfb
@@ -32,6 +38,7 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  */
 
 MEMORY {
+    FLASH : ORIGIN = 0x20000000, LENGTH = 0x01000000 /* 16 MB  on Adafruit Metro RP2350 */
     SRAM : ORIGIN = 0x80000000, LENGTH = 0x00082000 /* 520 KB SRAM on RP2350, not power 2 */
     PSRAM : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB PSRAM */
 }
@@ -47,13 +54,13 @@ SECTIONS {
     .text : {
         *(.text.init)
         *(.text .text.*)
-    } > SRAM
+    } > FLASH
 
-    .rodata : { *(.rodata .rodata.* .srodata .srodata.*) } > SRAM
+    .rodata : { *(.rodata .rodata.* .srodata .srodata.*) } > FLASH
 
+    /* Note: No gp use for LLVM for RISC-V so do not PROVIDE */
     .data : {
         *(.data .data.*)
-         PROVIDE(__global_pointer$ = . + 0x800); /* Small variable gp pointer address at + 2KB */
          *(.sdata .sdata.*)
     } > SRAM
 
@@ -77,10 +84,10 @@ SECTIONS {
         . = . + 4;
     } > SRAM
 
-    /DISCARD/ : { *(.comment) } /* Discard comment strings to keep binary small */
-    /* Note - .eh_frame is not emitted by LLVM for target riscv32imac-unknown-none-elf (panic=abort) */
+    /DISCARD/ : { *(.comment) *(.eh_frame)} /* Discard comment strings to keep binary small */
 }
 
+ASSERT(SIZEOF(.data) == 0, "non-empty .data not yet supported - add LMA copy logic")
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
 ASSERT(__heap_end <= __stack_top, "heap overlaps stack region")

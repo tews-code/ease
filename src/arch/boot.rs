@@ -20,10 +20,6 @@ extern "C" fn _start() -> ! {
     naked_asm!(
         "csrr t0, mhartid",             // Read HARTID
         "bnez t0, park",                // Park if HARTID is not zero
-        ".option push",                 // save current settings
-        ".option norelax",              // do NOT optimize this
-        "la gp, __global_pointer$",     // always expands to full lui + addi
-        ".option pop",                  // restore settings
         "la sp, {stack_top}",
 
         // Zero BSS segment
