@@ -41,17 +41,21 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 mod baseline {
-    #[cfg(not(feature = "alloc-bump"))]
+    #[cfg(feature = "alloc-freelist")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 1_200;
     #[cfg(feature = "alloc-bump")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 600;
+    #[cfg(feature = "alloc-buddy")]
+    pub(super) const ONE_BYTE_ALLOC: u64 = 4_000;
 
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
-    #[cfg(not(feature = "alloc-bump"))]
+    #[cfg(feature = "alloc-freelist")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 4_000;
     #[cfg(feature = "alloc-bump")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 1_000;
+    #[cfg(feature = "alloc-buddy")]
+    pub(super) const SMALL_MIX_ALLOC: u64 = 6_000;
     // Bump can't free, so its sidecar of live small_mix allocations
     // grows with each iteration. Cap iters so the cumulative footprint
     // stays comfortably inside the 256 KiB heap.

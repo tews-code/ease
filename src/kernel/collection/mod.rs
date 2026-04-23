@@ -8,7 +8,7 @@ mod ringbuf;
 mod spsc;
 mod stackvec;
 
-pub use bitmap::Bitmap;
+pub use bitmap::{Bitmap, bitmap_words_for};
 pub use ringbuf::{RingBuf, RingBufIter};
 pub use spsc::SpscRingBuf;
 pub use stackvec::StackVec;

@@ -11,18 +11,18 @@ pub struct Bitmap<const BITS: usize, const WORDS: usize> {
     bits: [u32; WORDS],
 }
 
-impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
-    /// Helper function to convert required bits to number of `words`
-    ///
-    /// Use to set up the bitmap by number of required bits.
-    /// ```text
-    /// const REQ_BITS: usize = 11;
-    /// let bitmap = Bitmap::<REQ_BITS, { Bitmap::<1, 1>::words_for(REQ_BITS) }>::new();
-    /// ```
-    pub const fn words_for(bit_count: usize) -> usize {
-        bit_count.div_ceil(BITS_PER_WORD)
-    }
+/// Helper function to convert required bits to number of `words`
+///
+/// Use to set up the bitmap by number of required bits.
+/// ```text
+/// const REQ_BITS: usize = 11;
+/// let bitmap = Bitmap::<REQ_BITS, { bitmap_words_for(REQ_BITS) }>::new();
+/// ```
+pub const fn bitmap_words_for(bit_count: usize) -> usize {
+    bit_count.div_ceil(BITS_PER_WORD)
+}
 
+impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
     /// Create a new bitmap
     ///
     /// Requires both required number of bits and word count
@@ -30,13 +30,13 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
     /// bitmap_words_for().
     /// ```text
     /// const REQ_BITS: usize = 11;
-    /// let bitmap = Bitmap::<REQ_BITS,{ Bitmap::words_for(REQ_BITS)}>::new();
+    /// let bitmap = Bitmap::<REQ_BITS,{ bitmap_words_for(REQ_BITS)}>::new();
     /// ```
     /// The bitmap is initialised as all flags cleared.
     /// There must be at least one bit (zero-sized bitmap not allowed).
     pub const fn new() -> Self {
         const {
-            assert!(WORDS == Self::words_for(BITS));
+            assert!(WORDS == bitmap_words_for(BITS));
         }
         const {
             assert!(BITS > 0);

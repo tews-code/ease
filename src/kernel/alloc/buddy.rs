@@ -4,6 +4,7 @@ use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use crate::kernel::collection::{Bitmap, bitmap_words_for};
 use crate::kernel::sync::AllocatorLock;
 
 // Doubly-linked list of free blocks
@@ -17,7 +18,7 @@ struct FreeBlock {
 // Order 1 = 2 × minimum
 // Order 2 = 4 × minimum
 // Order N = 2^N × minimum
-// For a 256 KiB heap with 64-byte minimum blocks:
+// For a 256 KiB heap with 8-byte minimum blocks:
 // Order   Size       How many fit in 256 KiB
 // 0       8 B           32,768
 // 1      16 B           16,384
@@ -56,6 +57,7 @@ struct FreeBlock {
 
 const MIN_BLOCK_SIZE: usize = 8; // We can't go smaller to fit FreeBlock
 const MAX_ORDER: usize = 15;
+const BITS: usize = (1 << MAX_ORDER) - 1; // 32767
 const ORDERS_COUNT: usize = 16; //  Range from 8B to 256KiB
 
 #[cfg(test)]
@@ -75,10 +77,29 @@ const _: () = assert!(core::mem::size_of::<FreeBlock>() >= MIN_BLOCK_SIZE);
 struct BuddyInner {
     list_heads: [*mut FreeBlock; ORDERS_COUNT],
     heap: *mut u8,
+    pair_bits: Bitmap<BITS, { bitmap_words_for(BITS) }>,
     // Highest order usable for this heap. Equals `MAX_ORDER` when the heap
     // is the full `MIN_BLOCK_SIZE << MAX_ORDER` bytes, and less when the
     // allocator is initialised with a smaller (still power-of-two) region.
     top_order: usize,
+}
+
+// Helper function to calculate the start bit for an order
+const fn order_bit_offset(order: usize) -> usize {
+    (1 << MAX_ORDER) - (1 << (MAX_ORDER - order))
+}
+
+// Helper function which takes the order and heap offset and returns the bitmap bit
+pub const fn pair_bit(order: usize, offset: usize) -> usize {
+    debug_assert!(order < MAX_ORDER);
+    let block_index = offset >> (MIN_BLOCK_SIZE.ilog2() as usize + order);
+    let pair_index = block_index >> 1;
+    order_bit_offset(order) + pair_index
+}
+
+// Helper function which returns the heap offset of the buddy
+pub const fn buddy_offset(order: usize, offset: usize) -> usize {
+    offset ^ (MIN_BLOCK_SIZE << order)
 }
 
 impl BuddyInner {
@@ -92,11 +113,23 @@ impl BuddyInner {
             unsafe { (*new_head).prev = core::ptr::null_mut() };
         }
         self.list_heads[order] = new_head;
+
+        // Toggle the allocated pair bit
+        if order < MAX_ORDER {
+            let bit = pair_bit(order, block.addr() - self.heap.addr());
+            self.pair_bits.toggle(bit);
+        }
+
         block
     }
 
+    // Pushes a free block into the free block list for that order
+    //
+    // Returns the bit status for that bit after status change
+    //
     // Safety: Caller must ensure that block is non-null and points at writable FreeBlock-sized memory
-    pub unsafe fn push(&mut self, order: usize, block: *mut FreeBlock) {
+
+    pub unsafe fn push(&mut self, order: usize, block: *mut FreeBlock) -> bool {
         let old_head = self.list_heads[order];
         unsafe {
             (*block).next = old_head;
@@ -105,7 +138,16 @@ impl BuddyInner {
                 (*old_head).prev = block;
             }
         };
+
         self.list_heads[order] = block;
+
+        // Toggle the freed pair bit
+        if order < MAX_ORDER {
+            let bit = pair_bit(order, block.addr() - self.heap.addr());
+            self.pair_bits.toggle(bit)
+        } else {
+            false
+        }
     }
 
     // Safety: Caller must ensure buddy address is inside the heap
@@ -129,6 +171,25 @@ impl BuddyInner {
         }
         unsafe { self.push(order, buddy) };
     }
+
+    // Safety: Caller must ensure block is currently in the freelist at order and no other references to the block or its neighbours exist.
+    //
+    // Does not toggle the bit flag: called only in coalesce context.
+    // Pair ceases to exist at order O, bit stays at 0 from the prior push
+    unsafe fn remove_from_list(&mut self, order: usize, block: *mut FreeBlock) {
+        unsafe {
+            let prev = (*block).prev;
+            let next = (*block).next;
+            if prev.is_null() {
+                self.list_heads[order] = next;
+            } else {
+                (*prev).next = next;
+            }
+            if !next.is_null() {
+                (*next).prev = prev;
+            }
+        }
+    }
 }
 
 // Safety: BuddyInner holds shared heap data, nothing thread-local
@@ -145,6 +206,7 @@ impl Buddy {
             inner: AllocatorLock::new(BuddyInner {
                 list_heads: [core::ptr::null_mut(); ORDERS_COUNT],
                 heap: core::ptr::null_mut(),
+                pair_bits: Bitmap::<BITS, { bitmap_words_for(BITS) }>::new(),
                 top_order: 0,
             }),
         }
@@ -176,7 +238,8 @@ impl Buddy {
                 },
             );
         }
-        inner.list_heads[top_order] = inner.heap as *mut FreeBlock;
+        let block = inner.heap as *mut FreeBlock;
+        unsafe { inner.push(top_order, block) };
     }
 }
 
@@ -233,10 +296,25 @@ unsafe impl GlobalAlloc for Buddy {
         // compute the order from the layout
         let alloc_size = layout.size().max(layout.align()).max(MIN_BLOCK_SIZE);
         let alloc_order = (alloc_size.next_power_of_two() / MIN_BLOCK_SIZE).ilog2() as usize;
-        // push the block onto list_heads[order], done.
+
         let mut inner = self.inner.lock();
-        unsafe {
-            inner.push(alloc_order, dealloc_ptr as *mut FreeBlock);
+        let mut block = dealloc_ptr as *mut FreeBlock;
+        let mut order = alloc_order;
+        while !unsafe { inner.push(order, block) } {
+            if order + 1 > MAX_ORDER {
+                break;
+            }
+            let block_off = block.addr() - inner.heap.addr();
+            let buddy_off = buddy_offset(order, block_off);
+            let buddy = inner
+                .heap
+                .with_addr(inner.heap.addr() + buddy_off)
+                .cast::<FreeBlock>();
+            unsafe { inner.remove_from_list(order, buddy) };
+            unsafe { inner.remove_from_list(order, block) };
+            // Move up an order to see if we can coalesce again
+            block = block.min(buddy);
+            order += 1;
         }
 
         #[cfg(test)]
@@ -286,6 +364,152 @@ mod host_tests {
         unsafe { allocator.init(heap.ptr, heap.size) };
         allocator
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Pure-math helpers: pair_bit, order_bit_offset, buddy_offset.
+    // No heap state; these just verify the arithmetic we'll depend on
+    // when the allocator starts toggling pair bits.
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn order_bit_offset_known_values() {
+        // Geometric layout: order k starts at (2^MAX_ORDER - 2^(MAX_ORDER-k)).
+        assert_eq!(order_bit_offset(0), 0);
+        assert_eq!(order_bit_offset(1), 16384);
+        assert_eq!(order_bit_offset(2), 24576);
+        assert_eq!(order_bit_offset(14), 32766);
+        // MAX_ORDER is one past the last valid order — equals BITS.
+        // Documented here rather than encouraged via pair_bit.
+        assert_eq!(order_bit_offset(MAX_ORDER), BITS);
+    }
+
+    #[test]
+    fn pair_bit_concrete_values() {
+        // Order 0 blocks are 8 B; consecutive pairs sit at offsets
+        // [0, 8], [16, 24], [32, 40], ...
+        assert_eq!(pair_bit(0, 0), 0);
+        assert_eq!(pair_bit(0, 8), 0);
+        assert_eq!(pair_bit(0, 16), 1);
+        assert_eq!(pair_bit(0, 24), 1);
+        assert_eq!(pair_bit(0, 32), 2);
+        // Order 1 blocks are 16 B; order-1 bits start at 16384.
+        assert_eq!(pair_bit(1, 0), 16384);
+        assert_eq!(pair_bit(1, 16), 16384);
+        assert_eq!(pair_bit(1, 32), 16385);
+    }
+
+    #[test]
+    fn pair_bit_buddies_share_bit() {
+        // The two buddies of a pair must map to the same bit.
+        for order in 0..MAX_ORDER {
+            let block_size = MIN_BLOCK_SIZE << order;
+            for pair in 0..4 {
+                let left = 2 * pair * block_size;
+                let right = left + block_size;
+                assert_eq!(
+                    pair_bit(order, left),
+                    pair_bit(order, right),
+                    "order {} pair {}: buddies don't share a bit",
+                    order,
+                    pair
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pair_bit_adjacent_pairs_are_adjacent_bits() {
+        // Adjacent pairs at the same order must map to adjacent bits.
+        for order in 0..MAX_ORDER {
+            let pair_size = MIN_BLOCK_SIZE << (order + 1);
+            let b0 = pair_bit(order, 0);
+            let b1 = pair_bit(order, pair_size);
+            assert_eq!(
+                b1,
+                b0 + 1,
+                "order {}: consecutive pairs not adjacent",
+                order
+            );
+        }
+    }
+
+    #[test]
+    fn pair_bit_order_ranges_do_not_overlap() {
+        // The last pair bit at order k must lie strictly below the
+        // starting bit of order k+1.
+        for order in 0..(MAX_ORDER - 1) {
+            let pair_size = MIN_BLOCK_SIZE << (order + 1);
+            let heap_size = MIN_BLOCK_SIZE << MAX_ORDER;
+            let last_pair_offset = heap_size - pair_size;
+            let last_bit = pair_bit(order, last_pair_offset);
+            let next_start = order_bit_offset(order + 1);
+            assert!(
+                last_bit < next_start,
+                "order {} last bit {} overlaps with order {} start {}",
+                order,
+                last_bit,
+                order + 1,
+                next_start
+            );
+        }
+    }
+
+    #[test]
+    fn buddy_offset_is_involution() {
+        // Applying buddy_offset twice returns the original offset.
+        for order in 0..MAX_ORDER {
+            let block_size = MIN_BLOCK_SIZE << order;
+            for n in 0..8 {
+                let a = n * block_size;
+                let b = buddy_offset(order, a);
+                assert_eq!(
+                    buddy_offset(order, b),
+                    a,
+                    "buddy_offset not involutive at order {} offset {}",
+                    order,
+                    a
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn buddy_offset_differs_by_block_size() {
+        // The buddy differs from its partner by exactly the block size
+        // at that order (one bit flipped in the offset).
+        for order in 0..MAX_ORDER {
+            let block_size = MIN_BLOCK_SIZE << order;
+            for n in 0..4 {
+                let a = n * block_size;
+                assert_eq!(buddy_offset(order, a) ^ a, block_size);
+            }
+        }
+    }
+
+    #[test]
+    fn buddies_share_pair_bit_via_both_helpers() {
+        // Cross-check: the offset returned by buddy_offset and the
+        // original offset must hash to the same pair bit — binding the
+        // two helpers together into one coherent scheme.
+        for order in 0..MAX_ORDER {
+            let block_size = MIN_BLOCK_SIZE << order;
+            for n in 0..8 {
+                let a = n * block_size;
+                let b = buddy_offset(order, a);
+                assert_eq!(
+                    pair_bit(order, a),
+                    pair_bit(order, b),
+                    "order {} offset {}: buddies don't share pair bit",
+                    order,
+                    a
+                );
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Allocator integration tests (use TestHeap).
+    // ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn basic_alloc_dealloc() {
