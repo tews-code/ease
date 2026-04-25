@@ -8,8 +8,8 @@
 pub mod buddy;
 pub mod bump;
 pub mod freelist;
+pub mod kalloc;
 pub mod slab;
-pub mod tier;
 
 // Allocator-agnostic QEMU benchmark suite. Compiles only when one of the
 // global allocators is active and the test-alloc feature is on.

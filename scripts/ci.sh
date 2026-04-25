@@ -4,12 +4,12 @@
 
 set -e  # Exit immediately on any failure
 
-ALLOCATOR="${1:-alloc-tier}"
+ALLOCATOR="${1:-alloc-kalloc}"
 TEST_SET="${2:-${TEST_SET:-test-all}}"
 FEATURES="$TEST_SET,$ALLOCATOR"
 
 case "$ALLOCATOR" in
-    alloc-slab|alloc-freelist|alloc-bump|alloc-buddy|alloc-tier) ;;
+    alloc-slab|alloc-freelist|alloc-bump|alloc-buddy|alloc-kalloc) ;;
     *) echo "error: unknown allocator '$ALLOCATOR'" >&2
        echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump, alloc-buddy, alloc-tier" >&2
        exit 1 ;;

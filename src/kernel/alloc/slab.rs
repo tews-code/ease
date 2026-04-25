@@ -55,11 +55,11 @@ struct SlabInner {
 unsafe impl Send for SlabInner {}
 
 // Slab allocator
-pub(crate) struct Pool<const SLOT_SIZE: usize, const SLOT_COUNT: usize> {
+pub(crate) struct Slab<const SLOT_SIZE: usize, const SLOT_COUNT: usize> {
     inner: AllocatorLock<SlabInner>,
 }
 
-impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Pool<SLOT_SIZE, SLOT_COUNT> {
+impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Slab<SLOT_SIZE, SLOT_COUNT> {
     pub const fn new() -> Self {
         Self {
             inner: AllocatorLock::new(SlabInner {
@@ -128,7 +128,7 @@ impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Pool<SLOT_SIZE, SLOT_COUNT
 }
 
 unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
-    for Pool<SLOT_SIZE, SLOT_COUNT>
+    for Slab<SLOT_SIZE, SLOT_COUNT>
 {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         // Zero-size requests get a dangling, non-null, aligned pointer
@@ -224,7 +224,7 @@ mod host_tests {
     const SLOT_COUNT: usize = 32;
     const HEAP_BYTES: usize = SLOT_COUNT * SLOT_SIZE;
 
-    type TestPool = Pool<SLOT_SIZE, SLOT_COUNT>;
+    type TestPool = Slab<SLOT_SIZE, SLOT_COUNT>;
 
     /// Owns a chunk of host memory that the test allocator treats as the heap.
     /// Freed automatically when the helper goes out of scope.

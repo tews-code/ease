@@ -3,27 +3,27 @@
 use core::alloc::GlobalAlloc;
 
 use crate::kernel::alloc::buddy::Buddy;
-use crate::kernel::alloc::slab::Pool;
+use crate::kernel::alloc::slab::Slab;
 
 const BASE_SIZE: usize = 4096;
 
-pub struct Tier {
-    pool_16: Pool<16, { BASE_SIZE / 16 }>,
-    pool_32: Pool<32, { BASE_SIZE / 32 }>,
-    pool_64: Pool<64, { BASE_SIZE / 64 }>,
-    pool_128: Pool<128, { BASE_SIZE / 128 }>,
-    pool_256: Pool<256, { BASE_SIZE / 256 }>,
+pub struct KAlloc {
+    pool_16: Slab<16, { BASE_SIZE / 16 }>,
+    pool_32: Slab<32, { BASE_SIZE / 32 }>,
+    pool_64: Slab<64, { BASE_SIZE / 64 }>,
+    pool_128: Slab<128, { BASE_SIZE / 128 }>,
+    pool_256: Slab<256, { BASE_SIZE / 256 }>,
     buddy: Buddy,
 }
 
-impl Tier {
+impl KAlloc {
     pub const fn new() -> Self {
         Self {
-            pool_16: Pool::new(),
-            pool_32: Pool::new(),
-            pool_64: Pool::new(),
-            pool_128: Pool::new(),
-            pool_256: Pool::new(),
+            pool_16: Slab::new(),
+            pool_32: Slab::new(),
+            pool_64: Slab::new(),
+            pool_128: Slab::new(),
+            pool_256: Slab::new(),
             buddy: Buddy::new(),
         }
     }
@@ -33,7 +33,7 @@ impl Tier {
     }
 }
 
-unsafe impl GlobalAlloc for Tier {
+unsafe impl GlobalAlloc for KAlloc {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         unsafe { self.buddy.alloc(layout) }
     }

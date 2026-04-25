@@ -37,10 +37,10 @@ use crate::kernel::alloc::buddy::Buddy;
 use crate::kernel::alloc::bump::Bump;
 #[cfg(feature = "alloc-freelist")]
 use crate::kernel::alloc::freelist::FreeBlockList;
+#[cfg(feature = "alloc-kalloc")]
+use crate::kernel::alloc::kalloc::KAlloc;
 #[cfg(feature = "alloc-slab")]
 use crate::kernel::alloc::slab::Pool;
-#[cfg(feature = "alloc-tier")]
-use crate::kernel::alloc::tier::Tier;
 
 extern crate alloc;
 
@@ -78,7 +78,7 @@ pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-slab")]
-pub(crate) static POOL64: Pool</*SLOT_SIZE*/ 64, /*SLOT_COUNT*/ 4096> = Pool::new();
+pub(crate) static SLAB64: Slab</*SLOT_SIZE*/ 64, /*SLOT_COUNT*/ 4096> = Slab::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-bump")]
@@ -89,8 +89,8 @@ pub(crate) static BUMP: Bump = Bump::new();
 pub(crate) static BUDDY: Buddy = Buddy::new();
 
 #[global_allocator]
-#[cfg(feature = "alloc-tier")]
-pub(crate) static KMALLOC: Tier = Tier::new();
+#[cfg(feature = "alloc-kalloc")]
+pub(crate) static KALLOC: KAlloc = KAlloc::new();
 
 /// Initialise the global allocator from the linker-defined heap region.
 /// Must be called exactly once during boot, before any allocations.
@@ -116,9 +116,9 @@ fn init_global_allocator() {
     unsafe {
         BUDDY.init(start, size)
     };
-    #[cfg(feature = "alloc-tier")]
+    #[cfg(feature = "alloc-kalloc")]
     unsafe {
-        KMALLOC.init(start, size)
+        KALLOC.init(start, size)
     };
 }
 

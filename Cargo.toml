@@ -13,13 +13,13 @@ name = "ease"
 path = "src/main.rs"
 
 [features]
-default = ["test-all", "alloc-tier"]
+default = ["test-all", "alloc-kalloc"]
 qemu = []  # For QEMU-specific code
 alloc-buddy = []
 alloc-bump = []
 alloc-freelist = []
 alloc-slab = []
-alloc-tier = []
+alloc-kalloc = []
 test-alloc = []
 test-bss = []
 test-clint = []
