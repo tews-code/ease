@@ -148,7 +148,7 @@ unsafe impl GlobalAlloc for Bump {
 
 // Host-runnable unit tests for the bump allocator. Run on the host
 // target so they execute under both `cargo test --lib` and Miri.
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
 mod host_tests {
     use super::*;
     use core::alloc::Layout;

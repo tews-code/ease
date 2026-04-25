@@ -76,7 +76,7 @@ const _: () = assert!(core::mem::size_of::<FreeBlock>() >= MIN_BLOCK_SIZE);
 
 struct BuddyInner {
     list_heads: [*mut FreeBlock; ORDERS_COUNT],
-    heap: *mut u8,
+    heap_addr: usize,
     pair_bits: Bitmap<BITS, { bitmap_words_for(BITS) }>,
     // Highest order usable for this heap. Equals `MAX_ORDER` when the heap
     // is the full `MIN_BLOCK_SIZE << MAX_ORDER` bytes, and less when the
@@ -116,7 +116,7 @@ impl BuddyInner {
 
         // Toggle the allocated pair bit
         if order < MAX_ORDER {
-            let bit = pair_bit(order, block.addr() - self.heap.addr());
+            let bit = pair_bit(order, block.addr() - self.heap_addr);
             self.pair_bits.toggle(bit);
         }
 
@@ -143,7 +143,7 @@ impl BuddyInner {
 
         // Toggle the freed pair bit
         if order < MAX_ORDER {
-            let bit = pair_bit(order, block.addr() - self.heap.addr());
+            let bit = pair_bit(order, block.addr() - self.heap_addr);
             self.pair_bits.toggle(bit)
         } else {
             false
@@ -154,12 +154,9 @@ impl BuddyInner {
     pub unsafe fn split(&mut self, order: usize, block: *mut FreeBlock) {
         // Write a free block at the buddy address
         // New — offset-based, alignment-free
-        let block_offset = block.addr() - self.heap.addr();
+        let block_offset = block.addr() - self.heap_addr;
         let buddy_offset = block_offset ^ (MIN_BLOCK_SIZE << order);
-        let buddy = self
-            .heap
-            .with_addr(self.heap.addr() + buddy_offset)
-            .cast::<FreeBlock>();
+        let buddy = block.with_addr(self.heap_addr + buddy_offset);
         unsafe {
             core::ptr::write(
                 buddy,
@@ -205,7 +202,7 @@ impl Buddy {
         Self {
             inner: AllocatorLock::new(BuddyInner {
                 list_heads: [core::ptr::null_mut(); ORDERS_COUNT],
-                heap: core::ptr::null_mut(),
+                heap_addr: 0,
                 pair_bits: Bitmap::<BITS, { bitmap_words_for(BITS) }>::new(),
                 top_order: 0,
             }),
@@ -216,14 +213,14 @@ impl Buddy {
         // Take the lock on the allocator list
         let mut inner = self.inner.lock();
         // Ensure init is only called once
-        assert!(inner.heap.is_null());
+        assert!(inner.heap_addr == 0);
         // Buddy allocator size must be a power of two, at least one minimum
         // block, and no larger than the allocator's maximum order.
         assert!(size.is_power_of_two());
         assert!(size >= MIN_BLOCK_SIZE);
         assert!(size <= MIN_BLOCK_SIZE << MAX_ORDER);
         // Get the provenance of the heap pointer
-        inner.heap = start;
+        inner.heap_addr = start.addr();
         // Derive the top order from the heap size. `size / MIN_BLOCK_SIZE` is
         // a power of two, so its log2 is the order whose block spans the heap.
         let top_order = (size / MIN_BLOCK_SIZE).ilog2() as usize;
@@ -231,14 +228,14 @@ impl Buddy {
         // Set up the largest order free block to cover the entire heap
         unsafe {
             core::ptr::write(
-                inner.heap as *mut FreeBlock,
+                start as *mut FreeBlock,
                 FreeBlock {
                     next: core::ptr::null_mut(),
                     prev: core::ptr::null_mut(),
                 },
             );
         }
-        let block = inner.heap as *mut FreeBlock;
+        let block = start as *mut FreeBlock;
         unsafe { inner.push(top_order, block) };
     }
 }
@@ -248,7 +245,7 @@ unsafe impl GlobalAlloc for Buddy {
         // Take lock on the allocator free list
         let mut inner = self.inner.lock();
         // Ensure already initialised
-        assert!(!inner.heap.is_null());
+        assert!(inner.heap_addr != 0);
         // If allocation size is zero return a dangling, provenance-free
         // sentinel. The GlobalAlloc contract forbids dereferencing it.
         if layout.size() == 0 {
@@ -304,12 +301,13 @@ unsafe impl GlobalAlloc for Buddy {
             if order + 1 > MAX_ORDER {
                 break;
             }
-            let block_off = block.addr() - inner.heap.addr();
+            let block_off = block.addr() - inner.heap_addr;
             let buddy_off = buddy_offset(order, block_off);
-            let buddy = inner
-                .heap
-                .with_addr(inner.heap.addr() + buddy_off)
-                .cast::<FreeBlock>();
+            // let buddy = inner
+            //     .heap
+            //     .with_addr(inner.heap.addr() + buddy_off)
+            //     .cast::<FreeBlock>();
+            let buddy = block.with_addr(inner.heap_addr + buddy_off);
             unsafe { inner.remove_from_list(order, buddy) };
             unsafe { inner.remove_from_list(order, block) };
             // Move up an order to see if we can coalesce again
@@ -322,7 +320,7 @@ unsafe impl GlobalAlloc for Buddy {
     }
 }
 
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
 mod host_tests {
     use super::*;
     use core::alloc::Layout;

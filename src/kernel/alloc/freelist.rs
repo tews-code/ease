@@ -424,7 +424,7 @@ unsafe impl GlobalAlloc for FreeBlockList {
 //     cargo test --lib --target $HOST_TARGET
 // Run under Miri to verify soundness:
 //     cargo +nightly miri test --lib --target $HOST_TARGET
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
 mod host_tests {
     use super::*;
     use core::alloc::Layout;

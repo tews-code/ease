@@ -47,6 +47,8 @@ mod baseline {
     pub(super) const ONE_BYTE_ALLOC: u64 = 600;
     #[cfg(feature = "alloc-buddy")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 4_000;
+    #[cfg(feature = "alloc-slab")]
+    pub(super) const ONE_BYTE_ALLOC: u64 = 1_500;
 
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
@@ -56,6 +58,8 @@ mod baseline {
     pub(super) const SMALL_MIX_ALLOC: u64 = 1_000;
     #[cfg(feature = "alloc-buddy")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 6_000;
+    #[cfg(feature = "alloc-slab")]
+    pub(super) const SMALL_MIX_ALLOC: u64 = 3_000;
     // Bump can't free, so its sidecar of live small_mix allocations
     // grows with each iteration. Cap iters so the cumulative footprint
     // stays comfortably inside the 256 KiB heap.

@@ -99,7 +99,7 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
 //
 // Gated on `not(target_os = "none")` so the kernel build (and the
 // existing QEMU `#[test_case]` framework) is unaffected.
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(all(test, not(target_os = "none"), feature = "test-collections"))]
 mod host_tests {
     use super::*;
 

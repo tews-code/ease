@@ -46,7 +46,6 @@ struct FreeSlab {
 
 // Inner is protected by lock and allows interior mutability
 struct SlabInner {
-    heap: *mut u8, // base, for validation and provenance
     head: *mut FreeSlab,
 }
 
@@ -64,7 +63,6 @@ impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Pool<SLOT_SIZE, SLOT_COUNT
     pub const fn new() -> Self {
         Self {
             inner: AllocatorLock::new(SlabInner {
-                heap: core::ptr::null_mut(),
                 head: core::ptr::null_mut(),
             }),
         }
@@ -79,19 +77,43 @@ impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Pool<SLOT_SIZE, SLOT_COUNT
     ///   - `[start, start + size)` is valid for reads and writes for
     ///     the entire lifetime of the allocator.
     ///   - The region is exclusively owned by this allocator.
+    #[allow(dead_code)]
     pub unsafe fn init(&self, heap_ptr: *mut u8, size: usize) {
         let mut inner = self.inner.lock();
         // Only initialise once
         assert!(inner.head.is_null());
-        assert!(inner.heap.is_null());
         // Derive heap provenance from the heap pointer
-        inner.heap = heap_ptr;
         inner.head = heap_ptr as *mut FreeSlab;
         // Heap slot array must match size of the heap from the linker script
         assert_eq!(SLOT_COUNT * SLOT_SIZE, size);
         // Set up the free list
         unsafe {
-            let base = inner.heap as *mut FreeSlab;
+            let base = inner.head;
+            for i in 0..SLOT_COUNT {
+                let current = base.with_addr(base.addr() + i * SLOT_SIZE);
+                let next = if i + 1 < SLOT_COUNT {
+                    base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
+                } else {
+                    core::ptr::null_mut()
+                };
+                core::ptr::write(current, FreeSlab { next });
+            }
+        }
+    }
+
+    pub unsafe fn add_region(&self, start: *mut u8, size: usize) {
+        // Heap slot array must match size of the memory region provided
+        assert_eq!(SLOT_COUNT * SLOT_SIZE, size);
+        let mut inner = self.inner.lock();
+        // Make sure this region has not already been initialised
+        if inner.head.is_null() {
+            unsafe { self.init(start, size) };
+        }
+        // Derive the heap pointer from the start of the region to keep provenance
+        inner.head = start as *mut FreeSlab;
+        // Set up the free list in the memory region provided
+        unsafe {
+            let base = inner.head;
             for i in 0..SLOT_COUNT {
                 let current = base.with_addr(base.addr() + i * SLOT_SIZE);
                 let next = if i + 1 < SLOT_COUNT {
@@ -126,8 +148,7 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         }
         // Get the top of the list
         let mut inner = self.inner.lock();
-        // Ensure we are not using alloc before init
-        assert!(!inner.heap.is_null());
+
         let current = inner.head;
         // OOM check - current is pointing to last slab
         if current.is_null() {
@@ -162,24 +183,18 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         }
         // Calculate the number of slabs for dealloc_ptr's offset
         let mut inner = self.inner.lock();
-        let dealloc_offset = dealloc_ptr.addr() - inner.heap.addr();
-        // Is the pointer within the heap range?
-        assert!(dealloc_offset < SLOT_COUNT * SLOT_SIZE);
-        // Is the offset aligned to SLOT_SIZE?
-        assert!(dealloc_offset.is_multiple_of(SLOT_SIZE));
 
         // SAFETY: `dealloc_ptr` was returned by a prior `alloc` on this
-        // allocator (GlobalAlloc contract), so it points to a valid
-        // SLOT_SIZE-byte slot within the heap. We re-derive the write
-        // pointer from `inner.heap` to guarantee heap-wide provenance
-        // regardless of the caller's pointer history — writing through
-        // `dealloc_ptr` directly would use only the caller's (possibly
-        // narrower) tag.
+        // allocator and not yet freed, per the GlobalAlloc contract. It
+        // therefore points to a writable SLOT_SIZE-byte slot with provenance
+        // sufficient for the FreeSlab write below. The caller surrendered
+        // ownership by calling dealloc, so no aliasing reference exists.
         unsafe {
-            let slot_ptr = inner.heap.with_addr(dealloc_ptr.addr()) as *mut FreeSlab;
+            let slot_ptr = dealloc_ptr as *mut FreeSlab;
             core::ptr::write(slot_ptr, FreeSlab { next: inner.head });
             inner.head = slot_ptr;
         }
+
         #[cfg(test)]
         let _ = DEALLOCATED_BYTES.fetch_add(SLOT_SIZE as u32, Ordering::Relaxed);
     }
@@ -195,7 +210,7 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
 //     cargo test --lib --target $HOST_TARGET
 // Run under Miri to verify soundness:
 //     cargo +nightly miri test --lib --target $HOST_TARGET
-#[cfg(all(test, not(target_os = "none")))]
+#[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
 mod host_tests {
     use super::*;
     use core::alloc::Layout;
