@@ -21,32 +21,31 @@ pub(crate) static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
 //  Heap Memory
-//  +------+------+------+------+------+--------+----------+
-//  | slot0| slot1| slot2| slot3| slot4| slotN-1|  slotN   |
-//  |      |      |      |      |      |        |          |
-//  |  64B |  64B |  64B |  64B |      |  64B   |          |
-//  |      |      |      |      |      |        |          |
-//  | used |ptr->3| used |ptr->4|ptr->9| used   | ptr:Null |
-//  +------+------+------+------+------+--------+----------+
-//         ^      ^
-//         |      + dealloc_ptr points to start of used slab
-//         |
-//         +--- head is pointer to start of free list
+//  +------+------+------+------+------+--------+------+
+//  | slot0| slot1| slot2| slot3| slot4| slotN-1| slotN|
+//  |      |      |      |      |      |        |      |
+//  |  64B |  64B |  64B |  64B |      |  64B   |      |
+//  |      |      |      |      |      |        |      |
+//  | used |ptr->N| used |ptr->4|ptr->1|ptr:Null|  used|
+//  +------+------+------+------+------+--------+------+
+//                ^      ^
+//                + dealloc_ptr points to start of used slot
+//                       |
+//                       +--- head is pointer to start of free list
 //
-//  Slot0 is used
-//  Slot1 points to next free slot index 3 (and free_head points here)
-//  Slot2 is used
-//  Slot3 points to next free slot 4 etc.
+//  The list head is currently pointing to a free slot3
+//  The free slot list is slot3 -> slot 4 -> slot 1 -> slot N-1
 //  Null pointer marks end of list
+//  Slots 0, 2 and N are used
 
-/// Free slab pointer
-struct FreeSlab {
-    next: *mut FreeSlab,
+/// Free slot pointer for linked list
+struct FreeSlot {
+    next: *mut FreeSlot,
 }
 
 // Inner is protected by lock and allows interior mutability
 struct SlabInner {
-    head: *mut FreeSlab,
+    head: *mut FreeSlot,
 }
 
 // FreeList only references data on the heap
@@ -55,11 +54,11 @@ struct SlabInner {
 unsafe impl Send for SlabInner {}
 
 // Slab allocator
-pub(crate) struct Slab<const SLOT_SIZE: usize, const SLOT_COUNT: usize> {
+pub(crate) struct Slab<const SLOT_SIZE: usize> {
     inner: AllocatorLock<SlabInner>,
 }
 
-impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Slab<SLOT_SIZE, SLOT_COUNT> {
+impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
     pub const fn new() -> Self {
         Self {
             inner: AllocatorLock::new(SlabInner {
@@ -68,74 +67,61 @@ impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> Slab<SLOT_SIZE, SLOT_COUNT
         }
     }
 
-    /// Initialise the allocator with a heap region of `size` bytes
-    /// starting at `start`. Must be called exactly once before any
-    /// allocations.
+    /// Add a slab to the allocator with a heap region of `size` bytes
+    /// starting at `start`. Used to initialise or add additional slabs.
     ///
     /// # Safety
     /// Caller must guarantee:
     ///   - `[start, start + size)` is valid for reads and writes for
     ///     the entire lifetime of the allocator.
     ///   - The region is exclusively owned by this allocator.
-    #[allow(dead_code)]
-    pub unsafe fn init(&self, heap_ptr: *mut u8, size: usize) {
-        let mut inner = self.inner.lock();
-        // Only initialise once
-        assert!(inner.head.is_null());
-        // Derive heap provenance from the heap pointer
-        inner.head = heap_ptr as *mut FreeSlab;
-        // Heap slot array must match size of the heap from the linker script
-        assert_eq!(SLOT_COUNT * SLOT_SIZE, size);
-        // Set up the free list
-        unsafe {
-            let base = inner.head;
-            for i in 0..SLOT_COUNT {
-                let current = base.with_addr(base.addr() + i * SLOT_SIZE);
-                let next = if i + 1 < SLOT_COUNT {
-                    base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
-                } else {
-                    core::ptr::null_mut()
-                };
-                core::ptr::write(current, FreeSlab { next });
-            }
-        }
-    }
+    /// # Panics
+    /// Panics if:
+    ///   - `size` is not a multiple of and greater than `SLOT_SIZE`
+    pub unsafe fn add_slab(&self, start: *mut u8, size: usize) {
+        // Heap size of the slab must must be a multiple of the slot size
+        // Note that size must be larger than SLOT_SIZE as the first slot
+        // is used for metadata
+        assert!(size > SLOT_SIZE && size.is_multiple_of(SLOT_SIZE));
+        let slot_count = size / SLOT_SIZE;
+        // Get the slab details
+        let mut slab = self.inner.lock();
 
-    pub unsafe fn add_region(&self, start: *mut u8, size: usize) {
-        // Heap slot array must match size of the memory region provided
-        assert_eq!(SLOT_COUNT * SLOT_SIZE, size);
-        let mut inner = self.inner.lock();
-        // Make sure this region has not already been initialised
-        if inner.head.is_null() {
-            unsafe { self.init(start, size) };
-        }
-        // Derive the heap pointer from the start of the region to keep provenance
-        inner.head = start as *mut FreeSlab;
-        // Set up the free list in the memory region provided
-        unsafe {
-            let base = inner.head;
-            for i in 0..SLOT_COUNT {
-                let current = base.with_addr(base.addr() + i * SLOT_SIZE);
-                let next = if i + 1 < SLOT_COUNT {
-                    base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
-                } else {
-                    core::ptr::null_mut()
-                };
-                core::ptr::write(current, FreeSlab { next });
+        // We can insert the new slab into the list by pointing the head to
+        // the begining of the new slab, and point the end of the new slab
+        // to the current free slot (what head was pointing to)
+        //
+        // If we being called the first time (init) then the head is null
+        // and the logic remains the same.
+
+        // First store the current head
+        let head = slab.head;
+        // Now create a free slot list across the new slab
+        // The last slot points to the old head pointee
+        let base = start as *mut FreeSlot;
+        for i in 0..slot_count {
+            let current = base.with_addr(base.addr() + i * SLOT_SIZE);
+            let next = if i + 1 < slot_count {
+                base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
+            } else {
+                head
+            };
+            unsafe {
+                core::ptr::write(current, FreeSlot { next });
             }
         }
+        // Now set the head to the base of the new slab
+        slab.head = base;
     }
 }
 
-unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
-    for Slab<SLOT_SIZE, SLOT_COUNT>
-{
+unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         // Zero-size requests get a dangling, non-null, aligned pointer
         // per the GlobalAlloc convention. No slot is consumed, which
         // keeps the slab's full capacity available for real
         // allocations. dealloc mirrors this as a no-op when
-        // layout.size() == 0.
+        // layout size is 0.
         if layout.size() == 0 {
             return core::ptr::without_provenance_mut(layout.align());
         }
@@ -146,18 +132,20 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         if layout.align() > SLOT_SIZE {
             return core::ptr::null_mut();
         }
-        // Get the top of the list
-        let mut inner = self.inner.lock();
+        // Get the slab details
+        let mut slab = self.inner.lock();
 
-        let current = inner.head;
-        // OOM check - current is pointing to last slab
-        if current.is_null() {
+        // OOM check - if current is pointing to last slab
+        // or we haven't had a slab set up yet then we are done
+        if slab.head.is_null() {
             return core::ptr::null_mut();
         }
 
-        // Allocate a slab
-        // List head points to what current is pointing to
-        inner.head = unsafe { (*current).next };
+        // Pop a free slot
+        // Keep the current head pointer as this is the allocated slot
+        let current = slab.head;
+        // Set list head to point to current slot's next
+        slab.head = unsafe { (*current).next };
 
         #[cfg(test)]
         let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -168,7 +156,7 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         #[cfg(test)]
         let _ = HEAP_TOP.fetch_max(current.addr() + SLOT_SIZE, Ordering::Relaxed);
 
-        // Return a pointer to the current slab
+        // Return a pointer to the current slot
         current as *mut u8
     }
 
@@ -181,18 +169,19 @@ unsafe impl<const SLOT_SIZE: usize, const SLOT_COUNT: usize> GlobalAlloc
         if layout.size() == 0 {
             return;
         }
-        // Calculate the number of slabs for dealloc_ptr's offset
-        let mut inner = self.inner.lock();
+        // Get the slab details
+        let mut slab = self.inner.lock();
 
+        // Calculate the number of slots for dealloc_ptr's offset
         // SAFETY: `dealloc_ptr` was returned by a prior `alloc` on this
         // allocator and not yet freed, per the GlobalAlloc contract. It
         // therefore points to a writable SLOT_SIZE-byte slot with provenance
         // sufficient for the FreeSlab write below. The caller surrendered
         // ownership by calling dealloc, so no aliasing reference exists.
         unsafe {
-            let slot_ptr = dealloc_ptr as *mut FreeSlab;
-            core::ptr::write(slot_ptr, FreeSlab { next: inner.head });
-            inner.head = slot_ptr;
+            let slot_ptr = dealloc_ptr as *mut FreeSlot;
+            core::ptr::write(slot_ptr, FreeSlot { next: slab.head });
+            slab.head = slot_ptr;
         }
 
         #[cfg(test)]
@@ -224,7 +213,7 @@ mod host_tests {
     const SLOT_COUNT: usize = 32;
     const HEAP_BYTES: usize = SLOT_COUNT * SLOT_SIZE;
 
-    type TestPool = Slab<SLOT_SIZE, SLOT_COUNT>;
+    type TestPool = Slab<SLOT_SIZE>;
 
     /// Owns a chunk of host memory that the test allocator treats as the heap.
     /// Freed automatically when the helper goes out of scope.
@@ -260,7 +249,7 @@ mod host_tests {
         let allocator = TestPool::new();
         // SAFETY: The TestHeap region is exclusively owned by the
         // returned allocator for as long as the test holds a reference.
-        unsafe { allocator.init(heap.ptr, heap.size) };
+        unsafe { allocator.add_slab(heap.ptr, heap.size) };
         allocator
     }
 

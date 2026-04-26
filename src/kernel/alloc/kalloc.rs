@@ -8,11 +8,11 @@ use crate::kernel::alloc::slab::Slab;
 const BASE_SIZE: usize = 4096;
 
 pub struct KAlloc {
-    pool_16: Slab<16, { BASE_SIZE / 16 }>,
-    pool_32: Slab<32, { BASE_SIZE / 32 }>,
-    pool_64: Slab<64, { BASE_SIZE / 64 }>,
-    pool_128: Slab<128, { BASE_SIZE / 128 }>,
-    pool_256: Slab<256, { BASE_SIZE / 256 }>,
+    pool_16: Slab<16>,
+    pool_32: Slab<32>,
+    pool_64: Slab<64>,
+    pool_128: Slab<128>,
+    pool_256: Slab<256>,
     buddy: Buddy,
 }
 

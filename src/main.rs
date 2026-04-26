@@ -40,7 +40,7 @@ use crate::kernel::alloc::freelist::FreeBlockList;
 #[cfg(feature = "alloc-kalloc")]
 use crate::kernel::alloc::kalloc::KAlloc;
 #[cfg(feature = "alloc-slab")]
-use crate::kernel::alloc::slab::Pool;
+use crate::kernel::alloc::slab::Slab;
 
 extern crate alloc;
 
@@ -78,7 +78,7 @@ pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-slab")]
-pub(crate) static SLAB64: Slab</*SLOT_SIZE*/ 64, /*SLOT_COUNT*/ 4096> = Slab::new();
+pub(crate) static SLAB64: Slab</*SLOT_SIZE*/ 64> = Slab::new();
 
 #[global_allocator]
 #[cfg(feature = "alloc-bump")]
@@ -106,7 +106,7 @@ fn init_global_allocator() {
     };
     #[cfg(feature = "alloc-slab")]
     unsafe {
-        POOL64.init(start, size)
+        SLAB64.add_slab(start, size)
     };
     #[cfg(feature = "alloc-bump")]
     unsafe {
