@@ -21,7 +21,8 @@ pub mod slab;
         feature = "alloc-slab",
         feature = "alloc-freelist",
         feature = "alloc-bump",
-        feature = "alloc-buddy"
+        feature = "alloc-buddy",
+        feature = "alloc-kalloc"
     )
 ))]
 mod bench;

@@ -35,6 +35,17 @@ use crate::kernel::alloc::buddy::{
     ALLOC_COUNT, ALLOCATED_BYTES, DEALLOCATED_BYTES, HEAP_TOP, PADDING_BYTES,
 };
 
+// kalloc dispatches small allocs to slab and large allocs to buddy. The
+// bench workloads (alloc_one_byte, alloc_small_mix) are all ≤ 64 bytes,
+// so they all route through slab. Slab's counters are therefore the
+// representative ones for these workloads. If you add a workload that
+// exercises sizes > 256 bytes, you'd see those allocations in buddy's
+// counters and they wouldn't show up here.
+#[cfg(feature = "alloc-kalloc")]
+use crate::kernel::alloc::slab::{
+    ALLOC_COUNT, ALLOCATED_BYTES, DEALLOCATED_BYTES, HEAP_TOP, PADDING_BYTES,
+};
+
 #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
 use alloc::string::ToString;
 #[cfg(any(feature = "alloc-freelist", feature = "alloc-bump"))]
@@ -49,6 +60,8 @@ mod baseline {
     pub(super) const ONE_BYTE_ALLOC: u64 = 4_000;
     #[cfg(feature = "alloc-slab")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 1_500;
+    #[cfg(feature = "alloc-kalloc")]
+    pub(super) const ONE_BYTE_ALLOC: u64 = 2_500;
 
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
@@ -60,6 +73,8 @@ mod baseline {
     pub(super) const SMALL_MIX_ALLOC: u64 = 6_000;
     #[cfg(feature = "alloc-slab")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 3_000;
+    #[cfg(feature = "alloc-kalloc")]
+    pub(super) const SMALL_MIX_ALLOC: u64 = 5_000;
     // Bump can't free, so its sidecar of live small_mix allocations
     // grows with each iteration. Cap iters so the cumulative footprint
     // stays comfortably inside the 256 KiB heap.
