@@ -51,6 +51,19 @@ impl KAlloc {
         };
         unsafe { pool.alloc(layout) }
     }
+
+    /// Dealloc to a pool, then ask the pool whether the slab containing
+    /// the freed slot is now empty. If so, hand its page back to buddy.
+    unsafe fn dealloc_via<const N: usize>(&self, pool: &Slab<N>, ptr: *mut u8, layout: Layout) {
+        unsafe { pool.dealloc(ptr, layout) };
+        // The slab that owns this slot starts at the BASE_SIZE-aligned
+        // address below ptr. Round down with the bitmask trick.
+        let slab_base = ptr.with_addr(ptr.addr() & !(BASE_SIZE - 1));
+        if let Some((page, size)) = unsafe { pool.reclaim_slab(slab_base) } {
+            let page_layout = Layout::from_size_align(size, size).unwrap();
+            unsafe { self.buddy.dealloc(page, page_layout) };
+        }
+    }
 }
 
 unsafe impl GlobalAlloc for KAlloc {
@@ -72,11 +85,11 @@ unsafe impl GlobalAlloc for KAlloc {
         }
         let needed = layout.size().max(layout.align());
         match needed {
-            0..=16 => unsafe { self.pool_16.dealloc(ptr, layout) },
-            17..=32 => unsafe { self.pool_32.dealloc(ptr, layout) },
-            33..=64 => unsafe { self.pool_64.dealloc(ptr, layout) },
-            65..=128 => unsafe { self.pool_128.dealloc(ptr, layout) },
-            129..=256 => unsafe { self.pool_256.dealloc(ptr, layout) },
+            0..=16 => unsafe { self.dealloc_via(&self.pool_16, ptr, layout) },
+            17..=32 => unsafe { self.dealloc_via(&self.pool_32, ptr, layout) },
+            33..=64 => unsafe { self.dealloc_via(&self.pool_64, ptr, layout) },
+            65..=128 => unsafe { self.dealloc_via(&self.pool_128, ptr, layout) },
+            129..=256 => unsafe { self.dealloc_via(&self.pool_256, ptr, layout) },
             _ => unsafe { self.buddy.dealloc(ptr, layout) },
         }
     }
