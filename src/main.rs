@@ -106,7 +106,16 @@ fn init_global_allocator() {
     };
     #[cfg(feature = "alloc-slab")]
     unsafe {
-        SLAB64.add_slab(start, size)
+        // Slab requires each slab region to be aligned to its own size,
+        // so split the heap into page-sized slabs (the heap is page-
+        // aligned by the linker script). Calling add_slab repeatedly
+        // grows the pool by one slab per call.
+        const SLAB_SIZE: usize = 4096;
+        let mut offset = 0;
+        while offset + SLAB_SIZE <= size {
+            SLAB64.add_slab(start.add(offset), SLAB_SIZE);
+            offset += SLAB_SIZE;
+        }
     };
     #[cfg(feature = "alloc-bump")]
     unsafe {

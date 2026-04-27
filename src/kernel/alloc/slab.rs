@@ -21,36 +21,57 @@ pub(crate) static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
 //  Heap Memory
-//  +------+------+------+------+------+--------+------+
-//  | slot0| slot1| slot2| slot3| slot4| slotN-1| slotN|
-//  |      |      |      |      |      |        |      |
-//  |  64B |  64B |  64B |  64B |      |  64B   |      |
-//  |      |      |      |      |      |        |      |
-//  | used |ptr->N| used |ptr->4|ptr->1|ptr:Null|  used|
-//  +------+------+------+------+------+--------+------+
-//                ^      ^
-//                + dealloc_ptr points to start of used slot
-//                       |
-//                       +--- head is pointer to start of free list
-//
-//  The list head is currently pointing to a free slot3
-//  The free slot list is slot3 -> slot 4 -> slot 1 -> slot N-1
-//  Null pointer marks end of list
-//  Slots 0, 2 and N are used
+//      Slab0
+//    +------+------+------+------+------+--------+------+
+//    | slot0| slot1| slot2| slot3| slot4| slotN-1| slotN|
+//    |      |      |      |      |      |        |      |
+//    |  64B |  64B |  64B |  64B |      |  64B   |      |
+//    |      |
+//    |Slab  |ptr->N| used |ptr->4|ptr->1|ptr:Null|  used|
+//    +Header+------+------+------+--------+------+------+
+//    |.count|      ^      ^
+//    |.head |------|------+ head is pointer to start of free list
+// +- |.next |      |
+// |  +------+      |
+// |                |
+// |                + dealloc_ptr points to start of used slot
+// +--+
+//    |
+//    v Slab1
+//    +------+------+------+------+------+--------+------+
+//    | slot0| slot1| slot2| slot3| slot4| slotN-1| slotN|
+//    |      |      |      |      |      |        |      |
+//    |  64B |  64B |  64B |  64B |      |  64B   |      |
+//    |      |      |      |      |      |        |      |
+//    |Slab  |ptr->N|used  |ptr->4|ptr->1|  used  | used |
+//    +Header+------+------+------+------+--------+------+
+//    |.count|             ^
+//    |.head |-------------+
+//    |.next:|
+//    | Null |
+//    +------+
 
 /// Free slot pointer for linked list
 struct FreeSlot {
     next: *mut FreeSlot,
 }
 
-// Inner is protected by lock and allows interior mutability
-struct SlabInner {
+/// Slab header (placed in first slot) linked list
+struct SlabHeader {
+    next: *mut SlabHeader,
     head: *mut FreeSlot,
+    free_count: usize,
+}
+
+// Slab inner for interior mutability
+struct SlabInner {
+    next: *mut SlabHeader,
+    size: usize,
 }
 
 // FreeList only references data on the heap
 // No thread-local references
-// Note that if SlabInner is Send, Slab is Sync from AllocatorLock
+// Note that if SlabHeader is Send, Slab is Sync from AllocatorLock
 unsafe impl Send for SlabInner {}
 
 // Slab allocator
@@ -59,10 +80,14 @@ pub(crate) struct Slab<const SLOT_SIZE: usize> {
 }
 
 impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
+    // The slot size must be large enough for the header
+    const CHECK: () = assert!(core::mem::size_of::<SlabHeader>() <= SLOT_SIZE);
+
     pub const fn new() -> Self {
         Self {
             inner: AllocatorLock::new(SlabInner {
-                head: core::ptr::null_mut(),
+                next: core::ptr::null_mut(),
+                size: 0,
             }),
         }
     }
@@ -75,18 +100,35 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
     ///   - `[start, start + size)` is valid for reads and writes for
     ///     the entire lifetime of the allocator.
     ///   - The region is exclusively owned by this allocator.
+    ///   - The slab is aligned to the slab size
+    ///   - Each additional slab is the same size as the first slab
     /// # Panics
     /// Panics if:
     ///   - `size` is not a multiple of and greater than `SLOT_SIZE`
+    ///   - The slot size is too small for the slab header list (8 bytes)
+    ///   - Additional slab size is not the same as the first slab size
     pub unsafe fn add_slab(&self, start: *mut u8, size: usize) {
         // Heap size of the slab must must be a multiple of the slot size
         // Note that size must be larger than SLOT_SIZE as the first slot
         // is used for metadata
-        assert!(size > SLOT_SIZE && size.is_multiple_of(SLOT_SIZE));
-        let slot_count = size / SLOT_SIZE;
-        // Get the slab details
-        let mut slab = self.inner.lock();
+        assert!(size > SLOT_SIZE);
+        // Slot must be aligned to support bitmask header trick
+        assert!(size.is_power_of_two(), "size must be a power of two");
+        assert!(
+            start.addr().is_multiple_of(size),
+            "start must be aligned to size"
+        );
 
+        // Get the slab list head details
+        let mut slab = self.inner.lock();
+        // Each additional slab must be the same size as the first slab
+        // If we are not the first slab, make sure this is the case
+        if !slab.next.is_null() {
+            assert_eq!(size, slab.size, "all slabs must be the same size");
+        }
+
+        slab.size = size; // Will be overwritten but with the same value each time
+        let slot_count = size / SLOT_SIZE;
         // We can insert the new slab into the list by pointing the head to
         // the begining of the new slab, and point the end of the new slab
         // to the current free slot (what head was pointing to)
@@ -94,24 +136,70 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
         // If we being called the first time (init) then the head is null
         // and the logic remains the same.
 
-        // First store the current head
-        let head = slab.head;
+        // Update the header of the previous slab to point to the new slab
+        unsafe {
+            core::ptr::write(
+                start as *mut SlabHeader,
+                SlabHeader {
+                    next: slab.next, // Prepend
+                    head: start.with_addr(start.addr() + SLOT_SIZE) as *mut FreeSlot,
+                    free_count: slot_count - 1,
+                },
+            );
+        }
+
         // Now create a free slot list across the new slab
         // The last slot points to the old head pointee
         let base = start as *mut FreeSlot;
-        for i in 0..slot_count {
+        // Fill the rest of the slab with a free list
+        for i in 1..slot_count {
             let current = base.with_addr(base.addr() + i * SLOT_SIZE);
             let next = if i + 1 < slot_count {
                 base.with_addr(base.addr() + (i + 1) * SLOT_SIZE)
             } else {
-                head
+                core::ptr::null_mut()
             };
             unsafe {
                 core::ptr::write(current, FreeSlot { next });
             }
         }
-        // Now set the head to the base of the new slab
-        slab.head = base;
+
+        // Save the start address and size
+        slab.next = start as *mut SlabHeader;
+    }
+
+    /// Reclaim an empty slab
+    ///
+    /// Returns None if there are used slots, or a pointer and size if
+    /// the slab can be reclaimed
+    pub unsafe fn reclaim_slab(&self, reclaim_slab: *mut u8) -> Option<(*mut u8, usize)> {
+        // Get the slab list head details
+        let mut slab = self.inner.lock();
+
+        // Walk the list to find the prev and next in the slab header list
+        // We don't trust the reclaim slab pointer that we've been given
+        let mut current = slab.next;
+        let mut prev: *mut SlabHeader = core::ptr::null_mut();
+        while !current.is_null() {
+            if current == reclaim_slab as *mut SlabHeader {
+                if unsafe { (*(reclaim_slab as *mut SlabHeader)).free_count }
+                    != (slab.size / SLOT_SIZE) - 1
+                {
+                    return None;
+                }
+                // Unlink this slab header from the list and return
+                if !prev.is_null() {
+                    unsafe { (*prev).next = (*current).next };
+                } else {
+                    slab.next = unsafe { (*current).next };
+                }
+                return Some((current as *mut u8, slab.size));
+            }
+            prev = current;
+            current = unsafe { (*current).next };
+        }
+        // Did not find the slab in the list
+        None
     }
 }
 
@@ -125,39 +213,45 @@ unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
         if layout.size() == 0 {
             return core::ptr::without_provenance_mut(layout.align());
         }
-        // Early panic if allocation request is too large
+        // Early return if allocation request is too large
         if layout.size() > SLOT_SIZE {
             return core::ptr::null_mut();
         }
         if layout.align() > SLOT_SIZE {
             return core::ptr::null_mut();
         }
-        // Get the slab details
-        let mut slab = self.inner.lock();
+        // Get the slab list header
+        let slab = self.inner.lock();
 
-        // OOM check - if current is pointing to last slab
-        // or we haven't had a slab set up yet then we are done
-        if slab.head.is_null() {
-            return core::ptr::null_mut();
+        // Pop a free slot by walking all the slabs
+        let mut current = slab.next;
+        while !current.is_null() {
+            if unsafe { !(*current).head.is_null() } {
+                let allocated = unsafe { (*current).head };
+                unsafe {
+                    (*current).head = (*allocated).next;
+                    (*current).free_count -= 1;
+                }
+
+                #[cfg(test)]
+                let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                let _ = ALLOCATED_BYTES.fetch_add(SLOT_SIZE as u32, Ordering::Relaxed);
+                #[cfg(test)]
+                let _ =
+                    PADDING_BYTES.fetch_add((SLOT_SIZE - layout.size()) as u32, Ordering::Relaxed);
+                #[cfg(test)]
+                let _ = HEAP_TOP.fetch_max(current.addr() + SLOT_SIZE, Ordering::Relaxed);
+
+                // Return a pointer to the current slot
+                return allocated as *mut u8;
+            } else {
+                current = unsafe { (*current).next };
+            }
         }
 
-        // Pop a free slot
-        // Keep the current head pointer as this is the allocated slot
-        let current = slab.head;
-        // Set list head to point to current slot's next
-        slab.head = unsafe { (*current).next };
-
-        #[cfg(test)]
-        let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-        #[cfg(test)]
-        let _ = ALLOCATED_BYTES.fetch_add(SLOT_SIZE as u32, Ordering::Relaxed);
-        #[cfg(test)]
-        let _ = PADDING_BYTES.fetch_add((SLOT_SIZE - layout.size()) as u32, Ordering::Relaxed);
-        #[cfg(test)]
-        let _ = HEAP_TOP.fetch_max(current.addr() + SLOT_SIZE, Ordering::Relaxed);
-
-        // Return a pointer to the current slot
-        current as *mut u8
+        // OOM
+        core::ptr::null_mut()
     }
 
     unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
@@ -169,8 +263,12 @@ unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
         if layout.size() == 0 {
             return;
         }
-        // Get the slab details
-        let mut slab = self.inner.lock();
+        // Get the slab list header details
+        let slab = self.inner.lock();
+
+        // Find the slab header
+        let header =
+            dealloc_ptr.with_addr(dealloc_ptr.addr() & !(slab.size - 1)) as *mut SlabHeader;
 
         // Calculate the number of slots for dealloc_ptr's offset
         // SAFETY: `dealloc_ptr` was returned by a prior `alloc` on this
@@ -180,8 +278,14 @@ unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
         // ownership by calling dealloc, so no aliasing reference exists.
         unsafe {
             let slot_ptr = dealloc_ptr as *mut FreeSlot;
-            core::ptr::write(slot_ptr, FreeSlot { next: slab.head });
-            slab.head = slot_ptr;
+            core::ptr::write(
+                slot_ptr,
+                FreeSlot {
+                    next: (*header).head,
+                },
+            );
+            (*header).head = slot_ptr;
+            (*header).free_count += 1;
         }
 
         #[cfg(test)]
@@ -212,6 +316,9 @@ mod host_tests {
     const SLOT_SIZE: usize = 64;
     const SLOT_COUNT: usize = 32;
     const HEAP_BYTES: usize = SLOT_COUNT * SLOT_SIZE;
+    // Slot 0 holds the slab header, so the number of slots a caller can
+    // actually allocate is one less than SLOT_COUNT.
+    const USABLE_SLOTS: usize = SLOT_COUNT - 1;
 
     type TestPool = Slab<SLOT_SIZE>;
 
@@ -300,7 +407,7 @@ mod host_tests {
         }
         assert_eq!(
             allocations.len(),
-            SLOT_COUNT,
+            USABLE_SLOTS,
             "zero-size alloc consumed a real slot"
         );
         for q in allocations {
@@ -411,7 +518,7 @@ mod host_tests {
 
         let layout = Layout::from_size_align(8, 8).unwrap();
         let mut ptrs = Vec::new();
-        for _ in 0..32 {
+        for _ in 0..USABLE_SLOTS {
             let p = unsafe { a.alloc(layout) };
             assert!(!p.is_null());
             assert_eq!(
@@ -453,13 +560,211 @@ mod host_tests {
             }
             assert_eq!(
                 allocations.len(),
-                SLOT_COUNT,
+                USABLE_SLOTS,
                 "cycle {} did not return full capacity",
                 cycle
             );
             for p in allocations {
                 unsafe { a.dealloc(p, layout) };
             }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Multi-slab tests: add_slab beyond the first call, and reclaim_slab.
+    //
+    // For multi-slab tests we allocate a 2×HEAP_BYTES region and split
+    // it into two HEAP_BYTES-sized halves. The TestHeap's Layout is
+    // 4096-aligned, so each half is HEAP_BYTES-aligned (the
+    // `add_slab` precondition).
+    // ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_two_slabs_doubles_capacity() {
+        let big_heap = TestHeap::new(2 * HEAP_BYTES);
+        let a = TestPool::new();
+        let slab1 = big_heap.ptr;
+        let slab2 = unsafe { big_heap.ptr.add(HEAP_BYTES) };
+        unsafe {
+            a.add_slab(slab1, HEAP_BYTES);
+            a.add_slab(slab2, HEAP_BYTES);
+        }
+
+        let layout = Layout::from_size_align(8, 8).unwrap();
+        let mut allocations = Vec::new();
+        loop {
+            let p = unsafe { a.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            allocations.push(p);
+        }
+        assert_eq!(
+            allocations.len(),
+            2 * USABLE_SLOTS,
+            "two slabs should give 2× usable capacity"
+        );
+        for p in allocations {
+            unsafe { a.dealloc(p, layout) };
+        }
+    }
+
+    #[test]
+    fn reclaim_refuses_non_empty_slab() {
+        let heap = TestHeap::new(HEAP_BYTES);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let p = unsafe { a.alloc(layout) };
+        assert!(!p.is_null());
+
+        // Slab is non-empty — one slot allocated.
+        let result = unsafe { a.reclaim_slab(heap.ptr) };
+        assert!(result.is_none(), "reclaim must refuse a non-empty slab");
+
+        unsafe { a.dealloc(p, layout) };
+    }
+
+    #[test]
+    fn reclaim_returns_pointer_and_size() {
+        let heap = TestHeap::new(HEAP_BYTES);
+        let a = make_allocator(&heap);
+        // No allocations yet — slab is fully empty.
+        let result = unsafe { a.reclaim_slab(heap.ptr) };
+        assert!(result.is_some(), "reclaim must succeed on an empty slab");
+        let (p, size) = result.unwrap();
+        assert_eq!(p as usize, heap.ptr as usize);
+        assert_eq!(size, HEAP_BYTES);
+    }
+
+    #[test]
+    fn reclaim_succeeds_after_full_alloc_dealloc_cycle() {
+        let heap = TestHeap::new(HEAP_BYTES);
+        let a = make_allocator(&heap);
+        let layout = Layout::from_size_align(64, 8).unwrap();
+
+        // Fill the slab.
+        let mut allocations = Vec::new();
+        loop {
+            let p = unsafe { a.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            allocations.push(p);
+        }
+        assert_eq!(allocations.len(), USABLE_SLOTS);
+
+        // Free everything in reverse order to scramble the free list.
+        while let Some(p) = allocations.pop() {
+            unsafe { a.dealloc(p, layout) };
+        }
+
+        // Slab is empty again — reclaim should succeed.
+        let result = unsafe { a.reclaim_slab(heap.ptr) };
+        assert!(
+            result.is_some(),
+            "reclaim should succeed after all slots are returned"
+        );
+    }
+
+    #[test]
+    fn reclaim_makes_alloc_fail_when_only_slab() {
+        // After reclaiming the sole slab, no memory remains: alloc must
+        // return null.
+        let heap = TestHeap::new(HEAP_BYTES);
+        let a = make_allocator(&heap);
+        let result = unsafe { a.reclaim_slab(heap.ptr) };
+        assert!(result.is_some());
+
+        let layout = Layout::from_size_align(8, 8).unwrap();
+        let p = unsafe { a.alloc(layout) };
+        assert!(p.is_null(), "alloc should return null when no slabs remain");
+    }
+
+    #[test]
+    fn reclaim_head_slab_keeps_other_usable() {
+        // Two slabs added; the second-added is at slab_header_start
+        // (prepend semantics). Reclaim it; remaining slab still serves.
+        let big_heap = TestHeap::new(2 * HEAP_BYTES);
+        let a = TestPool::new();
+        let slab1 = big_heap.ptr;
+        let slab2 = unsafe { big_heap.ptr.add(HEAP_BYTES) };
+        unsafe {
+            a.add_slab(slab1, HEAP_BYTES);
+            a.add_slab(slab2, HEAP_BYTES);
+        }
+
+        // slab2 was added second → it's the head of the slab list.
+        let result = unsafe { a.reclaim_slab(slab2) };
+        assert!(result.is_some(), "reclaim of head slab should succeed");
+
+        // Remaining allocations must come from slab1 only.
+        let layout = Layout::from_size_align(8, 8).unwrap();
+        let mut allocations = Vec::new();
+        loop {
+            let p = unsafe { a.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            allocations.push(p);
+        }
+        assert_eq!(
+            allocations.len(),
+            USABLE_SLOTS,
+            "after reclaiming one of two slabs, capacity should drop to one slab's worth"
+        );
+        for p in &allocations {
+            let addr = *p as usize;
+            assert!(
+                addr >= slab1 as usize && addr < slab1 as usize + HEAP_BYTES,
+                "allocation {:p} should fall in slab1 [{:p}, +{}]",
+                p,
+                slab1,
+                HEAP_BYTES
+            );
+        }
+        for p in allocations {
+            unsafe { a.dealloc(p, layout) };
+        }
+    }
+
+    #[test]
+    fn reclaim_tail_slab_keeps_head_usable() {
+        // Reclaim the slab that's *not* at slab_header_start — exercises
+        // the "previous != null" splice-out branch in the slab-list walk.
+        let big_heap = TestHeap::new(2 * HEAP_BYTES);
+        let a = TestPool::new();
+        let slab1 = big_heap.ptr;
+        let slab2 = unsafe { big_heap.ptr.add(HEAP_BYTES) };
+        unsafe {
+            a.add_slab(slab1, HEAP_BYTES);
+            a.add_slab(slab2, HEAP_BYTES);
+        }
+
+        // slab1 was added first → it's the tail of the slab list (slab2
+        // is head). Reclaim slab1.
+        let result = unsafe { a.reclaim_slab(slab1) };
+        assert!(result.is_some(), "reclaim of tail slab should succeed");
+
+        // Remaining capacity is one slab's worth, drawn from slab2.
+        let layout = Layout::from_size_align(8, 8).unwrap();
+        let mut allocations = Vec::new();
+        loop {
+            let p = unsafe { a.alloc(layout) };
+            if p.is_null() {
+                break;
+            }
+            allocations.push(p);
+        }
+        assert_eq!(allocations.len(), USABLE_SLOTS);
+        for p in &allocations {
+            let addr = *p as usize;
+            assert!(
+                addr >= slab2 as usize && addr < slab2 as usize + HEAP_BYTES,
+                "allocation should fall in slab2"
+            );
+        }
+        for p in allocations {
+            unsafe { a.dealloc(p, layout) };
         }
     }
 }
