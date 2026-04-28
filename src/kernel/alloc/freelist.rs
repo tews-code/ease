@@ -78,6 +78,8 @@
 // 0x8001_0024/ +-----------+
 // __heap_end
 
+#![allow(dead_code)]
+
 use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

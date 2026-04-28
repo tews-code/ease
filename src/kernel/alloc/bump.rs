@@ -1,30 +1,6 @@
 //! Bump Allocator
 
-// Rough Diagram of memory layout fo SRAM
-//
-// 0x8000_0000          +-------------------+       SRAM start
-//                      |                   |
-//                      |       text        |
-//                      |       rodata      |
-//                      |       data        |
-//                      |       bss         |
-//
-//                      ~      ~100kb       ~
-//                      +-------------------+
-// 0x8002_0000          |     String        |       Heap start (aligns to 16 - ends 0 in hex) - linker symbol
-//                      |     Vec           |
-// 0x8002_0132          |                   |   <-  Next heap allocation
-//                      ~                   ~           "
-//                      |                   |           v (Grows upwards to end of SRAM)
-//                      |                   |
-// 0x8006_0000          |-------------------|   <- Top of heap
-// 0x8006_0004          |                   |   <- Stack guard
-//                      |                   |
-//                      ~                   ~           ^ (Grows downwards toward start of SRAM)
-//                      |                   |           "
-//                      |   StackVec        |   <- Current stack pointer
-//                      |   TrapFrame       |
-// 0x80082000           +-------------------+   <- End of SRAM
+#![allow(dead_code)]
 
 use core::alloc::{GlobalAlloc, Layout};
 #[cfg(test)]

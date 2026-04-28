@@ -9,7 +9,6 @@ use crate::kernel::alloc::slab::Slab;
 const BASE_SIZE: usize = 4096;
 
 pub struct KAlloc {
-    pool_16: Slab<16>,
     pool_32: Slab<32>,
     pool_64: Slab<64>,
     pool_128: Slab<128>,
@@ -20,7 +19,6 @@ pub struct KAlloc {
 impl KAlloc {
     pub const fn new() -> Self {
         Self {
-            pool_16: Slab::new(),
             pool_32: Slab::new(),
             pool_64: Slab::new(),
             pool_128: Slab::new(),
@@ -70,8 +68,7 @@ unsafe impl GlobalAlloc for KAlloc {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         let required_size = layout.size().max(layout.align()); // 1 byte repr 64 needs 64 bytes
         match required_size {
-            0..=16 => unsafe { self.alloc_via(&self.pool_16, layout) },
-            17..=32 => unsafe { self.alloc_via(&self.pool_32, layout) },
+            0..=32 => unsafe { self.alloc_via(&self.pool_32, layout) },
             33..=64 => unsafe { self.alloc_via(&self.pool_64, layout) },
             65..=128 => unsafe { self.alloc_via(&self.pool_128, layout) },
             129..=256 => unsafe { self.alloc_via(&self.pool_256, layout) },
@@ -85,8 +82,7 @@ unsafe impl GlobalAlloc for KAlloc {
         }
         let needed = layout.size().max(layout.align());
         match needed {
-            0..=16 => unsafe { self.dealloc_via(&self.pool_16, ptr, layout) },
-            17..=32 => unsafe { self.dealloc_via(&self.pool_32, ptr, layout) },
+            0..=32 => unsafe { self.dealloc_via(&self.pool_32, ptr, layout) },
             33..=64 => unsafe { self.dealloc_via(&self.pool_64, ptr, layout) },
             65..=128 => unsafe { self.dealloc_via(&self.pool_128, ptr, layout) },
             129..=256 => unsafe { self.dealloc_via(&self.pool_256, ptr, layout) },
@@ -220,28 +216,27 @@ mod host_tests {
     #[test]
     fn each_size_class_lands_in_a_distinct_pool_page() {
         // Allocating into each size class triggers a separate pool refill,
-        // each from a different 4 KiB buddy block. So the five returned
-        // pointers should land on five distinct slab pages.
+        // each from a different 4 KiB buddy block. So the four returned
+        // pointers should land on four distinct slab pages.
         let heap = TestHeap::new();
         let k = make_kalloc(&heap);
 
         let layouts = [
-            Layout::from_size_align(8, 8).unwrap(),   // pool_16
             Layout::from_size_align(24, 8).unwrap(),  // pool_32
             Layout::from_size_align(48, 8).unwrap(),  // pool_64
             Layout::from_size_align(96, 8).unwrap(),  // pool_128
             Layout::from_size_align(200, 8).unwrap(), // pool_256
         ];
 
-        let mut ptrs = [core::ptr::null_mut::<u8>(); 5];
+        let mut ptrs = [core::ptr::null_mut::<u8>(); 4];
         for (i, layout) in layouts.iter().enumerate() {
             ptrs[i] = unsafe { k.alloc(*layout) };
             assert!(!ptrs[i].is_null(), "alloc for size class {} failed", i);
         }
 
-        let pages: [usize; 5] = core::array::from_fn(|i| page_of(ptrs[i]));
-        for i in 0..5 {
-            for j in (i + 1)..5 {
+        let pages: [usize; 4] = core::array::from_fn(|i| page_of(ptrs[i]));
+        for i in 0..4 {
+            for j in (i + 1)..4 {
                 assert_ne!(
                     pages[i], pages[j],
                     "size class {} and {} share a page — pools should be in distinct buddy pages",

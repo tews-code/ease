@@ -84,6 +84,8 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
     const CHECK: () = assert!(core::mem::size_of::<SlabHeader>() <= SLOT_SIZE);
 
     pub const fn new() -> Self {
+        #[allow(clippy::let_unit_value)]
+        let _ = Self::CHECK;
         Self {
             inner: AllocatorLock::new(SlabInner {
                 next: core::ptr::null_mut(),
@@ -170,24 +172,35 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
 
     /// Reclaim an empty slab
     ///
-    /// Returns None if there are used slots, or a pointer and size if
-    /// the slab can be reclaimed
+    /// Returns None if any slots in the slab are still in use, or a
+    /// pointer and size if the slab can be reclaimed.
+    ///
+    /// # Safety
+    /// `reclaim_slab` must point to a slab base obtained by rounding a
+    /// slot pointer (returned by a prior `alloc` on this allocator) down
+    /// to the slab size. The function dereferences `reclaim_slab` as a
+    /// `SlabHeader` before validating it against the slab list, so an
+    /// invalid pointer is UB. This is the trade for the fast non-empty
+    /// path: caller-supplied input is trusted on the cheap free_count
+    /// read; only when that read says "empty" do we walk the slab list
+    /// to confirm and unlink.
     pub unsafe fn reclaim_slab(&self, reclaim_slab: *mut u8) -> Option<(*mut u8, usize)> {
-        // Get the slab list head details
         let mut slab = self.inner.lock();
 
-        // Walk the list to find the prev and next in the slab header list
-        // We don't trust the reclaim slab pointer that we've been given
+        // Fast path: peek at the slab's free_count via the bitmask-derived
+        // header pointer. If any slot is still in use, return None without
+        // touching the slab list at all.
+        let header = reclaim_slab as *mut SlabHeader;
+        let slot_count = slab.size / SLOT_SIZE;
+        if unsafe { (*header).free_count } != slot_count - 1 {
+            return None;
+        }
+
+        // Slow path: slab is empty, walk the slab list to find and unlink.
         let mut current = slab.next;
         let mut prev: *mut SlabHeader = core::ptr::null_mut();
         while !current.is_null() {
-            if current == reclaim_slab as *mut SlabHeader {
-                if unsafe { (*(reclaim_slab as *mut SlabHeader)).free_count }
-                    != (slab.size / SLOT_SIZE) - 1
-                {
-                    return None;
-                }
-                // Unlink this slab header from the list and return
+            if current == header {
                 if !prev.is_null() {
                     unsafe { (*prev).next = (*current).next };
                 } else {
@@ -198,7 +211,11 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
             prev = current;
             current = unsafe { (*current).next };
         }
-        // Did not find the slab in the list
+        // Pointer wasn't in the slab list — caller violated the safety
+        // contract. The free_count check passed only because the bytes
+        // there happened to look like an empty header. Return None
+        // rather than asserting; the caller's contract is unsafe and
+        // this is the conservative response.
         None
     }
 }
