@@ -11,3 +11,4 @@ pub mod panic;
 pub mod stack_guard;
 pub mod sync;
 pub mod timer;
+pub mod trap;
