@@ -8,6 +8,7 @@
 pub mod alloc;
 pub mod collection;
 pub mod panic;
+pub mod sched;
 pub mod stack_guard;
 pub mod sync;
 pub mod timer;

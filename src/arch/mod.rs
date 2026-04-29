@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod boot;
+pub mod context;
 pub mod csr;
 pub mod mmio;
 pub mod trap;

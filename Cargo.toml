@@ -13,24 +13,26 @@ name = "ease"
 path = "src/main.rs"
 
 [features]
-default = ["test-all", "alloc-kalloc"]
+default = ["test-all", "alloc-kalloc", "sched-coop-rr"]
 qemu = []  # For QEMU-specific code
 alloc-buddy = []
 alloc-bump = []
 alloc-freelist = []
 alloc-slab = []
 alloc-kalloc = []
+sched-coop-rr = []
 test-alloc = []
 test-bss = []
 test-clint = []
 test-collections = []
 test-fs = []
 test-io = []
+test-sched = []
 test-shell = []
 test-stack-guard = []
 test-timer = []
 test-virtio = []
-test-all = ["test-alloc", "test-bss", "test-clint", "test-collections", "test-fs", "test-io", "test-shell", "test-stack-guard", "test-timer", "test-virtio"]
+test-all = ["test-alloc", "test-bss", "test-clint", "test-collections", "test-fs", "test-io", "test-sched", "test-shell", "test-stack-guard", "test-timer", "test-virtio"]
 
 [profile.test]
 opt-level = 1

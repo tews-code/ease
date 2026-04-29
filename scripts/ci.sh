@@ -5,13 +5,21 @@
 set -e  # Exit immediately on any failure
 
 ALLOCATOR="${1:-alloc-kalloc}"
-TEST_SET="${2:-${TEST_SET:-test-all}}"
-FEATURES="$TEST_SET,$ALLOCATOR"
+SCHEDULER="${2:-sched-coop-rr}"
+TEST_SET="${3:-${TEST_SET:-test-all}}"
+FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
 
 case "$ALLOCATOR" in
     alloc-slab|alloc-freelist|alloc-bump|alloc-buddy|alloc-kalloc) ;;
     *) echo "error: unknown allocator '$ALLOCATOR'" >&2
-       echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump, alloc-buddy, alloc-tier" >&2
+       echo "       expected one of: alloc-slab, alloc-freelist, alloc-bump, alloc-buddy, alloc-kalloc" >&2
+       exit 1 ;;
+esac
+
+case "$SCHEDULER" in
+    sched-coop-rr) ;;
+    *) echo "error: unknown scheduler '$SCHEDULER'" >&2
+       echo "       expected one of: sched-coop-rr" >&2
        exit 1 ;;
 esac
 

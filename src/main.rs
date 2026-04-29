@@ -140,6 +140,24 @@ pub(crate) fn heap_start_addr() -> usize {
 }
 
 // =============================================================================
+// Thread Test Function
+// =============================================================================
+
+#[cfg(feature = "test-sched")]
+use crate::kernel::sched;
+#[cfg(feature = "test-sched")]
+use crate::kernel::timer::sleep_ms;
+
+#[cfg(feature = "test-sched")]
+fn thread1() -> ! {
+    loop {
+        print!("A");
+        sleep_ms(500);
+        sched::yield_now();
+    }
+}
+
+// =============================================================================
 // Entry Points
 // =============================================================================
 
@@ -168,6 +186,10 @@ fn kernel_init() -> FrameBuffer {
         fs::volume::fat16_init();
     }
 
+    sched::bootstrap();
+    #[cfg(feature = "test-sched")]
+    sched::spawn(thread1);
+
     drivers::ramfb::FrameBuffer::init()
 }
 
@@ -189,7 +211,14 @@ extern "C" fn main() -> ! {
     let mut console = shell::console::Console::new(fb);
     let _ = writeln!(console, "Hello from EASE!");
     println!("Hello from EASE!");
+    #[cfg(feature = "test-sched")]
+    loop {
+        print!("B");
+        sleep_ms(500);
+        sched::yield_now();
+    }
     // Start the shell
+    #[allow(unreachable_code)]
     let mut shell = shell::Shell::new(console);
     shell.run();
 }
