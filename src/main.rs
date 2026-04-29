@@ -31,16 +31,7 @@
 use core::fmt::Write;
 
 use crate::drivers::ramfb::FrameBuffer;
-#[cfg(feature = "alloc-buddy")]
-use crate::kernel::alloc::buddy::Buddy;
-#[cfg(feature = "alloc-bump")]
-use crate::kernel::alloc::bump::Bump;
-#[cfg(feature = "alloc-freelist")]
-use crate::kernel::alloc::freelist::FreeBlockList;
-#[cfg(feature = "alloc-kalloc")]
-use crate::kernel::alloc::kalloc::KAlloc;
-#[cfg(feature = "alloc-slab")]
-use crate::kernel::alloc::slab::Slab;
+use crate::kernel::sched;
 
 extern crate alloc;
 
@@ -56,104 +47,20 @@ mod qemu;
 mod shell;
 
 // =============================================================================
-// Heap and Global Allocator
-// =============================================================================
-//
-// The global allocator instance lives here in the binary crate (not in
-// kernel/alloc/freelist.rs) so that the `#[global_allocator]` attribute and
-// the linker-symbol references stay confined to code that is only ever
-// compiled for the kernel target. This keeps the FreeBlockList type itself
-// host-testable without polluting the lib crate.
-
-// Safety: Symbols are created in the linker script with valid addresses
-// and are FreeBlock-aligned (16-byte ALIGN in the .heap section).
-unsafe extern "C" {
-    static __heap_start: u8;
-    static __heap_end: u8;
-}
-
-#[global_allocator]
-#[cfg(feature = "alloc-freelist")]
-pub(crate) static FREE_BLOCK_LIST: FreeBlockList = FreeBlockList::new();
-
-#[global_allocator]
-#[cfg(feature = "alloc-slab")]
-pub(crate) static SLAB64: Slab</*SLOT_SIZE*/ 64> = Slab::new();
-
-#[global_allocator]
-#[cfg(feature = "alloc-bump")]
-pub(crate) static BUMP: Bump = Bump::new();
-
-#[global_allocator]
-#[cfg(feature = "alloc-buddy")]
-pub(crate) static BUDDY: Buddy = Buddy::new();
-
-#[global_allocator]
-#[cfg(feature = "alloc-kalloc")]
-pub(crate) static KALLOC: KAlloc = KAlloc::new();
-
-/// Initialise the global allocator from the linker-defined heap region.
-/// Must be called exactly once during boot, before any allocations.
-fn init_global_allocator() {
-    let start = &raw const __heap_start as *mut u8;
-    let size = &raw const __heap_end as usize - start as usize;
-    // Safety: The heap region is defined by the linker, exclusively owned
-    // by the allocator, FreeBlock-aligned, and large enough to hold a
-    // FreeBlock header.
-    #[cfg(feature = "alloc-freelist")]
-    unsafe {
-        FREE_BLOCK_LIST.init(start, size)
-    };
-    #[cfg(feature = "alloc-slab")]
-    unsafe {
-        // Slab requires each slab region to be aligned to its own size,
-        // so split the heap into page-sized slabs (the heap is page-
-        // aligned by the linker script). Calling add_slab repeatedly
-        // grows the pool by one slab per call.
-        const SLAB_SIZE: usize = 4096;
-        let mut offset = 0;
-        while offset + SLAB_SIZE <= size {
-            SLAB64.add_slab(start.add(offset), SLAB_SIZE);
-            offset += SLAB_SIZE;
-        }
-    };
-    #[cfg(feature = "alloc-bump")]
-    unsafe {
-        BUMP.init(start, size)
-    };
-    #[cfg(feature = "alloc-buddy")]
-    unsafe {
-        BUDDY.init(start, size)
-    };
-    #[cfg(feature = "alloc-kalloc")]
-    unsafe {
-        KALLOC.init(start, size)
-    };
-}
-
-/// Returns the address of `__heap_start` for diagnostics (e.g. computing
-/// heap-used in benchmarks). Only referenced from the `#[cfg(test)]`
-/// allocator benchmarks.
-#[cfg(all(test, feature = "test-alloc"))]
-pub(crate) fn heap_start_addr() -> usize {
-    &raw const __heap_start as usize
-}
-
-// =============================================================================
 // Thread Test Function
 // =============================================================================
 
 #[cfg(feature = "test-sched")]
-use crate::kernel::sched;
-#[cfg(feature = "test-sched")]
-use crate::kernel::timer::sleep_ms;
-
-#[cfg(feature = "test-sched")]
-fn thread1() -> ! {
-    loop {
-        print!("A");
-        sleep_ms(500);
-        sched::yield_now();
+mod test_sched {
+    use crate::kernel::sched;
+    use crate::kernel::timer::sleep_ms;
+    use crate::print;
+    pub fn thread1() -> ! {
+        loop {
+            print!("A");
+            sleep_ms(500);
+            sched::yield_now();
+        }
     }
 }
 
@@ -164,7 +71,7 @@ fn thread1() -> ! {
 fn kernel_init() -> FrameBuffer {
     kernel::stack_guard::init();
     kernel::timer::init();
-    init_global_allocator();
+    kernel::alloc::init_global_allocator();
 
     // Configure PLIC
     drivers::plic::set_threshold(0);
@@ -188,7 +95,7 @@ fn kernel_init() -> FrameBuffer {
 
     sched::bootstrap();
     #[cfg(feature = "test-sched")]
-    sched::spawn(thread1);
+    sched::spawn(test_sched::thread1);
 
     drivers::ramfb::FrameBuffer::init()
 }
@@ -210,12 +117,15 @@ extern "C" fn main() -> ! {
     let fb = kernel_init();
     let mut console = shell::console::Console::new(fb);
     let _ = writeln!(console, "Hello from EASE!");
-    println!("Hello from EASE!");
+    println!("Hello from EASE! (debug console)");
     #[cfg(feature = "test-sched")]
-    loop {
-        print!("B");
-        sleep_ms(500);
-        sched::yield_now();
+    {
+        use kernel::timer::sleep_ms;
+        loop {
+            print!("B");
+            sleep_ms(500);
+            sched::yield_now();
+        }
     }
     // Start the shell
     #[allow(unreachable_code)]

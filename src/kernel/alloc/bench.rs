@@ -13,6 +13,7 @@ use core::alloc::Layout;
 use core::hint::black_box;
 use core::sync::atomic::Ordering;
 
+use crate::kernel::alloc::heap_start_addr;
 use crate::println;
 
 #[cfg(feature = "alloc-slab")]
@@ -260,7 +261,7 @@ fn alloc_benchmarks() {
         "  Allocated: {} bytes",
         ALLOCATED_BYTES.load(Ordering::Relaxed) - DEALLOCATED_BYTES.load(Ordering::Relaxed)
     );
-    let heap_used = HEAP_TOP.load(Ordering::Relaxed) - crate::heap_start_addr();
+    let heap_used = HEAP_TOP.load(Ordering::Relaxed) - heap_start_addr();
     println!("  Heap used: {} bytes", heap_used);
 
     // Long-running stress test. Slab and freelist can sustain it (each
