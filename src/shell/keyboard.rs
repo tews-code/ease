@@ -3,7 +3,7 @@
 use crate::kernel::timer;
 use crate::shell::vt_parse::{EscapeParser, Key, ParseResult};
 
-const ESC_TIMEOUT_MS: usize = 2;
+const ESC_TIMEOUT_MS: u64 = 2;
 
 /// A keyboard event: either a regular byte or a special key (arrow, enter, etc.).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

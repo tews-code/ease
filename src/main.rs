@@ -53,12 +53,18 @@ mod shell;
 #[cfg(feature = "test-sched")]
 mod test_sched {
     use crate::kernel::sched;
-    use crate::kernel::timer::sleep_ms;
     use crate::print;
     pub fn thread1() -> ! {
         loop {
-            print!("A");
-            sleep_ms(500);
+            print!("B");
+            sched::sleep(500);
+            sched::yield_now();
+        }
+    }
+    pub fn thread2() -> ! {
+        loop {
+            print!("C");
+            sched::sleep(300);
             sched::yield_now();
         }
     }
@@ -95,7 +101,10 @@ fn kernel_init() -> FrameBuffer {
 
     sched::bootstrap();
     #[cfg(feature = "test-sched")]
-    sched::spawn(test_sched::thread1);
+    {
+        sched::spawn(test_sched::thread1);
+        sched::spawn(test_sched::thread2);
+    }
 
     drivers::ramfb::FrameBuffer::init()
 }
@@ -120,10 +129,9 @@ extern "C" fn main() -> ! {
     println!("Hello from EASE! (debug console)");
     #[cfg(feature = "test-sched")]
     {
-        use kernel::timer::sleep_ms;
         loop {
-            print!("B");
-            sleep_ms(500);
+            print!("A");
+            sched::sleep(700);
             sched::yield_now();
         }
     }

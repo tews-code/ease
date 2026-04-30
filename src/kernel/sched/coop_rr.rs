@@ -6,7 +6,8 @@ use crate::arch::context::swap_to;
 use crate::kernel::sync::SpinLock;
 
 const THREADS_MAX: usize = 8;
-const THREAD_STACK_SIZE: usize = 1024;
+const THREAD_STACK_SIZE: usize = 4096;
+const STACK_CANARY: usize = 0xDEADBEEF;
 
 static TCBS: ThreadArray = ThreadArray::new();
 static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
@@ -22,6 +23,7 @@ enum State {
     Avail,
     Ready,
     Running,
+    Sleeping(u64), // Milliseconds of sleep time
 }
 
 #[derive(Copy, Clone)]
@@ -52,13 +54,6 @@ impl ThreadArray {
         Self(SpinLock::new([ThreadControlBlock::new(); THREADS_MAX]))
     }
 
-    // Find a thread slot by id
-    #[allow(dead_code)]
-    fn find_slot(&self, id: usize) -> Option<usize> {
-        let tcbs = self.0.lock();
-        tcbs.iter().position(|tcb| tcb.id == id)
-    }
-
     // Find a free thread slot
     fn free_slot(&self) -> Option<usize> {
         let tcbs = self.0.lock();
@@ -71,6 +66,10 @@ impl ThreadArray {
         assert!(THREAD_ID.fetch_add(1, Ordering::Relaxed) == 0);
         let i = self.free_slot().unwrap(); // If there is no place for boot thread just panic
         let mut tcbs = self.0.lock();
+        // Set the canary in the stack
+        let mut stacks = THREAD_STACKS.lock();
+        stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
+        drop(stacks);
         tcbs[i].state = State::Running;
         tcbs[i].id = 0;
     }
@@ -79,44 +78,90 @@ impl ThreadArray {
     fn spawn(&self, entry: fn() -> !) {
         // Find a free slot
         let i = self.free_slot().expect("must have a free thread slot");
+        // Initialise the TCB
+        let mut tcbs = self.0.lock();
         // Set up the stack
         let mut stacks = THREAD_STACKS.lock();
         stacks[i].0[THREAD_STACK_SIZE - 16..THREAD_STACK_SIZE - 12]
             .copy_from_slice(&usize::to_ne_bytes(entry as usize));
-
-        // Initialise the TCB
-        let mut tcbs = self.0.lock();
+        stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
         tcbs[i].sp = (&raw mut stacks[i] as *mut u8).wrapping_add(THREAD_STACK_SIZE - 64);
+        drop(stacks);
         tcbs[i].state = State::Ready;
         tcbs[i].id = THREAD_ID.fetch_add(1, Ordering::Relaxed); // Don't spawn 4 billion threads if you don't want to wrap into zero
     }
 
-    // Yield current thread to next thread in round robin
-    fn yield_now(&self) {
+    // Set current thread state to `new_state` and next thread to `Ready` in round robin
+    fn reschedule(&self, new_state: State) {
+        // Take the lock, all actions need to be achieved atomically
         let mut tcbs = self.0.lock();
-        // There can be only one running thread
+        // There can be only one currently running thread
         let mut tcbs_iter = tcbs
             .iter()
             .enumerate()
             .filter(|(_, tcb)| tcb.state == State::Running);
         let (curr, _) = tcbs_iter.next().expect("no running thread");
         assert!(tcbs_iter.next().is_none());
-        // Find the next ready thread
-        let Some(next) = (1..THREADS_MAX)
-            .map(|off| (curr + off) % THREADS_MAX)
-            .find(|&i| tcbs[i].state == State::Ready)
-        else {
-            return;
-        };
-        // Ready to switch
-        tcbs[curr].state = State::Ready;
-        tcbs[next].state = State::Running;
-        // Create local variables before dropping the lock
-        let prev_sp_ptr = &raw mut tcbs[curr].sp;
-        // Create local variables before dropping the lock
-        let next_sp_ptr = &raw mut tcbs[next].sp;
-        drop(tcbs);
-        unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
+        // Check stack STACK_CANARY
+        let stacks = THREAD_STACKS.lock();
+        assert!(
+            stacks[curr].0[0..4] == usize::to_ne_bytes(STACK_CANARY),
+            "thread stack corrupted"
+        );
+        drop(stacks);
+        // Set current thread to the new state
+        tcbs[curr].state = new_state;
+        loop {
+            // Check if any threads have reached or passed their deadline
+            tcbs.iter_mut().for_each(|tcb| {
+                if let State::Sleeping(d) = tcb.state
+                    && d <= crate::kernel::timer::ticks_ms()
+                {
+                    tcb.state = State::Ready;
+                }
+            });
+
+            // Find the next ready thread
+            if let Some(next) = (1..=THREADS_MAX)
+                .map(|off| (curr + off) % THREADS_MAX)
+                .find(|&i| tcbs[i].state == State::Ready)
+            {
+                if next == curr {
+                    tcbs[curr].state = State::Running;
+                    return;
+                }
+                // Ready to switch
+                tcbs[next].state = State::Running;
+                // Create local variables before dropping the lock
+                let prev_sp_ptr = &raw mut tcbs[curr].sp;
+                // Create local variables before dropping the lock
+                let next_sp_ptr = &raw mut tcbs[next].sp;
+                drop(tcbs);
+                unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
+                return;
+            }
+            // No other threads are Ready - sleep
+            drop(tcbs);
+            crate::arch::wait_for_interrupt();
+            tcbs = self.0.lock();
+        }
+    }
+
+    /// Yields current thread
+    fn yield_now(&self) {
+        self.reschedule(State::Ready);
+    }
+
+    /// Blocks until the timer has passed the deadline
+    ///
+    /// Time is measured in milliseconds
+    fn sleep_until(&self, deadline_ms: u64) {
+        self.reschedule(State::Sleeping(deadline_ms));
+    }
+
+    /// Blocks for `deadline` millseconds
+    pub fn sleep(&self, deadline_ms: u64) {
+        self.sleep_until(crate::kernel::timer::ticks_ms() + deadline_ms);
     }
 }
 
@@ -133,4 +178,120 @@ pub fn bootstrap() {
 /// Voluntarily yield the current thread
 pub fn yield_now() {
     TCBS.yield_now();
+}
+
+/// Blocks until the timer has passed the deadline
+///
+/// Time is measured in milliseconds
+pub fn sleep_until(deadline_ms: u64) {
+    TCBS.sleep_until(deadline_ms);
+}
+
+/// Blocks for `deadline` millseconds
+pub fn sleep(deadline_ms: u64) {
+    TCBS.sleep(deadline_ms);
+}
+
+// =============================================================================
+// Smoke tests + cycle-count benchmark
+// =============================================================================
+//
+// Tests pin down observable behaviour rather than implementation details, so
+// they should survive future rung changes (preemption, priorities, etc.).
+//
+// The cycle-count benchmark prints a single line; no pass/fail. Useful as a
+// number to eyeball across rungs. Note that with the test-sched background
+// threads (thread1/thread2 spawned in kernel_init), the measured round-trip
+// includes some time in those threads — it's "yield round-trip in this
+// system" rather than bare context-switch cost. Still informative.
+
+#[cfg(all(test, feature = "test-sched"))]
+mod tests {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::drivers::clint::Clint;
+
+    /// Counter the partner thread bumps each iteration. We only assert it
+    /// INCREASES during a test, so the absolute value across tests is fine.
+    static PARTNER_COUNT: AtomicUsize = AtomicUsize::new(0);
+    /// Set to 1 once the partner has been spawned; ensure-once across tests.
+    static PARTNER_SPAWNED: AtomicUsize = AtomicUsize::new(0);
+
+    fn partner_thread() -> ! {
+        loop {
+            PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
+            crate::kernel::sched::yield_now();
+        }
+    }
+
+    fn ensure_partner_spawned() {
+        if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+            crate::kernel::sched::spawn(partner_thread);
+        }
+    }
+
+    /// Smoke test 1: yield_now lets at least one other thread make progress.
+    /// Catches "scheduler never switches" or "switch corrupts state."
+    #[test_case]
+    fn yield_makes_progress() {
+        ensure_partner_spawned();
+        let before = PARTNER_COUNT.load(Ordering::Relaxed);
+        for _ in 0..10 {
+            crate::kernel::sched::yield_now();
+        }
+        let after = PARTNER_COUNT.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "partner thread didn't run during yields (before={}, after={})",
+            before,
+            after
+        );
+    }
+
+    /// Smoke test 2: sched::sleep blocks for approximately the requested
+    /// duration. Catches "sleep doesn't actually block" and "sleep returns
+    /// late."
+    #[test_case]
+    fn sleep_blocks_for_duration() {
+        let start = crate::kernel::timer::ticks_ms();
+        crate::kernel::sched::sleep(100);
+        let elapsed = crate::kernel::timer::ticks_ms() - start;
+        assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
+        assert!(elapsed <= 200, "sleep too long: {} ms", elapsed);
+    }
+
+    /// Smoke test 3: sleep_until with a past deadline returns immediately.
+    /// Catches the wake-check edge case — deadline <= now should fire on the
+    /// first reschedule iteration, never reach the wfi loop.
+    #[test_case]
+    fn sleep_until_past_returns_quickly() {
+        let now = crate::kernel::timer::ticks_ms();
+        let deadline = now.saturating_sub(10);
+        let start = crate::kernel::timer::ticks_ms();
+        crate::kernel::sched::sleep_until(deadline);
+        let elapsed = crate::kernel::timer::ticks_ms() - start;
+        assert!(
+            elapsed <= 5,
+            "past deadline should return quickly, took {} ms",
+            elapsed
+        );
+    }
+
+    /// Benchmark: average yield_now round-trip cycles. Prints a single line;
+    /// no assertion. Watch this number across rungs.
+    #[test_case]
+    fn bench_yield_cycles() {
+        ensure_partner_spawned();
+        const N: u64 = 1000;
+        let start = Clint::mtime();
+        for _ in 0..N {
+            crate::kernel::sched::yield_now();
+        }
+        let elapsed = Clint::mtime() - start;
+        crate::println!(
+            "\n  yield_now round-trip: {} cycles/call ({} calls)",
+            elapsed / N,
+            N
+        );
+    }
 }

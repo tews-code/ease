@@ -253,7 +253,7 @@ impl VirtioBlkDev {
     }
 }
 
-const IO_TIMEOUT_MS: usize = 1_000;
+const IO_TIMEOUT_MS: u64 = 1_000;
 
 // Lock held when IO is in progress (interrupts enabled)
 static IO_IN_PROGRESS: SpinLock<()> = SpinLock::new(());

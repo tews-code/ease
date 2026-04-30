@@ -48,3 +48,8 @@ pub fn interrupts_enabled() -> bool {
     unsafe { core::arch::asm!("csrr {}, mstatus", out(reg) mstatus) };
     mstatus & csr::mstatus::MIE != 0
 }
+
+/// Wait for interrupts
+pub fn wait_for_interrupt() {
+    unsafe { core::arch::asm!("wfi") };
+}
