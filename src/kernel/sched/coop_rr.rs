@@ -352,15 +352,16 @@ mod tests {
     /// Smoke test 3: sleep_until with a past deadline returns immediately.
     /// Catches the wake-check edge case — deadline <= now should fire on the
     /// first reschedule iteration, never reach the wfi loop.
+    /// Tolerance is one tick (10 ms) since `ticks_ms()` has tick-granularity.
     #[test_case]
     fn sleep_until_past_returns_quickly() {
         let now = crate::kernel::timer::ticks_ms();
-        let deadline = now.saturating_sub(10);
+        let deadline = now.saturating_sub(20);
         let start = crate::kernel::timer::ticks_ms();
         crate::kernel::sched::sleep_until(deadline);
         let elapsed = crate::kernel::timer::ticks_ms() - start;
         assert!(
-            elapsed <= 5,
+            elapsed <= 15,
             "past deadline should return quickly, took {} ms",
             elapsed
         );
