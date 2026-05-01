@@ -5,4 +5,4 @@
 mod coop_rr;
 
 #[cfg(feature = "sched-coop-rr")]
-pub use coop_rr::{bootstrap, sleep, sleep_until, spawn, yield_now};
+pub use coop_rr::{bootstrap, preempt_into, sleep, sleep_until, spawn, yield_now};

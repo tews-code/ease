@@ -4,6 +4,10 @@
 pub mod mstatus {
     /// Machine interrupt enable bit (bit 3). Controls global interrupt enable.
     pub const MIE: usize = 1 << 3;
+    /// Machine previous interrupt enable bit (bit 7).
+    pub const MPIE: usize = 1 << 7;
+    /// Machine previous priority - mret stays in M-mode
+    pub const MPP: usize = 3 << 11;
 
     /// Atomically sets bits in the mstatus CSR.
     pub fn enable_bits(bits: usize) {

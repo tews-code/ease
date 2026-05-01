@@ -11,7 +11,7 @@ use core::arch::asm;
 ///
 /// Returns the number of clock cycles since reset.
 /// On RV32, this reads both `cycleh` and `cycle` CSRs.
-fn cycles() -> u64 {
+pub fn cycles() -> u64 {
     let mut lo: u32;
     let mut hi1: u32;
     let mut hi2: u32;

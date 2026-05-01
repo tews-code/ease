@@ -50,7 +50,7 @@ mod shell;
 // Thread Test Function
 // =============================================================================
 
-#[cfg(feature = "test-sched")]
+#[cfg(all(feature = "test-sched", not(test)))]
 mod test_sched {
     use crate::kernel::sched;
     use crate::print;
@@ -66,6 +66,12 @@ mod test_sched {
             print!("C");
             sched::sleep(300);
             sched::yield_now();
+        }
+    }
+    pub fn thread3() -> ! {
+        loop {
+            print!("X");
+            sched::sleep(300);
         }
     }
 }
@@ -89,6 +95,7 @@ fn kernel_init() -> FrameBuffer {
 
     drivers::uart::enable_rx_interrupt();
 
+    sched::bootstrap();
     arch::enable_interrupts();
 
     // Large-allocation init — skipped when the slab is the sole allocator,
@@ -99,11 +106,11 @@ fn kernel_init() -> FrameBuffer {
         fs::volume::fat16_init();
     }
 
-    sched::bootstrap();
-    #[cfg(feature = "test-sched")]
+    #[cfg(all(feature = "test-sched", not(test)))]
     {
         sched::spawn(test_sched::thread1);
         sched::spawn(test_sched::thread2);
+        sched::spawn(test_sched::thread3);
     }
 
     drivers::ramfb::FrameBuffer::init()

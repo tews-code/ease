@@ -1,22 +1,30 @@
 //! Cooperative multitasking with round robin scheduling
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::arch::context::swap_to;
-use crate::kernel::sync::SpinLock;
+use crate::arch::trap::TrapFrame;
+use crate::kernel::sync::IrqSpinLock;
 
 const THREADS_MAX: usize = 8;
+const IDLE_SLOT: usize = THREADS_MAX - 1;
 const THREAD_STACK_SIZE: usize = 4096;
 const STACK_CANARY: usize = 0xDEADBEEF;
 
-static TCBS: ThreadArray = ThreadArray::new();
+const TF_SIZE: usize = core::mem::size_of::<TrapFrame>();
+
+static SCHEDULER: ThreadArray = ThreadArray::new();
 static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-static THREAD_STACKS: SpinLock<[ThreadStack; THREADS_MAX]> =
-    SpinLock::new([ThreadStack([0u8; THREAD_STACK_SIZE]); THREADS_MAX]);
 
 #[derive(Copy, Clone)]
 #[repr(align(16))]
 struct ThreadStack([u8; THREAD_STACK_SIZE]);
+
+impl ThreadStack {
+    pub const fn new() -> Self {
+        Self([0u8; THREAD_STACK_SIZE])
+    }
+}
 
 #[derive(Copy, Clone, PartialEq)]
 enum State {
@@ -33,9 +41,6 @@ struct ThreadControlBlock {
     id: usize,
 }
 
-// Safety: All access to the TCB array elements is via a spin lock
-unsafe impl Send for ThreadControlBlock {}
-
 impl ThreadControlBlock {
     pub const fn new() -> Self {
         Self {
@@ -46,18 +51,37 @@ impl ThreadControlBlock {
     }
 }
 
-struct ThreadArray(SpinLock<[ThreadControlBlock; THREADS_MAX]>);
+struct ThreadInner {
+    control_blocks: [ThreadControlBlock; THREADS_MAX],
+    stacks: [ThreadStack; THREADS_MAX],
+}
+
+// Safety: All access to the TCB array elements is via a spin lock that disables interrupts
+unsafe impl Send for ThreadInner {}
+
+struct ThreadArray {
+    threads: IrqSpinLock<ThreadInner>,
+}
 
 impl ThreadArray {
     // Create new array
     const fn new() -> Self {
-        Self(SpinLock::new([ThreadControlBlock::new(); THREADS_MAX]))
+        Self {
+            threads: IrqSpinLock::new(ThreadInner {
+                control_blocks: [ThreadControlBlock::new(); THREADS_MAX],
+                stacks: [ThreadStack::new(); THREADS_MAX],
+            }),
+        }
     }
 
     // Find a free thread slot
     fn free_slot(&self) -> Option<usize> {
-        let tcbs = self.0.lock();
-        tcbs.iter().position(|tcb| tcb.state == State::Avail)
+        let threads = self.threads.lock();
+        threads
+            .control_blocks
+            .iter()
+            .enumerate()
+            .position(|(i, tcb)| i != IDLE_SLOT && tcb.state == State::Avail)
     }
 
     // Set up the boot thread
@@ -65,13 +89,26 @@ impl ThreadArray {
         // Make sure bootstrap is only called once
         assert!(THREAD_ID.fetch_add(1, Ordering::Relaxed) == 0);
         let i = self.free_slot().unwrap(); // If there is no place for boot thread just panic
-        let mut tcbs = self.0.lock();
-        // Set the canary in the stack
-        let mut stacks = THREAD_STACKS.lock();
-        stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
-        drop(stacks);
-        tcbs[i].state = State::Running;
-        tcbs[i].id = 0;
+        let mut threads = self.threads.lock();
+
+        // Set up idle thread
+        // Store idle_thread return address in mepc slot
+        threads.stacks[IDLE_SLOT].0[THREAD_STACK_SIZE - 8..THREAD_STACK_SIZE - 4]
+            .copy_from_slice(&usize::to_ne_bytes(idle_thread as *const () as usize));
+        // Set up mstatus
+        let mstatus = crate::arch::csr::mstatus::MPIE | crate::arch::csr::mstatus::MPP;
+        threads.stacks[IDLE_SLOT].0[THREAD_STACK_SIZE - 4..THREAD_STACK_SIZE]
+            .copy_from_slice(&usize::to_ne_bytes(mstatus));
+        threads.stacks[IDLE_SLOT].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
+        threads.control_blocks[IDLE_SLOT].sp = (&raw mut threads.stacks[IDLE_SLOT] as *mut u8)
+            .wrapping_add(THREAD_STACK_SIZE - TF_SIZE);
+        threads.control_blocks[IDLE_SLOT].id = usize::MAX;
+        threads.control_blocks[IDLE_SLOT].state = State::Ready;
+
+        // Set up boot thread - note already running
+        threads.stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
+        threads.control_blocks[i].state = State::Running;
+        threads.control_blocks[i].id = 0;
     }
 
     // Set up initial thread block for a new thread
@@ -79,72 +116,113 @@ impl ThreadArray {
         // Find a free slot
         let i = self.free_slot().expect("must have a free thread slot");
         // Initialise the TCB
-        let mut tcbs = self.0.lock();
+        let mut threads = self.threads.lock();
         // Set up the stack
-        let mut stacks = THREAD_STACKS.lock();
-        stacks[i].0[THREAD_STACK_SIZE - 16..THREAD_STACK_SIZE - 12]
-            .copy_from_slice(&usize::to_ne_bytes(entry as usize));
-        stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
-        tcbs[i].sp = (&raw mut stacks[i] as *mut u8).wrapping_add(THREAD_STACK_SIZE - 64);
-        drop(stacks);
-        tcbs[i].state = State::Ready;
-        tcbs[i].id = THREAD_ID.fetch_add(1, Ordering::Relaxed); // Don't spawn 4 billion threads if you don't want to wrap into zero
+        threads.stacks[i].0[THREAD_STACK_SIZE - 8..THREAD_STACK_SIZE - 4]
+            .copy_from_slice(&usize::to_ne_bytes(entry as *const () as usize));
+        // Set up mstatus
+        let mstatus = crate::arch::csr::mstatus::MPIE | crate::arch::csr::mstatus::MPP;
+        threads.stacks[i].0[THREAD_STACK_SIZE - 4..THREAD_STACK_SIZE]
+            .copy_from_slice(&usize::to_ne_bytes(mstatus));
+        threads.stacks[i].0[0..4].copy_from_slice(&usize::to_ne_bytes(STACK_CANARY));
+        threads.control_blocks[i].sp =
+            (&raw mut threads.stacks[i] as *mut u8).wrapping_add(THREAD_STACK_SIZE - TF_SIZE);
+        threads.control_blocks[i].state = State::Ready;
+        threads.control_blocks[i].id = THREAD_ID.fetch_add(1, Ordering::Relaxed); // Don't spawn 4 billion threads if you don't want to wrap into zero
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
     fn reschedule(&self, new_state: State) {
         // Take the lock, all actions need to be achieved atomically
-        let mut tcbs = self.0.lock();
+        let mut threads = self.threads.lock();
         // There can be only one currently running thread
-        let mut tcbs_iter = tcbs
+        let mut tcbs_iter = threads
+            .control_blocks
             .iter()
             .enumerate()
             .filter(|(_, tcb)| tcb.state == State::Running);
         let (curr, _) = tcbs_iter.next().expect("no running thread");
         assert!(tcbs_iter.next().is_none());
         // Check stack STACK_CANARY
-        let stacks = THREAD_STACKS.lock();
         assert!(
-            stacks[curr].0[0..4] == usize::to_ne_bytes(STACK_CANARY),
+            threads.stacks[curr].0[0..4] == usize::to_ne_bytes(STACK_CANARY),
             "thread stack corrupted"
         );
-        drop(stacks);
         // Set current thread to the new state
-        tcbs[curr].state = new_state;
-        loop {
-            // Check if any threads have reached or passed their deadline
-            tcbs.iter_mut().for_each(|tcb| {
-                if let State::Sleeping(d) = tcb.state
-                    && d <= crate::kernel::timer::ticks_ms()
-                {
-                    tcb.state = State::Ready;
-                }
-            });
-
-            // Find the next ready thread
-            if let Some(next) = (1..=THREADS_MAX)
-                .map(|off| (curr + off) % THREADS_MAX)
-                .find(|&i| tcbs[i].state == State::Ready)
+        threads.control_blocks[curr].state = new_state;
+        // Check if any threads have reached or passed their deadline
+        threads.control_blocks.iter_mut().for_each(|tcb| {
+            if let State::Sleeping(d) = tcb.state
+                && d <= crate::kernel::timer::ticks_ms()
             {
-                if next == curr {
-                    tcbs[curr].state = State::Running;
-                    return;
-                }
-                // Ready to switch
-                tcbs[next].state = State::Running;
-                // Create local variables before dropping the lock
-                let prev_sp_ptr = &raw mut tcbs[curr].sp;
-                // Create local variables before dropping the lock
-                let next_sp_ptr = &raw mut tcbs[next].sp;
-                drop(tcbs);
-                unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
-                return;
+                tcb.state = State::Ready;
             }
-            // No other threads are Ready - sleep
-            drop(tcbs);
-            crate::arch::wait_for_interrupt();
-            tcbs = self.0.lock();
+        });
+
+        // Find the next ready thread
+        let next = (1..=THREADS_MAX)
+            .map(|off| (curr + off) % THREADS_MAX)
+            .find(|&i| threads.control_blocks[i].state == State::Ready)
+            .unwrap_or(IDLE_SLOT);
+
+        if next == curr {
+            threads.control_blocks[curr].state = State::Running;
+            return;
         }
+        // Ready to switch
+        threads.control_blocks[next].state = State::Running;
+        // Create local variables before dropping the lock
+        let prev_sp_ptr = &raw mut threads.control_blocks[curr].sp;
+        // Create local variables before dropping the lock
+        let next_sp_ptr = &raw mut threads.control_blocks[next].sp;
+        drop(threads);
+        unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
+    }
+
+    /// Preempts from current thread to next thread, returning a pointer
+    /// to the next thread stack frame.
+    ///
+    /// Note: if only one thread is runnable it is returned
+    fn preempt_into(&self, curr_sp: *mut TrapFrame) -> *mut TrapFrame {
+        let mut threads = self.threads.lock();
+        let curr = threads
+            .control_blocks
+            .iter()
+            .position(|tcb| tcb.state == State::Running)
+            .expect("always have exactly one running thread");
+
+        // Check canary
+        assert!(
+            threads.stacks[curr].0[0..4] == usize::to_ne_bytes(STACK_CANARY),
+            "thread stack corrupted"
+        );
+
+        threads.control_blocks[curr].sp = curr_sp as *mut u8;
+        threads.control_blocks[curr].state = State::Ready;
+
+        // Wake check
+        threads.control_blocks.iter_mut().for_each(|tcb| {
+            if let State::Sleeping(d) = tcb.state
+                && d <= crate::kernel::timer::ticks_ms()
+            {
+                tcb.state = State::Ready;
+            }
+        });
+
+        // Find next thread
+        let next = (1..=THREADS_MAX)
+            .map(|off| (curr + off) % THREADS_MAX)
+            .find(|&i| threads.control_blocks[i].state == State::Ready)
+            .unwrap_or(IDLE_SLOT);
+
+        // If next == curr return
+        if next == curr {
+            threads.control_blocks[curr].state = State::Running;
+            return curr_sp;
+        }
+
+        threads.control_blocks[next].state = State::Running;
+        threads.control_blocks[next].sp as *mut TrapFrame
     }
 
     /// Yields current thread
@@ -165,31 +243,42 @@ impl ThreadArray {
     }
 }
 
+fn idle_thread() -> ! {
+    loop {
+        crate::arch::wait_for_interrupt();
+    }
+}
+
 /// Spawn a new thread
 pub fn spawn(entry: fn() -> !) {
-    TCBS.spawn(entry);
+    SCHEDULER.spawn(entry);
 }
 
 /// Set up the boot thread
 pub fn bootstrap() {
-    TCBS.bootstrap();
+    SCHEDULER.bootstrap();
 }
 
 /// Voluntarily yield the current thread
 pub fn yield_now() {
-    TCBS.yield_now();
+    SCHEDULER.yield_now();
 }
 
 /// Blocks until the timer has passed the deadline
 ///
 /// Time is measured in milliseconds
 pub fn sleep_until(deadline_ms: u64) {
-    TCBS.sleep_until(deadline_ms);
+    SCHEDULER.sleep_until(deadline_ms);
 }
 
 /// Blocks for `deadline` millseconds
 pub fn sleep(deadline_ms: u64) {
-    TCBS.sleep(deadline_ms);
+    SCHEDULER.sleep(deadline_ms);
+}
+
+/// Preempts thread
+pub fn preempt_into(curr_sp: *mut TrapFrame) -> *mut TrapFrame {
+    SCHEDULER.preempt_into(curr_sp)
 }
 
 // =============================================================================

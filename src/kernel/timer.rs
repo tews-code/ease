@@ -7,7 +7,7 @@ use crate::drivers::clint::{Clint, with_clint};
 use crate::kernel::stack_guard;
 
 /// Timer interval (QEMU runs at 10MHz, so 10_000 = 1ms)
-const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 1_000; // 1ms
+const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 100; // 10ms
 
 /// Global tick counter (incremented by timer interrupt)
 static TICKS_L: AtomicU32 = AtomicU32::new(0);
@@ -20,9 +20,10 @@ pub fn init() {
 }
 
 fn add_tick() {
-    if TICKS_L.fetch_add(1, Ordering::Relaxed) == u32::MAX {
+    let last_ticks_l = TICKS_L.fetch_add(10, Ordering::Relaxed);
+    if last_ticks_l.wrapping_add(10) < last_ticks_l {
         TICKS_H.fetch_add(1, Ordering::Relaxed);
-    };
+    }
 }
 
 fn get_ticks() -> u64 {
@@ -50,7 +51,7 @@ pub fn handle_interrupt() {
     })
 }
 
-/// Get current tick count (TIMER_INTERVAL is 1ms)
+/// Get current tick count (TIMER_INTERVAL is 10ms)
 pub fn ticks_ms() -> u64 {
     get_ticks()
 }

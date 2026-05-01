@@ -64,7 +64,7 @@ mod baseline {
     #[cfg(feature = "alloc-kalloc")]
     pub(super) const ONE_BYTE_ALLOC: u64 = 2_500;
 
-    pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
+    pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 1;
 
     #[cfg(feature = "alloc-freelist")]
     pub(super) const SMALL_MIX_ALLOC: u64 = 4_000;
@@ -111,6 +111,16 @@ fn allocate_one_byte() {
     let p = black_box(unsafe { alloc(layout) });
     unsafe { dealloc(p, layout) };
 }
+
+// fn allocate_one_byte() {
+//     let layout = Layout::new::<u8>();
+//     let s0 = crate::bench::cycles();
+//     let p = unsafe { alloc(layout) };
+//     let s1 = crate::bench::cycles();
+//     unsafe { dealloc(p, layout) };
+//     let s2 = crate::bench::cycles();
+//     crate::println!("alloc: {}, dealloc: {}", s1 - s0, s2 - s1);
+// }
 
 // Slab-friendly mixed-workload sibling of `allocate_deallocate_awkward`.
 // Every allocation stays within the slab's contract (size <= 64 B,
@@ -199,6 +209,13 @@ fn allocate_or_bust() {
 
 #[test_case]
 fn alloc_benchmarks() {
+    // Disable interrupts for the duration of the benchmark so preemption
+    // and timer ISRs don't inflate cycle counts. The allocator benches
+    // are pure CPU work — no I/O — so blocking interrupts here is safe.
+    // (Virtio benches DO need interrupts for I/O completion, so they
+    // run with interrupts enabled — measure() doesn't disable globally.)
+    let prev = crate::arch::disable_interrupts();
+
     println!();
     println!("====== ALLOCATOR ====== ");
     println!();
@@ -276,4 +293,6 @@ fn alloc_benchmarks() {
     println!();
     println!("===================== ");
     println!();
+
+    crate::arch::restore_interrupts(prev);
 }

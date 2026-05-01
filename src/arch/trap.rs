@@ -4,6 +4,50 @@
 
 use core::arch::global_asm;
 
+#[repr(C, align(16))]
+pub struct TrapFrame {
+    ra: usize,
+    gp: usize,
+    tp: usize,
+    t0: usize,
+    t1: usize,
+    t2: usize,
+    t3: usize,
+    t4: usize,
+    t5: usize,
+    t6: usize,
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    s0: usize,
+    s1: usize,
+    s2: usize,
+    s3: usize,
+    s4: usize,
+    s5: usize,
+    s6: usize,
+    s7: usize,
+    s8: usize,
+    s9: usize,
+    s10: usize,
+    s11: usize,
+    mepc: usize,
+    mstatus: usize,
+}
+
+const NUM_SLOTS: usize = 32;
+const _: () = assert!(core::mem::size_of::<TrapFrame>() == NUM_SLOTS * 4);
+// ra is always at the top
+const _: () = assert!(core::mem::offset_of!(TrapFrame, ra) == 0);
+// mepc and mstatus are always last
+const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 2) * 4);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 1) * 4);
+
 global_asm!(
     r#"
     .section .text
@@ -42,9 +86,19 @@ global_asm!(
         sw s9,  4 * 27(sp)
         sw s10, 4 * 28(sp)
         sw s11, 4 * 29(sp)
+        csrr t0, mepc
+        sw t0,  4 * 30(sp)
+        csrr t0, mstatus
+        sw t0,  4 * 31(sp)
 
+        mv a0, sp               # Put the stack pointer into a0 for the function call
         call trap_handler
 
+        mv sp, a0               # a0 contains the new stack pointer returned by trap_handler
+        lw t0,  4 * 30(sp)
+        csrw mepc, t0
+        lw t0,  4 * 31(sp)
+        csrw mstatus, t0
         lw ra,  4 *  0(sp)
         lw gp,  4 *  1(sp)
         lw tp,  4 *  2(sp)
