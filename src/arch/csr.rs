@@ -1,5 +1,33 @@
 //! RISC-V 32 bit CSRs
 
+use core::arch::asm;
+
+/// Read the RISC-V cycle counter (64-bit)
+///
+/// Returns the number of clock cycles since reset.
+/// On RV32, this reads both `cycleh` and `cycle` CSRs.
+pub fn rdcycles() -> u64 {
+    let mut lo: u32;
+    let mut hi1: u32;
+    let mut hi2: u32;
+    loop {
+        unsafe {
+            asm!(
+                "rdcycleh {hi1}",
+                 "rdcycle {lo}",
+                 "rdcycleh {hi2}",
+                 hi1 = out(reg) hi1,
+                 lo = out(reg) lo,
+                 hi2 = out(reg) hi2,
+                 options(nomem, nostack),
+            );
+        }
+        if hi1 == hi2 {
+            return ((hi1 as u64) << 32) | (lo as u64);
+        }
+    }
+}
+
 /// Machine status register (mstatus) operations.
 pub mod mstatus {
     /// Machine interrupt enable bit (bit 3). Controls global interrupt enable.

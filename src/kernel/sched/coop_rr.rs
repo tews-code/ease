@@ -4,7 +4,7 @@ use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::arch::context::swap_to;
 use crate::arch::trap::TrapFrame;
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sync::{CounterU64, IrqSpinLock};
 
 const THREADS_MAX: usize = 8;
 const IDLE_SLOT: usize = THREADS_MAX - 1;
@@ -13,8 +13,9 @@ const STACK_CANARY: usize = 0xDEADBEEF;
 
 const TF_SIZE: usize = core::mem::size_of::<TrapFrame>();
 
-static SCHEDULER: ThreadArray = ThreadArray::new();
+static SCHEDULER: Scheduler = Scheduler::new();
 static THREAD_ID: AtomicUsize = AtomicUsize::new(0);
+static SWITCH_CYCLE_COUNT: CounterU64 = CounterU64::new();
 
 #[derive(Copy, Clone)]
 #[repr(align(16))]
@@ -34,10 +35,10 @@ enum State {
     Sleeping(u64), // Milliseconds of sleep time
 }
 
-#[derive(Copy, Clone)]
 struct ThreadControlBlock {
     sp: *mut u8,
     state: State,
+    run_cycles: CounterU64,
     id: usize,
 }
 
@@ -46,29 +47,30 @@ impl ThreadControlBlock {
         Self {
             sp: core::ptr::null_mut(),
             state: State::Avail,
+            run_cycles: CounterU64::new(),
             id: 0,
         }
     }
 }
 
-struct ThreadInner {
+struct ThreadsInner {
     control_blocks: [ThreadControlBlock; THREADS_MAX],
     stacks: [ThreadStack; THREADS_MAX],
 }
 
 // Safety: All access to the TCB array elements is via a spin lock that disables interrupts
-unsafe impl Send for ThreadInner {}
+unsafe impl Send for ThreadsInner {}
 
-struct ThreadArray {
-    threads: IrqSpinLock<ThreadInner>,
+struct Scheduler {
+    threads: IrqSpinLock<ThreadsInner>,
 }
 
-impl ThreadArray {
+impl Scheduler {
     // Create new array
     const fn new() -> Self {
         Self {
-            threads: IrqSpinLock::new(ThreadInner {
-                control_blocks: [ThreadControlBlock::new(); THREADS_MAX],
+            threads: IrqSpinLock::new(ThreadsInner {
+                control_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
                 stacks: [ThreadStack::new(); THREADS_MAX],
             }),
         }
@@ -95,7 +97,7 @@ impl ThreadArray {
         // Store idle_thread return address in mepc slot
         threads.stacks[IDLE_SLOT].0[THREAD_STACK_SIZE - 8..THREAD_STACK_SIZE - 4]
             .copy_from_slice(&usize::to_ne_bytes(idle_thread as *const () as usize));
-        // Set up mstatus
+        // Set up TCB
         let mstatus = crate::arch::csr::mstatus::MPIE | crate::arch::csr::mstatus::MPP;
         threads.stacks[IDLE_SLOT].0[THREAD_STACK_SIZE - 4..THREAD_STACK_SIZE]
             .copy_from_slice(&usize::to_ne_bytes(mstatus));
@@ -120,7 +122,7 @@ impl ThreadArray {
         // Set up the stack
         threads.stacks[i].0[THREAD_STACK_SIZE - 8..THREAD_STACK_SIZE - 4]
             .copy_from_slice(&usize::to_ne_bytes(entry as *const () as usize));
-        // Set up mstatus
+        // Set up mstatus and stack canary
         let mstatus = crate::arch::csr::mstatus::MPIE | crate::arch::csr::mstatus::MPP;
         threads.stacks[i].0[THREAD_STACK_SIZE - 4..THREAD_STACK_SIZE]
             .copy_from_slice(&usize::to_ne_bytes(mstatus));
@@ -129,13 +131,17 @@ impl ThreadArray {
             (&raw mut threads.stacks[i] as *mut u8).wrapping_add(THREAD_STACK_SIZE - TF_SIZE);
         threads.control_blocks[i].state = State::Ready;
         threads.control_blocks[i].id = THREAD_ID.fetch_add(1, Ordering::Relaxed); // Don't spawn 4 billion threads if you don't want to wrap into zero
+        // Safety: Only one writer as scheduler only schedules one thread at a time per HART and never the same thread on multiple HARTs
+        unsafe { threads.control_blocks[i].run_cycles.reset() };
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
     fn reschedule(&self, new_state: State) {
+        let prev = crate::arch::disable_interrupts();
+
         // Take the lock, all actions need to be achieved atomically
         let mut threads = self.threads.lock();
-        // There can be only one currently running thread
+        // There can be only one currently running thread (even if idle_thread)
         let mut tcbs_iter = threads
             .control_blocks
             .iter()
@@ -166,10 +172,18 @@ impl ThreadArray {
             .unwrap_or(IDLE_SLOT);
 
         if next == curr {
+            // No other threads to run, change state back to running and leave
             threads.control_blocks[curr].state = State::Running;
+            crate::arch::restore_interrupts(prev);
             return;
         }
         // Ready to switch
+        let current_cycles = crate::arch::csr::rdcycles();
+        // Safety: Only one thread can be running on any particular HART at a time
+        // The scheduler never starts the same thread on two HARTs simultaneously
+        let last_cycle_count = unsafe { SWITCH_CYCLE_COUNT.set(current_cycles) };
+        let cycle_increment = current_cycles - last_cycle_count;
+        unsafe { threads.control_blocks[curr].run_cycles.add(cycle_increment) };
         threads.control_blocks[next].state = State::Running;
         // Create local variables before dropping the lock
         let prev_sp_ptr = &raw mut threads.control_blocks[curr].sp;
@@ -177,6 +191,9 @@ impl ThreadArray {
         let next_sp_ptr = &raw mut threads.control_blocks[next].sp;
         drop(threads);
         unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
+        // After swap_to returns (on this thread's eventual resume), mret has
+        // restored MIE via the saved frame's MPIE=1. Restore caller's state.
+        crate::arch::restore_interrupts(prev);
     }
 
     /// Preempts from current thread to next thread, returning a pointer
@@ -221,6 +238,14 @@ impl ThreadArray {
             return curr_sp;
         }
 
+        // Ready to switch
+        let current_cycles = crate::arch::csr::rdcycles();
+        // Safety: Only one thread can be running on any particular HART at a time
+        // The scheduler never starts the same thread on two HARTs simultaneously
+        let last_cycle_count = unsafe { SWITCH_CYCLE_COUNT.set(current_cycles) };
+        let cycle_increment = current_cycles - last_cycle_count;
+        unsafe { threads.control_blocks[curr].run_cycles.add(cycle_increment) };
+
         threads.control_blocks[next].state = State::Running;
         threads.control_blocks[next].sp as *mut TrapFrame
     }
@@ -240,6 +265,20 @@ impl ThreadArray {
     /// Blocks for `deadline` millseconds
     pub fn sleep(&self, deadline_ms: u64) {
         self.sleep_until(crate::kernel::timer::ticks_ms() + deadline_ms);
+    }
+
+    /// Get currently running thread total cycles
+    pub fn get_current_cycles(&self) -> u64 {
+        let threads = self.threads.lock();
+        // Find running thread - this is safe as there is always one running thread (even idle)
+        let curr = threads
+            .control_blocks
+            .iter()
+            .position(|tcb| tcb.state == State::Running)
+            .unwrap();
+        let committed = threads.control_blocks[curr].run_cycles.get();
+        let in_progress = crate::arch::csr::rdcycles() - SWITCH_CYCLE_COUNT.get();
+        committed + in_progress
     }
 }
 
@@ -281,6 +320,11 @@ pub fn preempt_into(curr_sp: *mut TrapFrame) -> *mut TrapFrame {
     SCHEDULER.preempt_into(curr_sp)
 }
 
+/// Get cycles of running thread
+pub fn get_current_cycles() -> u64 {
+    SCHEDULER.get_current_cycles()
+}
+
 // =============================================================================
 // Smoke tests + cycle-count benchmark
 // =============================================================================
@@ -297,8 +341,6 @@ pub fn preempt_into(curr_sp: *mut TrapFrame) -> *mut TrapFrame {
 #[cfg(all(test, feature = "test-sched"))]
 mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
-
-    use crate::drivers::clint::Clint;
 
     /// Counter the partner thread bumps each iteration. We only assert it
     /// INCREASES during a test, so the absolute value across tests is fine.
@@ -367,21 +409,34 @@ mod tests {
         );
     }
 
-    /// Benchmark: average yield_now round-trip cycles. Prints a single line;
-    /// no assertion. Watch this number across rungs.
+    /// Benchmark: average yield_now round-trip cycles. No assertion.
+    /// Reports cpu (this thread only) and wall (includes partner thread).
+    #[cfg(feature = "test-bench")]
     #[test_case]
-    fn bench_yield_cycles() {
+    fn sched_benchmarks() {
+        use crate::bench;
+        use crate::println;
+
+        println!();
+        println!("====== SCHEDULER ====== ");
+        println!();
+
         ensure_partner_spawned();
-        const N: u64 = 1000;
-        let start = Clint::mtime();
-        for _ in 0..N {
-            crate::kernel::sched::yield_now();
-        }
-        let elapsed = Clint::mtime() - start;
-        crate::println!(
-            "\n  yield_now round-trip: {} cycles/call ({} calls)",
-            elapsed / N,
+        const N: u32 = 1000;
+        let c = bench::measure(|| {
+            for _ in 0..N {
+                crate::kernel::sched::yield_now();
+            }
+        });
+        println!(
+            "  yield_now round-trip: cpu={} wall={} cycles/call ({} calls)",
+            c.cpu / N as u64,
+            c.wall / N as u64,
             N
         );
+
+        println!();
+        println!("===================== ");
+        println!();
     }
 }

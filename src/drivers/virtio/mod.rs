@@ -364,7 +364,7 @@ mod test {
     }
 }
 
-#[cfg(all(test, feature = "test-virtio"))]
+#[cfg(all(test, feature = "test-virtio", feature = "test-bench"))]
 mod baselines {
     // Measured on QEMU virt, set with wide margin for variance
     //   READ_BLOCK:       200,000  (measured ~49,000)
@@ -375,17 +375,21 @@ mod baselines {
     pub const WRITE_READ_BLOCK: u64 = 4_000_000;
 }
 
-#[cfg(all(test, feature = "test-virtio"))]
+#[cfg(all(test, feature = "test-virtio", feature = "test-bench"))]
 mod benchmarks {
     use super::baselines;
     use super::*;
     use crate::bench;
+    use crate::println;
 
     const ITERATIONS: u32 = 10;
 
     #[test_case]
-    fn regression_read_block() {
-        crate::println!("\n=== Virtio Block Regression Checks ===");
+    fn virtio_block_benchmarks() {
+        println!();
+        println!("====== VIRTIO BLOCK ====== ");
+        println!();
+
         bench::check(
             "read_block(sector 0)",
             baselines::READ_BLOCK,
@@ -395,10 +399,9 @@ mod benchmarks {
                 read_block(0, &mut buf).unwrap();
             },
         );
-    }
 
-    #[test_case]
-    fn regression_write_block() {
+        println!();
+
         bench::check(
             "write_block(sector 1)",
             baselines::WRITE_BLOCK,
@@ -408,10 +411,9 @@ mod benchmarks {
                 write_block(1, &buf).unwrap();
             },
         );
-    }
 
-    #[test_case]
-    fn regression_write_read_block() {
+        println!();
+
         bench::check(
             "write+read_block(sector 1)",
             baselines::WRITE_READ_BLOCK,
@@ -422,5 +424,9 @@ mod benchmarks {
                 read_block(1, &mut buf).unwrap();
             },
         );
+
+        println!();
+        println!("===================== ");
+        println!();
     }
 }

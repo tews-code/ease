@@ -132,6 +132,7 @@ impl<T> IrqSpinLock<T> {
 }
 
 #[cfg(target_os = "none")]
+#[must_use = "if unused, the lock is released immediately"]
 pub struct IrqSpinLockGuard<'a, T> {
     lock: &'a IrqSpinLock<T>,
     prev_interrupt_status: usize,
@@ -231,6 +232,128 @@ impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+use core::sync::atomic::AtomicU32;
+
+/// Lock-free monotonic 64-bit counter
+///
+/// Only supports single writer.
+///
+/// Uses Acquire / Release ordering
+#[cfg(not(target_has_atomic = "64"))]
+pub struct CounterU64 {
+    seq: AtomicU32,
+    hi: AtomicU32,
+    lo: AtomicU32,
+}
+
+#[cfg(not(target_has_atomic = "64"))]
+impl CounterU64 {
+    pub const fn new() -> Self {
+        Self {
+            seq: AtomicU32::new(0),
+            hi: AtomicU32::new(0),
+            lo: AtomicU32::new(0),
+        }
+    }
+
+    /// Add to the counter
+    ///
+    /// Returns the previous counter value
+    /// Safety: Caller must ensure only single writer (no concurrency)
+    pub unsafe fn add(&self, v: u64) -> u64 {
+        // Sequence lock to prevent readers from seeing tearing
+        let s = self.seq.fetch_add(1, Ordering::Acquire); // Odd - write in progress
+        assert!(s & 1 == 0, "multiple writers not allowed");
+        let lo = self.lo.fetch_add(v as u32, Ordering::Relaxed);
+        let hi = if lo.wrapping_add(v as u32) < lo {
+            self.hi
+                .fetch_add(((v >> 32) as u32).wrapping_add(1), Ordering::Relaxed)
+        } else {
+            self.hi.fetch_add((v >> 32) as u32, Ordering::Relaxed)
+        };
+        self.seq.fetch_add(1, Ordering::Release); // Even - write complete
+        ((hi as u64) << 32) | (lo as u64)
+    }
+
+    /// Reads the current counter value
+    pub fn get(&self) -> u64 {
+        loop {
+            // Check if a write is in progress
+            let s1 = self.seq.load(Ordering::Acquire);
+            if s1 & 1 == 1 {
+                // Odd - write in progress
+                core::hint::spin_loop();
+                continue;
+            }
+            let hi = self.hi.load(Ordering::Relaxed);
+            let lo = self.lo.load(Ordering::Relaxed);
+            let s2 = self.seq.load(Ordering::Acquire);
+            if s1 != s2 {
+                core::hint::spin_loop();
+                continue; // Write happened during read, start again
+            }
+            return ((hi as u64) << 32) | (lo as u64);
+        }
+    }
+
+    /// Reset the counter
+    ///
+    /// Safety: Caller must ensure only single reset caller (no concurrency)
+    pub unsafe fn reset(&self) {
+        // Sequence lock to prevent readers from seeing tearing
+        let s = self.seq.fetch_add(1, Ordering::Acquire);
+        assert!(s & 1 == 0, "multiple writers not allowed");
+        self.hi.store(0, Ordering::Relaxed);
+        self.lo.store(0, Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Release);
+    }
+
+    /// Set the counter to a u64 value
+    ///
+    /// Returns the previous counter value
+    /// Safety: Caller must ensure only single writer (no concurrency)
+    pub unsafe fn set(&self, v: u64) -> u64 {
+        // Sequence lock to prevent readers from seeing tearing
+        let s = self.seq.fetch_add(1, Ordering::Acquire);
+        assert!(s & 1 == 0, "multiple writers not allowed");
+        let hi = self.hi.swap((v >> 32) as u32, Ordering::Relaxed);
+        let lo = self.lo.swap(v as u32, Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Release);
+        ((hi as u64) << 32) | (lo as u64)
+    }
+}
+
+/// Thin wrapper for host tests
+#[cfg(target_has_atomic = "64")]
+use std::sync::atomic::AtomicU64;
+
+#[cfg(target_has_atomic = "64")]
+pub struct CounterU64 {
+    counter: AtomicU64,
+}
+
+#[cfg(target_has_atomic = "64")]
+impl CounterU64 {
+    pub const fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    pub unsafe fn add(&self, v: u64) -> u64 {
+        self.counter.fetch_add(v, Ordering::AcqRel)
+    }
+
+    pub fn get(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    pub unsafe fn reset(&self) {
+        self.counter.store(0, Ordering::Release);
     }
 }
 
@@ -347,5 +470,126 @@ mod host_tests {
         }
         let final_value = *lock.lock();
         assert_eq!(final_value, (THREADS as u32) * ITERS);
+    }
+
+    // ---- CounterU64 tests ----------------------------------------------------
+    //
+    // These tests run against whichever CounterU64 impl the host has. On a
+    // typical 64-bit host they exercise the AtomicU64-backed thin wrapper.
+    // The kernel-target Lamport-pair / seqlock implementation can't be directly
+    // tested from host tests (it's cfg-gated out on hosts with native 64-bit
+    // atomics). The API contract is the same on both, so these tests still
+    // serve as a behavioural specification.
+
+    #[test]
+    fn counter_new_is_zero() {
+        let c = CounterU64::new();
+        assert_eq!(c.get(), 0);
+    }
+
+    #[test]
+    fn counter_add_returns_old_value() {
+        let c = CounterU64::new();
+        let old = unsafe { c.add(10) };
+        assert_eq!(old, 0, "first add: old should be 0");
+
+        let old = unsafe { c.add(5) };
+        assert_eq!(old, 10, "second add: old should be 10");
+
+        assert_eq!(c.get(), 15, "final value should be 15");
+    }
+
+    #[test]
+    fn counter_reset_clears_to_zero() {
+        let c = CounterU64::new();
+        unsafe { c.add(42) };
+        assert_eq!(c.get(), 42);
+        unsafe { c.reset() };
+        assert_eq!(c.get(), 0, "reset should bring counter to 0");
+    }
+
+    #[test]
+    fn counter_wraps_low_into_high_half() {
+        // Verify the carry behaviour: when low overflows, high increments.
+        let c = CounterU64::new();
+        // First add: a value just below 2^32.
+        unsafe { c.add(u32::MAX as u64 - 5) };
+        assert_eq!(c.get(), u32::MAX as u64 - 5);
+        // Second add: 10 cycles, which crosses the 2^32 boundary.
+        unsafe { c.add(10) };
+        // Expected: (u32::MAX - 5) + 10 = u32::MAX + 5 = (1 << 32) + 4
+        assert_eq!(c.get(), (1u64 << 32) + 4);
+    }
+
+    #[test]
+    fn counter_handles_large_increments() {
+        // Large single increment that has both high and low components.
+        let c = CounterU64::new();
+        let v = (3u64 << 32) | 0x12345678;
+        let old = unsafe { c.add(v) };
+        assert_eq!(old, 0);
+        assert_eq!(c.get(), v);
+    }
+
+    #[test]
+    fn counter_concurrent_readers_observe_monotonic() {
+        // Single writer, multiple readers. The CounterU64 contract is
+        // single-writer (enforced by the assertion in the kernel impl). With
+        // many readers, every read must observe a value >= the previous read
+        // — i.e., no tearing into a smaller intermediate value, no torn
+        // composition of high/low halves.
+        //
+        // Under Miri, this also validates the Acquire/Release ordering of
+        // the seq increments (or the underlying AtomicU64 on this host).
+        //
+        // What this catches if the impl were buggy:
+        //   - Wrong memory ordering on the seq atomic → a reader could see a
+        //     partial state and report a non-monotonic value.
+        //   - Lamport-pair without seqlock on multi-core → "old hi + new lo"
+        //     produces a value 2^32 too large, breaking monotonicity in the
+        //     opposite direction.
+        //   - Forgetting to close the seqlock → readers loop forever.
+        const READERS: usize = 4;
+        const WRITES: u64 = 1000;
+
+        let counter: Arc<CounterU64> = Arc::new(CounterU64::new());
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let mut reader_handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(READERS);
+        for _ in 0..READERS {
+            let counter = Arc::clone(&counter);
+            let stop = Arc::clone(&stop);
+            reader_handles.push(thread::spawn(move || {
+                let mut last: u64 = 0;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let now = counter.get();
+                    assert!(
+                        now >= last,
+                        "non-monotonic read: now={} < last={}",
+                        now,
+                        last
+                    );
+                    last = now;
+                }
+            }));
+        }
+
+        // Single writer - increments by varying amounts to exercise both
+        // halves of the counter and the carry path.
+        for i in 0..WRITES {
+            // Mix: some +1, some larger; occasional crossings of 2^32 are
+            // unlikely but not relevant — the test covers monotonic behaviour
+            // at all times, not specifically the wrap.
+            unsafe { counter.add((i % 7) + 1) };
+        }
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in reader_handles {
+            h.join().expect("reader thread panicked");
+        }
+
+        // Final value: sum of (i % 7) + 1 for i in 0..WRITES.
+        let expected: u64 = (0..WRITES).map(|i| (i % 7) + 1).sum();
+        assert_eq!(counter.get(), expected);
     }
 }

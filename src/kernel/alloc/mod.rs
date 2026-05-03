@@ -59,7 +59,7 @@ mod bare_metal_alloc {
     /// Returns the address of `__heap_start` for diagnostics (e.g. computing
     /// heap-used in benchmarks). Only referenced from the `#[cfg(test)]`
     /// allocator benchmarks.
-    #[cfg(all(test, feature = "test-alloc"))]
+    #[cfg(all(test, feature = "test-alloc", feature = "test-bench"))]
     pub(crate) fn heap_start_addr() -> usize {
         &raw const __heap_start as usize
     }
@@ -136,18 +136,21 @@ mod bare_metal_alloc {
 }
 
 #[cfg(target_os = "none")]
-#[cfg(all(test, feature = "test-alloc"))]
+#[cfg(all(test, feature = "test-alloc", feature = "test-bench"))]
 pub(crate) use bare_metal_alloc::heap_start_addr;
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub use bare_metal_alloc::init_global_allocator;
 
 // Allocator-agnostic QEMU benchmark suite. Compiles only when one of the
-// global allocators is active and the test-alloc feature is on.
+// global allocators is active and both test-alloc and test-bench are on.
+// test-bench is opt-in (not part of test-all) so regression benches can
+// be run separately from functional tests.
 #[cfg(all(
     test,
     target_os = "none",
     feature = "test-alloc",
+    feature = "test-bench",
     any(
         feature = "alloc-slab",
         feature = "alloc-freelist",
