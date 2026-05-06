@@ -48,13 +48,10 @@ MEMORY {
     PSRAM : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB PSRAM */
 }
 
-__hart0_stack_top = 0x80081000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
-__hart1_stack_top = 0x80082000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
 __psram_start = 0x81000000;
 __psram_end = 0x81800000;
 __fb_size   = 640 * 480 * 4;   /* 640  x 480 x 4 bytes = 1.2MiB */
 __fb_addr   = 0x81800000 - __fb_size;
-
 
 SECTIONS {
     .text : {
@@ -84,16 +81,18 @@ SECTIONS {
         __heap_end = .;
     } > SRAM
 
-    /* Add dedicated SRAM4 */
+    /* Add dedicated SRAM4 for HART0 stack */
     .sram4 0x80080000 (NOLOAD) : {
-        __sram4 = .;
+        __hart0_stack_start = .;
         . = . + 4K;
+        __hart0_stack_top = .;
     } > SRAM
 
-    /* Add dedicated SRAM5 */
+    /* Add dedicated SRAM5 for HART1 stack */
     .sram5 0x80081000 (NOLOAD) : {
-        __sram5 = .;
+        __hart1_stack_start = .;
         . = . + 4K;
+        __hart1_stack_top = .;
     } > SRAM
 
     /DISCARD/ : { *(.comment) *(.eh_frame)} /* Discard comment strings to keep binary small */
@@ -102,4 +101,4 @@ SECTIONS {
 ASSERT(SIZEOF(.data) == 0, "non-empty .data not yet supported - add LMA copy logic")
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
-ASSERT(__heap_end <= __sram4, "heap overflows dedicated stacks")
+ASSERT(__heap_end <= __hart0_stack_start, "heap overflows dedicated stacks")

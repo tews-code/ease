@@ -28,6 +28,17 @@ pub fn rdcycles() -> u64 {
     }
 }
 
+/// Machine HART id
+pub mod mhartid {
+    pub fn read() -> usize {
+        let mhartid: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, mhartid", out(reg) mhartid);
+        }
+        mhartid
+    }
+}
+
 /// Machine status register (mstatus) operations.
 pub mod mstatus {
     /// Machine interrupt enable bit (bit 3). Controls global interrupt enable.

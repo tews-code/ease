@@ -12,6 +12,11 @@ pub mod trap;
 /// Checked by the scheduler / panic path to detect stack overflow.
 pub const STACK_CANARY: usize = 0xDEAD_BEEF;
 
+/// Get HART id that this thread is running on
+pub fn cpu_id() -> usize {
+    crate::arch::csr::mhartid::read()
+}
+
 /// Enables machine-wide interrupts
 ///
 pub fn enable_interrupts() {

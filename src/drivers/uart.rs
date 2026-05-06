@@ -7,6 +7,7 @@
 use crate::arch::mmio;
 use crate::board::uart;
 use crate::kernel::collection::SpscRingBuf;
+use crate::kernel::sync::IrqSpinLock;
 
 const RBR: usize = 0; // offset +0: receive buffer register (read)
 const THR: usize = 0; // offset +0: transmit holding register (write)
@@ -22,7 +23,7 @@ static RX_BUF: SpscRingBuf<u8, 64> = SpscRingBuf::new();
 static TX_BUF: SpscRingBuf<u8, 256> = SpscRingBuf::new();
 
 /// UART writer for QEMU
-pub struct UartWriter;
+pub struct UartWriter(()); // ZST has a private field to seal
 
 impl UartWriter {
     fn write_byte(&self, byte: u8) {
@@ -57,6 +58,17 @@ impl core::fmt::Write for UartWriter {
         UartWriter::write_str(self, s);
         Ok(())
     }
+}
+
+static UART_WRITER: IrqSpinLock<UartWriter> = IrqSpinLock::new(UartWriter(())); // Private - only access with `with_uart_writer`
+
+/// Runs a closure with exclusive access to the UART_WRITER driver.
+pub fn with_uart_writer<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut UartWriter) -> R,
+{
+    let mut uart_writer = UART_WRITER.lock();
+    f(&mut uart_writer)
 }
 
 /// Direct write to MMIO - skips queue

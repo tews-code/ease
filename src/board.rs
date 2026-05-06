@@ -30,3 +30,6 @@ pub mod plic {
 pub mod uart {
     pub const BASE: usize = 0x1000_0000;
 }
+
+// HARTS
+pub const HARTS_MAX: usize = 2;

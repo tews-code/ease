@@ -1,39 +1,16 @@
 //! Timer support for QEMU virt platform
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use crate::arch::csr;
+use crate::board::clint::TIMER_FREQ_HZ;
 use crate::drivers::clint::{Clint, with_clint};
 
 /// Timer interval (QEMU runs at 10MHz, so 10_000 = 1ms)
 const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 100; // 10ms
 
-/// Global tick counter (incremented by timer interrupt)
-static TICKS_L: AtomicU32 = AtomicU32::new(0);
-static TICKS_H: AtomicU32 = AtomicU32::new(0);
-
-/// Initialise the timer
+/// Initialise the timer for a HART
 pub fn init() {
     with_clint(|c| c.set_mtimecmp(Clint::mtime() + TIMER_INTERVAL));
     csr::mie::enable_bits(csr::mie::MTIE);
-}
-
-fn add_tick() {
-    let last_ticks_l = TICKS_L.fetch_add(10, Ordering::Relaxed);
-    if last_ticks_l.wrapping_add(10) < last_ticks_l {
-        TICKS_H.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-fn get_ticks() -> u64 {
-    loop {
-        let h = TICKS_H.load(Ordering::Relaxed);
-        let l = TICKS_L.load(Ordering::Relaxed);
-        let h_again = TICKS_H.load(Ordering::Relaxed);
-        if h == h_again {
-            return ((h as u64) << 32) | (l as u64);
-        }
-    }
 }
 
 /// Handle interrupt called by trap vector
@@ -41,8 +18,6 @@ pub fn handle_interrupt() {
     // if !stack_guard::check() {
     //     panic!("Stack has grown into heap");
     // }
-
-    add_tick();
 
     with_clint(|c| {
         let next = c.get_mtimecmp() + TIMER_INTERVAL;
@@ -52,7 +27,7 @@ pub fn handle_interrupt() {
 
 /// Get current tick count (TIMER_INTERVAL is 10ms)
 pub fn ticks_ms() -> u64 {
-    get_ticks()
+    Clint::mtime() / (TIMER_FREQ_HZ / 1000)
 }
 
 /// Sleep for given ms

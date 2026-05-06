@@ -1,7 +1,6 @@
 //! Panic handler
 
 use crate::hal::wait_for_interrupt;
-use crate::println;
 #[cfg(test)]
 use crate::qemu;
 
@@ -96,15 +95,18 @@ impl core::fmt::Write for DirectConsoleWriter {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     #[cfg(not(test))]
     {
-        println!("PANIC: {info}");
+        use crate::io::DirectWriter;
         use core::fmt::Write;
+        let _ = writeln!(DirectWriter, "PANIC: {info}");
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
     }
     #[cfg(test)]
     {
-        println!("\x1b[31mfailed\x1b[0m");
-        println!("Error: {}", info);
+        use crate::io::DirectWriter;
+        use core::fmt::Write;
+        let _ = writeln!(DirectWriter, "\x1b[31mfailed\x1b[0m");
+        let _ = writeln!(DirectWriter, "Error: {}", info);
         qemu::exit_failure();
     }
 

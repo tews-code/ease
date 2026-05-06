@@ -25,7 +25,8 @@ impl core::fmt::Write for DirectWriter {
 macro_rules! print {
     ($($arg:tt)*) => {{
         use core::fmt::Write;
-        let _ = write!($crate::io::DirectWriter, $($arg)*);
+        use $crate::drivers::uart::with_uart_writer;
+        let _ = with_uart_writer(|w| write!(w, $($arg)*));
     }}
 }
 

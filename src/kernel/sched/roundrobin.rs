@@ -7,15 +7,16 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use crate::arch::STACK_CANARY;
 use crate::arch::context::swap_to;
 use crate::arch::trap::TrapFrame;
+use crate::board::HARTS_MAX;
 use crate::kernel::collection::StackVec;
 use crate::kernel::sync::{CounterU64, IrqSpinLock};
 
 const THREADS_MAX: usize = 32;
 
-// Hart boot thread slots added to the end of the threads array
-const HART0_TCB_SLOT: usize = THREADS_MAX - 2;
-#[expect(dead_code)]
-const HART1_TCB_SLOT: usize = THREADS_MAX - 1;
+// Helper function to determine the HART boot threads in the threads array
+const fn hart_tcb_slot(hartid: usize) -> usize {
+    THREADS_MAX - HARTS_MAX + hartid
+}
 
 pub const PRIORITY_DEFAULT: u8 = u8::MAX / 2;
 pub const PRIORITY_MIN: u8 = u8::MAX - 1; // Highest priority is 0
@@ -282,9 +283,9 @@ impl Scheduler {
         }
     }
 
-    // Set up the boot thread to become the idle thread
+    // Set up the boot thread on HART0 to become the idle thread
     fn setup_boot(&self, threads: &mut ThreadsInner) {
-        threads.control_blocks[HART0_TCB_SLOT] = ThreadControlBlock {
+        threads.control_blocks[hart_tcb_slot(0)] = ThreadControlBlock {
             id: 0,
             state: State::Running,
             priority: PRIORITY_MIN,
@@ -296,7 +297,7 @@ impl Scheduler {
     // Set up the boot thread
     fn bootstrap(&self) {
         // Make sure bootstrap is only called once
-        // We use up id counter zero - which we will set to the HART0_TCB_SLOT
+        // We use up id counter zero - which we will set to the HART0 TCB slot
         assert!(self.thread_id_counter.fetch_add(1, Ordering::Relaxed) == 0);
 
         let mut threads = self.threads.lock();

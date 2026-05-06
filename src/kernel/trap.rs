@@ -12,7 +12,9 @@ extern "C" fn trap_handler(sp: *mut TrapFrame) -> *mut TrapFrame {
             TIMER => {
                 crate::kernel::timer::handle_interrupt();
                 // Safety: sp is a valid stack pointer
-                return unsafe { crate::kernel::sched::preempt_into(sp) };
+                if crate::arch::cpu_id() == 0 {
+                    return unsafe { crate::kernel::sched::preempt_into(sp) };
+                };
             }
             EXTERNAL => {
                 let irq = crate::drivers::plic::claim();

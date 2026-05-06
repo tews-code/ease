@@ -96,7 +96,12 @@ fn shell_thread() -> ! {
     }
 }
 
-fn kernel_init() -> FrameBuffer {
+fn secondary_init() {
+    kernel::timer::init();
+    arch::enable_interrupts();
+}
+
+fn kernel_init() {
     kernel::timer::init();
     kernel::alloc::init_global_allocator();
 
@@ -141,21 +146,21 @@ fn kernel_init() -> FrameBuffer {
     }
 
     let fb = drivers::ramfb::FrameBuffer::init();
+    *FB_HANDOFF.lock() = Some(fb);
 
     // Set the flag
     INIT_COMPLETE.store(true, Ordering::Release);
-
-    fb
 }
 
-#[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn secondary_main() -> ! {
     // Spin on initialisation completion
     while !INIT_COMPLETE.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    println!("Hello from HART1!");
+    secondary_init();
+    println!("Hello from HART{}!", crate::arch::cpu_id());
+    sched::idle_thread();
 }
 
 #[cfg(test)]
@@ -171,21 +176,10 @@ extern "C" fn main() -> ! {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
-extern "C" fn secondary_main() -> ! {
-    // Spin on initialisation completion
-    while !INIT_COMPLETE.load(Ordering::Acquire) {
-        core::hint::spin_loop();
-    }
-    println!("Hello from HART1!");
-}
-
-#[cfg(not(test))]
-#[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
-    let fb = kernel_init();
-    println!("Hello from EASE! (debug console)");
+    kernel_init();
+    println!("Hello from EASE HART{}!", crate::arch::cpu_id());
 
-    *FB_HANDOFF.lock() = Some(fb);
     #[allow(clippy::diverging_sub_expression)]
     let Some(id) = sched::spawn(
         shell_thread(),
