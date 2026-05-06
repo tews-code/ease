@@ -1,0 +1,15 @@
+# rust-analyzer project-local config (auto-discovered).
+#
+# Disable --all-targets for the on-save cargo check. The default
+# `cargo check --all-targets --target riscv32imac-unknown-none-elf`
+# tries to build the lib crate's test target on the kernel target,
+# which forces `cfg(test)` on. That flips off the
+# `#![cfg_attr(not(test), no_std)]` in src/lib.rs, leaving the lib
+# implicitly std on a target with no std and producing ~500 cascade
+# errors (missing prelude, derive, Result::Ok, etc.).
+#
+# Without --all-targets, rust-analyzer runs plain `cargo check`,
+# which builds lib + bin in their non-test config and succeeds.
+# Lib host tests are still run by ci.sh under their proper target.
+[check]
+allTargets = false

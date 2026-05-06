@@ -36,8 +36,8 @@ pub struct TrapFrame {
     s9: usize,
     s10: usize,
     s11: usize,
-    mepc: usize,
-    mstatus: usize,
+    pub mepc: usize,
+    pub mstatus: usize,
 }
 
 const NUM_SLOTS: usize = 32;

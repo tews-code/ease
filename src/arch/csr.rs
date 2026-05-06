@@ -99,3 +99,14 @@ pub mod mcause {
         }
     }
 }
+
+/// Main registers
+pub mod regs {
+    pub fn sp() -> usize {
+        let sp: usize;
+        unsafe {
+            core::arch::asm!("mv {}, sp", out(reg) sp);
+        }
+        sp
+    }
+}

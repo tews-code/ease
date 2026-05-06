@@ -7,24 +7,29 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  * This board contians a RP2350 microcontroller with 520KB SRAM and 8MB PSRAM,
  * some of which is assigned to a framebuffer. QEMU is configured to provide
  * 32MB of physical RAM starting at 0x80000000.
- * We declare only 520KB as our working SRAM region. PSRAM is placed
+ * We declare only 520KiB as our working SRAM region. PSRAM is placed
  * at a separate address (0x81000000) to model a separate PSRAM region,
  * similar to real hardware
+ * Flash memory is used to replicate XIP.
  *
  * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
  *             | .text              |
  *             | .rodata / .srodata |
  * 0x2100_0000 +--------------------+
- * 0x8000_0000 +--------------------+   Represents RP2350 520KB SRAM
+ * 0x8000_0000 +--------------------+   Represents RP2350 520KiB SRAM
  *             |                    |
  *             | .data / .sdata     |   Data segment should be zero sized - no static mut
  *             |                    |   or non-zero initialised statics.
  *             | .bss / .sbss       |
  *             | heap -->           |  Grows up (bounded by __heap_end)
  *             |                    |
- *             |    stack_guard     |
- *             |        <-- stack   |  Grows down from __stack_top (64KB reserved)
- * 0x80082000  +--------------------+  End of declared SRAM (520KB)
+ *             |                    |
+ *             |                    |
+ * 0x80080000  +--------------------+
+ *             | SRAM4 - HART0 stack|
+ * 0x80081000  +--------------------+
+ *             | SRAM5 - HART1 stack|
+ * 0x80082000  +--------------------+  End of declared SRAM (520KiB)
  *             :   (unused gap)     :
  * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
  *             | PSRAM (8MB)        |
@@ -32,7 +37,7 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  * 0x816d4000  | 640x480x4 fb       | Framebuffer configured via QEMU ramfb
  * 0x81800000  +--------------------+ End of declared PSRAM
  *
- * The heap cannot grow past __heap_end (enforced by the bump allocator).
+ * The heap cannot grow past __heap_end (enforced by the global allocator).
  * The gap between SRAM and PSRAM is backed by QEMU's physical RAM but is
  * not used.
  */
@@ -43,7 +48,8 @@ MEMORY {
     PSRAM : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB PSRAM */
 }
 
-__stack_top = 0x80082000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
+__hart0_stack_top = 0x80081000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
+__hart1_stack_top = 0x80082000; /* Must be 16-byte aligned (needed for RISC-V function entry) */
 __psram_start = 0x81000000;
 __psram_end = 0x81800000;
 __fb_size   = 640 * 480 * 4;   /* 640  x 480 x 4 bytes = 1.2MiB */
@@ -72,16 +78,22 @@ SECTIONS {
         __bss_end = .;
     } > SRAM
 
-    .heap (NOLOAD) : ALIGN(4096) { /* For buddy allocator need heap to be aligned to laegest alloc size */
+    .heap (NOLOAD) : ALIGN(4096) { /* For buddy allocator need heap to be aligned to largest alloc size */
         __heap_start = .;
         . = . + 256K;
         __heap_end = .;
     } > SRAM
 
-    /* Add stack guard with 4 bytes reserved */
-    .stack_guard (NOLOAD) : {
-        __stack_guard = .;
-        . = . + 4;
+    /* Add dedicated SRAM4 */
+    .sram4 0x80080000 (NOLOAD) : {
+        __sram4 = .;
+        . = . + 4K;
+    } > SRAM
+
+    /* Add dedicated SRAM5 */
+    .sram5 0x80081000 (NOLOAD) : {
+        __sram5 = .;
+        . = . + 4K;
     } > SRAM
 
     /DISCARD/ : { *(.comment) *(.eh_frame)} /* Discard comment strings to keep binary small */
@@ -90,6 +102,4 @@ SECTIONS {
 ASSERT(SIZEOF(.data) == 0, "non-empty .data not yet supported - add LMA copy logic")
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
-ASSERT(__heap_end <= __stack_top, "heap overlaps stack region")
-ASSERT(__heap_end <= __psram_start, "heap overlaps psram region")
-ASSERT(__stack_guard + 4 <= __stack_top, "SRAM sections overflow into stack")
+ASSERT(__heap_end <= __sram4, "heap overflows dedicated stacks")

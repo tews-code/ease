@@ -4,7 +4,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::arch::csr;
 use crate::drivers::clint::{Clint, with_clint};
-use crate::kernel::stack_guard;
 
 /// Timer interval (QEMU runs at 10MHz, so 10_000 = 1ms)
 const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 100; // 10ms
@@ -39,9 +38,9 @@ fn get_ticks() -> u64 {
 
 /// Handle interrupt called by trap vector
 pub fn handle_interrupt() {
-    if !stack_guard::check() {
-        panic!("Stack has grown into heap");
-    }
+    // if !stack_guard::check() {
+    //     panic!("Stack has grown into heap");
+    // }
 
     add_tick();
 

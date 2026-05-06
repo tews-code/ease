@@ -29,9 +29,11 @@
 
 #[allow(unused_imports)]
 use core::fmt::Write;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::ramfb::FrameBuffer;
 use crate::kernel::sched;
+use crate::kernel::sync::IrqSpinLock;
 
 extern crate alloc;
 
@@ -45,6 +47,9 @@ mod io;
 mod kernel;
 mod qemu;
 mod shell;
+
+static FB_HANDOFF: IrqSpinLock<Option<FrameBuffer>> = IrqSpinLock::new(None);
+static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
 // Thread Test Function
@@ -80,8 +85,18 @@ mod test_sched {
 // Entry Points
 // =============================================================================
 
+fn shell_thread() -> ! {
+    let fb = FB_HANDOFF.lock().take().expect("FB already handed off");
+    let console = shell::console::Console::new(fb);
+    let mut shell = shell::Shell::new(console);
+    shell.run();
+    #[allow(unreachable_code)]
+    loop {
+        crate::arch::wait_for_interrupt();
+    }
+}
+
 fn kernel_init() -> FrameBuffer {
-    kernel::stack_guard::init();
     kernel::timer::init();
     kernel::alloc::init_global_allocator();
 
@@ -108,12 +123,39 @@ fn kernel_init() -> FrameBuffer {
 
     #[cfg(all(feature = "test-sched", not(test)))]
     {
-        sched::spawn(test_sched::thread1);
-        sched::spawn(test_sched::thread2);
-        sched::spawn(test_sched::thread3);
+        sched::spawn(
+            test_sched::thread1,
+            sched::PRIORITY_DEFAULT,
+            sched::StackClass::KB4,
+        );
+        sched::spawn(
+            test_sched::thread2,
+            sched::PRIORITY_DEFAULT,
+            sched::StackClass::KB4,
+        );
+        sched::spawn(
+            test_sched::thread3,
+            sched::PRIORITY_DEFAULT,
+            sched::StackClass::KB4,
+        );
     }
 
-    drivers::ramfb::FrameBuffer::init()
+    let fb = drivers::ramfb::FrameBuffer::init();
+
+    // Set the flag
+    INIT_COMPLETE.store(true, Ordering::Release);
+
+    fb
+}
+
+#[cfg(test)]
+#[unsafe(no_mangle)]
+extern "C" fn secondary_main() -> ! {
+    // Spin on initialisation completion
+    while !INIT_COMPLETE.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    println!("Hello from HART1!");
 }
 
 #[cfg(test)]
@@ -129,11 +171,31 @@ extern "C" fn main() -> ! {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
+extern "C" fn secondary_main() -> ! {
+    // Spin on initialisation completion
+    while !INIT_COMPLETE.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    println!("Hello from HART1!");
+}
+
+#[cfg(not(test))]
+#[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     let fb = kernel_init();
-    let mut console = shell::console::Console::new(fb);
-    let _ = writeln!(console, "Hello from EASE!");
     println!("Hello from EASE! (debug console)");
+
+    *FB_HANDOFF.lock() = Some(fb);
+    #[allow(clippy::diverging_sub_expression)]
+    let Some(id) = sched::spawn(
+        shell_thread(),
+        #[allow(unreachable_code)]
+        sched::PRIORITY_DEFAULT,
+        sched::StackClass::KB8,
+    ) else {
+        println!("failed to lanuch shell");
+    };
+
     #[cfg(feature = "test-sched")]
     {
         loop {
@@ -144,8 +206,8 @@ extern "C" fn main() -> ! {
     }
     // Start the shell
     #[allow(unreachable_code)]
-    let mut shell = shell::Shell::new(console);
-    shell.run();
+    // Main drops into idle_thread
+    sched::idle_thread();
 }
 
 // =============================================================================

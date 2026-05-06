@@ -8,6 +8,10 @@ pub mod csr;
 pub mod mmio;
 pub mod trap;
 
+/// Sentinel placed at the bottom word of each thread's stack.
+/// Checked by the scheduler / panic path to detect stack overflow.
+pub const STACK_CANARY: usize = 0xDEAD_BEEF;
+
 /// Enables machine-wide interrupts
 ///
 pub fn enable_interrupts() {

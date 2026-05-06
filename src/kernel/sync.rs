@@ -280,6 +280,7 @@ impl CounterU64 {
     }
 
     /// Reads the current counter value
+    #[allow(dead_code)]
     pub fn get(&self) -> u64 {
         loop {
             // Check if a write is in progress
@@ -303,6 +304,7 @@ impl CounterU64 {
     /// Reset the counter
     ///
     /// Safety: Caller must ensure only single reset caller (no concurrency)
+    #[allow(dead_code)]
     pub unsafe fn reset(&self) {
         // Sequence lock to prevent readers from seeing tearing
         let s = self.seq.fetch_add(1, Ordering::Acquire);
