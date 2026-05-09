@@ -85,6 +85,7 @@ mod test_sched {
 // Entry Points
 // =============================================================================
 
+#[allow(dead_code)]
 fn shell_thread() -> ! {
     let fb = FB_HANDOFF.lock().take().expect("FB already handed off");
     let console = shell::console::Console::new(fb);
@@ -98,6 +99,7 @@ fn shell_thread() -> ! {
 
 fn secondary_init() {
     kernel::timer::init();
+    sched::bootstrap(1);
     arch::enable_interrupts();
 }
 
@@ -115,7 +117,7 @@ fn kernel_init() {
 
     drivers::uart::enable_rx_interrupt();
 
-    sched::bootstrap();
+    sched::bootstrap(0);
     arch::enable_interrupts();
 
     // Large-allocation init — skipped when the slab is the sole allocator,
@@ -252,5 +254,22 @@ mod tests {
     #[test_case]
     fn test_bss_zeroed() {
         assert_eq!(BSS_TEST.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(all(test, feature = "test-data"))]
+mod data_tests {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    // AtomicU32 with a non-zero initial value forces this static into .data
+    // (interior mutability rules out .rodata). #[used] keeps it from being
+    // dead-code-eliminated. If the boot LMA->VMA copy doesn't run, the read
+    // returns whatever happens to be in SRAM at boot (zero on QEMU).
+    #[used]
+    static DATA_TEST: AtomicU32 = AtomicU32::new(0xCAFEBABE);
+
+    #[test_case]
+    fn test_data_initialized() {
+        assert_eq!(DATA_TEST.load(Ordering::Relaxed), 0xCAFEBABE);
     }
 }

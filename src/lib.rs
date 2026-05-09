@@ -93,6 +93,13 @@ mod drivers {
             panic!("virtio::write_block stub: must not be called from the lib crate")
         }
     }
+
+    #[allow(dead_code)]
+    pub mod uart {
+        pub fn direct_write_byte(_byte: u8) {
+            panic!("uart::direct_write_byte stub: must not be called from the lib crate")
+        }
+    }
 }
 
 // Pull just the host-compatible pieces of the kernel module tree into

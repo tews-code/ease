@@ -4,9 +4,9 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::arch::STACK_CANARY;
-use crate::arch::context::swap_to;
+use crate::arch::context::{Context, switch_to};
 use crate::arch::trap::TrapFrame;
+use crate::arch::{STACK_CANARY, cpu_id};
 use crate::board::HARTS_MAX;
 use crate::kernel::collection::StackVec;
 use crate::kernel::sync::{CounterU64, IrqSpinLock};
@@ -14,7 +14,7 @@ use crate::kernel::sync::{CounterU64, IrqSpinLock};
 const THREADS_MAX: usize = 32;
 
 // Helper function to determine the HART boot threads in the threads array
-const fn hart_tcb_slot(hartid: usize) -> usize {
+const fn slot_for_hart(hartid: usize) -> usize {
     THREADS_MAX - HARTS_MAX + hartid
 }
 
@@ -22,7 +22,6 @@ pub const PRIORITY_DEFAULT: u8 = u8::MAX / 2;
 pub const PRIORITY_MIN: u8 = u8::MAX - 1; // Highest priority is 0
 
 static SCHEDULER: Scheduler = Scheduler::new();
-static SWITCH_CYCLE_COUNT: CounterU64 = CounterU64::new();
 
 const _: () = assert!(
     core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
@@ -70,10 +69,11 @@ impl ThreadStack {
         NonNull::new(unsafe { alloc::alloc::alloc(class.layout()) })
     }
 
-    // Initialises a heap-based thread stack
+    // Forges a heap-based thread Context
+    // The thread entry function is stored in s0
     // Returns the stack pointer
     // Safety: stack_base must be class.size()-aligned and point to
-    // writeable memory of at least class.size() bytes
+    // write§§§§§§§§§able memory of at least class.size() bytes
     pub unsafe fn init_for_entry(
         stack_base: NonNull<u8>,
         class: StackClass,
@@ -83,26 +83,25 @@ impl ThreadStack {
         unsafe {
             core::ptr::write(stack_base.as_ptr() as *mut usize, STACK_CANARY);
         }
-        let tf_ptr = unsafe {
+        let context_ptr = unsafe {
             stack_base
                 .as_ptr()
-                .add(class.size() - core::mem::size_of::<TrapFrame>()) as *mut TrapFrame
+                .add(class.size() - core::mem::size_of::<Context>()) as *mut Context
         };
-        // Safety: tf_ptr is derived from stack_base, and
-        // aligned because sizeof(TF) is a multiple of align(TF).
-        let mstatus = crate::arch::csr::mstatus::MPIE | crate::arch::csr::mstatus::MPP;
+        // Safety: context_ptr is derived from stack_base, and
+        // aligned because sizeof(Context) is a multiple of align(Context).
         unsafe {
-            core::ptr::write_bytes(tf_ptr, 0, 1); // writes 0 across one TrapFrame's worth of bytes
-            (*tf_ptr).mepc = entry as usize;
-            (*tf_ptr).mstatus = mstatus;
+            core::ptr::write_bytes(context_ptr, 0, 1); // writes 0 across one Context's worth of bytes
+            *context_ptr = Context::for_entry(entry);
         }
-        tf_ptr as *mut u8
+        context_ptr as *mut u8
     }
 
     // Check canary
     // Safety: sp must point inside a stack region that was set up
     // class must equal the StackClass used to set up this region
     // and has not been deallocated.
+    #[expect(dead_code)]
     unsafe fn canary_ok(class: StackClass, sp: *mut u8) -> bool {
         unsafe { *(sp.with_addr(sp.addr() & !class.mask()) as *const usize) == STACK_CANARY }
     }
@@ -118,10 +117,17 @@ impl ThreadStack {
 }
 
 #[derive(PartialEq)]
+enum PostSwitch {
+    Ready,
+    Sleeping(u64),
+}
+
+#[derive(PartialEq)]
 enum State {
     Avail,
     Ready,
     Running,
+    Switching(PostSwitch),
     Sleeping(u64), // Milliseconds of sleep time
 }
 
@@ -130,10 +136,10 @@ struct ThreadControlBlock {
     state: State,
     sp: *mut u8,
     stack_class: Option<StackClass>,
-    stack_owned: bool, // If true then stack is on the heap
-    priority: u8,
-    pass: u64,
-    run_cycles: CounterU64,
+    stack_owned: bool,        // If true then stack is on the heap
+    priority: u8,             // Lower number is higher priority
+    pass: u64,                // The next ready thread with lowest pass wins
+    last_started_cycles: u64, // Cycle stamp from last switch
 }
 
 impl ThreadControlBlock {
@@ -144,16 +150,10 @@ impl ThreadControlBlock {
             sp: core::ptr::null_mut(),
             stack_class: None,
             stack_owned: false,
-            priority: 0,
+            priority: PRIORITY_DEFAULT,
             pass: 0,
-            run_cycles: CounterU64::new(),
+            last_started_cycles: 0,
         }
-    }
-
-    // Add cycles to the accummulator
-    // Safety: Caller must ensure only one writer at a time
-    unsafe fn add_run_cycles(&mut self, n: u64) {
-        unsafe { self.run_cycles.add(n) };
     }
 
     // Stride forward
@@ -164,6 +164,7 @@ impl ThreadControlBlock {
     }
 
     // Deallocate the stack if heap-based
+    #[expect(dead_code)]
     fn release_stack(&mut self) {
         if self.stack_owned {
             if let Some(class) = self.stack_class {
@@ -182,22 +183,28 @@ impl ThreadControlBlock {
 
 struct ThreadsInner {
     control_blocks: [ThreadControlBlock; THREADS_MAX],
+    running_on_hart: [usize; HARTS_MAX],
+    switch_on_hart: [Option<usize>; HARTS_MAX],
 }
 
 impl ThreadsInner {
     // Returns the currently running thread
+    #[expect(dead_code)]
     fn get_current(&self) -> &ThreadControlBlock {
-        self.control_blocks
-            .iter()
-            .find(|tcb| tcb.state == State::Running)
-            .expect("should always have exactly one running thread")
+        &self.control_blocks[self.running_on_hart[cpu_id()]]
     }
 
     // Wakes any threads past their deadlines
     fn wake_threads(&mut self) {
+        let now = crate::kernel::timer::ticks_ms();
         self.control_blocks.iter_mut().for_each(|tcb| {
-            if let State::Sleeping(d) = tcb.state
-                && d <= crate::kernel::timer::ticks_ms()
+            let deadline = match tcb.state {
+                State::Sleeping(d) => Some(d),
+                State::Switching(PostSwitch::Sleeping(d)) => Some(d),
+                _ => None,
+            };
+            if let Some(d) = deadline
+                && d <= now
             {
                 tcb.state = State::Ready;
             }
@@ -225,13 +232,14 @@ impl ThreadsInner {
     // Returns None if current and next are the same
     fn get_current_and_next_mut(
         &mut self,
-    ) -> Option<(&mut ThreadControlBlock, &mut ThreadControlBlock)> {
+    ) -> Option<(
+        &mut ThreadControlBlock,
+        usize,
+        &mut ThreadControlBlock,
+        usize,
+    )> {
         // Find current index
-        let curr_idx = self
-            .control_blocks
-            .iter()
-            .position(|tcb| tcb.state == State::Running)
-            .expect("only one thread running at a time");
+        let curr_idx = self.running_on_hart[cpu_id()];
         // Find next index
         let next_idx = self
             .control_blocks
@@ -248,7 +256,7 @@ impl ThreadsInner {
             .control_blocks
             .get_disjoint_mut([curr_idx, next_idx])
             .expect("indices have been selected as disjoint");
-        Some((curr, next))
+        Some((curr, curr_idx, next, next_idx))
     }
 }
 
@@ -257,61 +265,49 @@ unsafe impl Send for ThreadsInner {}
 
 struct Scheduler {
     threads: IrqSpinLock<ThreadsInner>,
-    thread_id_counter: AtomicU32,
-    last_switch_cycles: CounterU64,
+    run_cycles: [CounterU64; THREADS_MAX], // Outside of threads for lock-free read
 }
 
 impl Scheduler {
-    // Create new array
     const fn new() -> Self {
         Self {
             threads: IrqSpinLock::new(ThreadsInner {
                 control_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
+                running_on_hart: [0; HARTS_MAX],
+                switch_on_hart: [const { None }; HARTS_MAX],
             }),
-            thread_id_counter: AtomicU32::new(0),
-            last_switch_cycles: CounterU64::new(),
+            run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
     }
 
-    // Update the cpu cycle count for a thread
-    fn credit_cycles_to(&self, tcb: &mut ThreadControlBlock) {
-        let current_cycles = crate::arch::csr::rdcycles();
-        // Safety: Scheduler only credits cycles to one thread at a time - single writer
-        unsafe {
-            let cycle_increment = current_cycles - self.last_switch_cycles.set(current_cycles);
-            tcb.add_run_cycles(cycle_increment);
+    // Set up the boot thread for each hart
+    fn bootstrap(&self, hartid: usize) {
+        let id = next_thread_id();
+        if hartid == 0 {
+            assert!(id == 0); // We want to make sure HART0 is bootstrapped first
+        } else {
+            assert!(id > 0);
         }
-    }
-
-    // Set up the boot thread on HART0 to become the idle thread
-    fn setup_boot(&self, threads: &mut ThreadsInner) {
-        threads.control_blocks[hart_tcb_slot(0)] = ThreadControlBlock {
-            id: 0,
+        let mut threads = self.threads.lock();
+        threads.control_blocks[slot_for_hart(hartid)] = ThreadControlBlock {
+            id,
             state: State::Running,
             priority: PRIORITY_MIN,
             stack_class: Some(StackClass::KB4),
+            last_started_cycles: crate::arch::csr::rdcycles(),
             ..ThreadControlBlock::new()
         };
+        threads.running_on_hart[hartid] = slot_for_hart(hartid);
     }
 
-    // Set up the boot thread
-    fn bootstrap(&self) {
-        // Make sure bootstrap is only called once
-        // We use up id counter zero - which we will set to the HART0 TCB slot
-        assert!(self.thread_id_counter.fetch_add(1, Ordering::Relaxed) == 0);
-
-        let mut threads = self.threads.lock();
-        self.setup_boot(&mut threads);
-    }
-
-    // Set up initial thread block for a new thread
+    // Set up initial thread block and stack for a new thread
     fn spawn(&self, entry: fn() -> !, priority: u8, class: StackClass) -> Option<u32> {
         // First allocate before locking
         let base = ThreadStack::allocate(class)?;
         let sp = unsafe { ThreadStack::init_for_entry(base, class, entry) };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
-        // Get the current pass baselines
+        // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
         let Some(tcb) = threads.free_slot() else {
@@ -323,7 +319,7 @@ impl Scheduler {
         };
         // Initialise the TCB
         *tcb = ThreadControlBlock {
-            id: self.thread_id_counter.fetch_add(1, Ordering::Relaxed),
+            id: next_thread_id(),
             sp,
             state: State::Ready,
             priority,
@@ -336,7 +332,7 @@ impl Scheduler {
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
-    fn reschedule(&self, new_state: State) {
+    fn reschedule(&self, new_state: PostSwitch) {
         // We manually take and release the lock before the
         // context switch — it's held in this
         // thread's stack frame, so swap_to would otherwise carry the lock
@@ -347,7 +343,7 @@ impl Scheduler {
         // Check if any threads have reached or passed their deadline
         threads.wake_threads();
         // Get current and next TCBs
-        let Some((curr, next)) = threads.get_current_and_next_mut() else {
+        let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
             // Current and next are the same, return
             drop(threads);
             crate::arch::restore_interrupts(prev);
@@ -356,55 +352,73 @@ impl Scheduler {
 
         // Ready to switch
         // Set current thread to the new state
-        curr.state = new_state;
-        self.credit_cycles_to(curr);
+        curr.state = State::Switching(new_state);
+        // Safety: Only writing to current within locked threads array - single writer
+        let curr_cycles = crate::arch::csr::rdcycles();
+        unsafe { self.run_cycles[curr_idx].add(curr_cycles - curr.last_started_cycles) };
         curr.stride();
+
         next.state = State::Running;
+        next.last_started_cycles = curr_cycles;
 
         // Create local variables before dropping the lock
         let prev_sp_ptr = &raw mut curr.sp;
         let next_sp_ptr = &raw mut next.sp;
 
+        threads.running_on_hart[cpu_id()] = next_idx;
+        threads.switch_on_hart[cpu_id()] = Some(curr_idx);
         drop(threads);
 
-        unsafe { swap_to(prev_sp_ptr, next_sp_ptr) };
-        // After swap_to returns (on this thread's eventual resume), mret has
-        // restored MIE via the saved frame's MPIE=1. Restore caller's state.
+        unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+        self.post_switch_cleanup();
+        //mret has restored MIE via the thread trampoline
         crate::arch::restore_interrupts(prev);
     }
 
-    /// Preempts from current thread to next thread, returning a pointer
-    /// to the next thread stack frame.
+    /// Preempts from current thread to next thread
     ///
     /// Note: if only one thread is runnable it is returned.
     /// Safety:
     /// - Caller must provide a valid stack pointer to the thread trap frame
     /// - Caller must use returned pointer to populate mepc
-    unsafe fn preempt_into(&self, curr_sp: *mut TrapFrame) -> *mut TrapFrame {
+    unsafe fn preempt(&self) {
         let mut threads = self.threads.lock();
         threads.wake_threads();
-        let Some((curr, next)) = threads.get_current_and_next_mut() else {
-            return curr_sp;
+        let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
+            return;
         };
         // Ready to switch
         // Update book-keeping
-        self.credit_cycles_to(curr);
-        curr.sp = curr_sp as *mut u8;
-        curr.state = State::Ready;
+        let curr_cycles = crate::arch::csr::rdcycles();
+        unsafe { self.run_cycles[curr_idx].add(curr_cycles - curr.last_started_cycles) };
+        // Perform switch
+        curr.state = State::Switching(PostSwitch::Ready);
+        curr.stride();
         next.state = State::Running;
-        next.sp as *mut TrapFrame
+        next.last_started_cycles = curr_cycles;
+        // Create local variables before dropping the lock
+        let prev_sp_ptr = &raw mut curr.sp;
+        let next_sp_ptr = &raw mut next.sp;
+        threads.running_on_hart[cpu_id()] = next_idx;
+        threads.switch_on_hart[cpu_id()] = Some(curr_idx);
+        drop(threads);
+
+        unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+
+        // After switch_to returns (on this thread's eventual resume),
+        self.post_switch_cleanup();
     }
 
     /// Yields current thread
     fn yield_now(&self) {
-        self.reschedule(State::Ready);
+        self.reschedule(PostSwitch::Ready);
     }
 
     /// Blocks until the timer has passed the deadline
     ///
     /// Time is measured in milliseconds
     fn sleep_until(&self, deadline_ms: u64) {
-        self.reschedule(State::Sleeping(deadline_ms));
+        self.reschedule(PostSwitch::Sleeping(deadline_ms));
     }
 
     /// Blocks for `deadline` milliseconds
@@ -412,15 +426,33 @@ impl Scheduler {
         self.sleep_until(crate::kernel::timer::ticks_ms() + deadline_ms);
     }
 
-    /// Get currently running thread total cycles
-    pub fn get_current_cycles(&self) -> u64 {
-        let threads = self.threads.lock();
-        // Find running thread - this is safe as there is always one running thread (even idle)
-        let curr = threads.get_current();
-        let committed = curr.run_cycles.get();
-        let in_progress = crate::arch::csr::rdcycles() - SWITCH_CYCLE_COUNT.get();
-        committed + in_progress
+    /// Helper function to clean up post switch threads
+    fn post_switch_cleanup(&self) {
+        // After switch_to returns (on this thread's eventual resume),
+        let mut threads = self.threads.lock();
+        let switched_idx = threads.switch_on_hart[cpu_id()]
+            .take()
+            .expect("should have a Switching thread to set back to Ready");
+        let new_state = {
+            match threads.control_blocks[switched_idx].state {
+                State::Switching(PostSwitch::Ready) => State::Ready,
+                State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
+                _ => panic!("Post switch but not in Switched state"),
+            }
+        };
+        threads.control_blocks[switched_idx].state = new_state;
     }
+
+    /// Get currently running thread total cpu cycles
+    pub fn get_current_cycles(&self, tcb_idx: usize) -> u64 {
+        self.run_cycles[tcb_idx].get()
+    }
+}
+
+/// Generate a new thread id
+fn next_thread_id() -> u32 {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 pub fn idle_thread() -> ! {
@@ -435,8 +467,8 @@ pub fn spawn(entry: fn() -> !, priority: u8, class: StackClass) -> Option<u32> {
 }
 
 /// Set up the boot thread
-pub fn bootstrap() {
-    SCHEDULER.bootstrap();
+pub fn bootstrap(hartid: usize) {
+    SCHEDULER.bootstrap(hartid);
 }
 
 /// Voluntarily yield the current thread
@@ -459,14 +491,19 @@ pub fn sleep(deadline_ms: u64) {
 
 /// Preempts thread
 /// Safety: Caller must ensure `curr_sp` is a valid pointer to a trap frame
-pub unsafe fn preempt_into(curr_sp: *mut TrapFrame) -> *mut TrapFrame {
-    unsafe { SCHEDULER.preempt_into(curr_sp) }
+pub unsafe fn preempt() {
+    unsafe { SCHEDULER.preempt() }
 }
 
 /// Get cycles of running thread
 #[allow(dead_code)]
-pub fn get_current_cycles() -> u64 {
-    SCHEDULER.get_current_cycles()
+pub fn get_current_cycles(tcb_idx: usize) -> u64 {
+    SCHEDULER.get_current_cycles(tcb_idx)
+}
+
+/// Clean up switched status threads
+pub fn post_switch_cleanup() {
+    SCHEDULER.post_switch_cleanup();
 }
 
 // #[allow(dead_code)]

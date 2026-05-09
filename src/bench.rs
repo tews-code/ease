@@ -30,9 +30,9 @@ pub struct Cycles {
 /// because reading `get_current_cycles` itself is non-trivial.
 pub fn measure<F: FnOnce()>(f: F) -> Cycles {
     let wall_start = rdcycles();
-    let cpu_start = get_current_cycles();
+    let cpu_start = get_current_cycles(0);
     f();
-    let cpu_end = get_current_cycles();
+    let cpu_end = get_current_cycles(0);
     let wall_end = rdcycles();
     Cycles {
         cpu: cpu_end.saturating_sub(cpu_start),

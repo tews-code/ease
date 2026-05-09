@@ -91,10 +91,8 @@ global_asm!(
         csrr t0, mstatus
         sw t0,  4 * 31(sp)
 
-        mv a0, sp               # Put the stack pointer into a0 for the function call
         call trap_handler
 
-        mv sp, a0               # a0 contains the new stack pointer returned by trap_handler
         lw t0,  4 * 30(sp)
         csrw mepc, t0
         lw t0,  4 * 31(sp)

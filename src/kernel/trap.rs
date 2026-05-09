@@ -3,18 +3,15 @@ use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::mepc;
-use crate::arch::trap::TrapFrame;
 
 #[unsafe(no_mangle)]
-extern "C" fn trap_handler(sp: *mut TrapFrame) -> *mut TrapFrame {
+extern "C" fn trap_handler() {
     match mcause::read() {
         Trap::Interrupt(code) => match code {
             TIMER => {
                 crate::kernel::timer::handle_interrupt();
                 // Safety: sp is a valid stack pointer
-                if crate::arch::cpu_id() == 0 {
-                    return unsafe { crate::kernel::sched::preempt_into(sp) };
-                };
+                unsafe { crate::kernel::sched::preempt() };
             }
             EXTERNAL => {
                 let irq = crate::drivers::plic::claim();
@@ -39,5 +36,4 @@ extern "C" fn trap_handler(sp: *mut TrapFrame) -> *mut TrapFrame {
             _ => panic!("Unknown exception code {:x} mepc {:x}", code, mepc::read()),
         },
     }
-    sp
 }

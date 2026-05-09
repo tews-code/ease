@@ -252,11 +252,11 @@ pub struct CounterU64 {
 
 #[cfg(not(target_has_atomic = "64"))]
 impl CounterU64 {
-    pub const fn new() -> Self {
+    pub const fn new(v: u64) -> Self {
         Self {
             seq: AtomicU32::new(0),
-            hi: AtomicU32::new(0),
-            lo: AtomicU32::new(0),
+            hi: AtomicU32::new((v >> 32) as u32),
+            lo: AtomicU32::new(v as u32),
         }
     }
 
@@ -318,6 +318,7 @@ impl CounterU64 {
     ///
     /// Returns the previous counter value
     /// Safety: Caller must ensure only single writer (no concurrency)
+    #[allow(dead_code)]
     pub unsafe fn set(&self, v: u64) -> u64 {
         // Sequence lock to prevent readers from seeing tearing
         let s = self.seq.fetch_add(1, Ordering::Acquire);

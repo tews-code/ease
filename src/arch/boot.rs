@@ -10,12 +10,15 @@ use crate::arch::STACK_CANARY;
 // # Safety
 // Symbols are defined in the linker script and mark aligned addresses
 unsafe extern "C" {
-    static __hart0_stack_start: u8; // HART0 stack
+    static __hart0_stack_start: u8;
     static __hart0_stack_top: u8;
-    static __hart1_stack_start: u8; // HART1 stack
+    static __hart1_stack_start: u8;
     static __hart1_stack_top: u8;
     static __bss_start: u8;
     static __bss_end: u8;
+    static __data_start: u8;
+    static __data_end: u8;
+    static __data_lma: u8;
 }
 
 #[unsafe(link_section = ".text.init")]
@@ -33,15 +36,28 @@ extern "C" fn _start() -> ! {
         "li a0, {canary}",
         "sw a0, 0(t0)",
 
+        // Copy .data from LMA to VMA
+        "la t0, {data_lma}",
+        "la t1, {data_start}",
+        "la t2, {data_end}",
+        "1:",
+        "bge t1, t2, 2f",
+        "lw t3, 0(t0)",
+        "sw t3, 0(t1)",
+        "addi t0, t0, 4",
+        "addi t1, t1, 4",
+        "j 1b",
+        "2:",
+
         // Zero BSS segment
         "la t0, {bss_start}",
         "la t1, {bss_end}",
-        "1:",
-        "bge t0, t1, 2f",       // If t0 >= t1, jump to 2
+        "3:",
+        "bge t0, t1, 4f",
         "sw zero, 0(t0)",
         "addi t0, t0, 4",       // A word is 4 bytes
-        "j 1b",                 // "b" means jump backward
-        "2:",
+        "j 3b",                 // "b" means jump backward
+        "4:",
 
         // Set trap vector for HART0
         "la t0, _trap_vector",
@@ -67,6 +83,9 @@ extern "C" fn _start() -> ! {
         hart0_stack_top = sym __hart0_stack_top,
         hart1_stack_start = sym __hart1_stack_start,
         hart1_stack_top = sym __hart1_stack_top,
+        data_start = sym __data_start,
+        data_end = sym __data_end,
+        data_lma = sym __data_lma,
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
         canary = const STACK_CANARY,

@@ -15,14 +15,12 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
  *             | .text              |
  *             | .rodata / .srodata |
+ *             | .data / .sdata     |   LMA for .data
  * 0x2100_0000 +--------------------+
  * 0x8000_0000 +--------------------+   Represents RP2350 520KiB SRAM
- *             |                    |
- *             | .data / .sdata     |   Data segment should be zero sized - no static mut
- *             |                    |   or non-zero initialised statics.
+ *             | .data / .sdata     |   VMA for .data
  *             | .bss / .sbss       |
  *             | heap -->           |  Grows up (bounded by __heap_end)
- *             |                    |
  *             |                    |
  *             |                    |
  * 0x80080000  +--------------------+
@@ -54,18 +52,22 @@ __fb_size   = 640 * 480 * 4;   /* 640  x 480 x 4 bytes = 1.2MiB */
 __fb_addr   = 0x81800000 - __fb_size;
 
 SECTIONS {
-    .text : {
-        *(.text.init)
-        *(.text .text.*)
-    } > FLASH
+    .text : { *(.text.init) *(.text .text.*) } > FLASH
 
-    .rodata : { *(.rodata .rodata.* .srodata .srodata.*) } > FLASH
+    .rodata : {
+        *(.rodata .rodata.* .srodata .srodata.*)
+        . = ALIGN(4);               /* Padding .rodata so that .data start is aligned */
+    } > FLASH
 
     /* Note: No gp use for LLVM for RISC-V so do not PROVIDE */
     .data : {
-        *(.data .data.*)
-         *(.sdata .sdata.*)
-    } > SRAM
+        . = ALIGN(4);
+        __data_start = .;
+        *(.data .data.*) *(.sdata .sdata.*)
+        . = ALIGN(4);
+        __data_end = .;
+    } > SRAM AT > FLASH
+    __data_lma = LOADADDR(.data);
 
     .bss : { 
         . = ALIGN(4);
@@ -77,7 +79,7 @@ SECTIONS {
 
     .heap (NOLOAD) : ALIGN(4096) { /* For buddy allocator need heap to be aligned to largest alloc size */
         __heap_start = .;
-        . = . + 256K;
+        . = . + 256K;               /* For buddy allcoator must be power of two */
         __heap_end = .;
     } > SRAM
 
@@ -98,7 +100,6 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.eh_frame)} /* Discard comment strings to keep binary small */
 }
 
-ASSERT(SIZEOF(.data) == 0, "non-empty .data not yet supported - add LMA copy logic")
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
 ASSERT(__heap_end <= __hart0_stack_start, "heap overflows dedicated stacks")
