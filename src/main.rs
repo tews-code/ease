@@ -52,36 +52,6 @@ static FB_HANDOFF: IrqSpinLock<Option<FrameBuffer>> = IrqSpinLock::new(None);
 static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
-// Thread Test Function
-// =============================================================================
-
-#[cfg(all(feature = "test-sched", not(test)))]
-mod test_sched {
-    use crate::kernel::sched;
-    use crate::print;
-    pub fn thread1() -> ! {
-        loop {
-            print!("B");
-            sched::sleep(500);
-            sched::yield_now();
-        }
-    }
-    pub fn thread2() -> ! {
-        loop {
-            print!("C");
-            sched::sleep(300);
-            sched::yield_now();
-        }
-    }
-    pub fn thread3() -> ! {
-        loop {
-            print!("X");
-            sched::sleep(300);
-        }
-    }
-}
-
-// =============================================================================
 // Entry Points
 // =============================================================================
 
@@ -126,25 +96,6 @@ fn kernel_init() {
     {
         drivers::virtio::virtio_blk_init();
         fs::volume::fat16_init();
-    }
-
-    #[cfg(all(feature = "test-sched", not(test)))]
-    {
-        sched::spawn(
-            test_sched::thread1,
-            sched::PRIORITY_DEFAULT,
-            sched::StackClass::KB4,
-        );
-        sched::spawn(
-            test_sched::thread2,
-            sched::PRIORITY_DEFAULT,
-            sched::StackClass::KB4,
-        );
-        sched::spawn(
-            test_sched::thread3,
-            sched::PRIORITY_DEFAULT,
-            sched::StackClass::KB4,
-        );
     }
 
     let fb = drivers::ramfb::FrameBuffer::init();
@@ -192,16 +143,6 @@ extern "C" fn main() -> ! {
         println!("failed to lanuch shell");
     };
 
-    #[cfg(feature = "test-sched")]
-    {
-        loop {
-            print!("A");
-            sched::sleep(700);
-            sched::yield_now();
-        }
-    }
-    // Start the shell
-    #[allow(unreachable_code)]
     // Main drops into idle_thread
     sched::idle_thread();
 }

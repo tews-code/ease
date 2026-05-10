@@ -14,44 +14,48 @@ use crate::kernel::timer::elapsed_ms;
 
 const THREADS_MAX: usize = 32;
 // Helper function to determine the HART boot threads in the threads array
+// To match hardware - HART0 using SRAM4 and HART1 using SRAM5
+// Note: all other threads have their stack in the heap
 const fn slot_for_boot(hartid: usize) -> usize {
     THREADS_MAX - HARTS_MAX + hartid
 }
+// Priority is 0 (highest, does not stride/age) to 255 (idle)
 pub const PRIORITY_DEFAULT: u8 = u8::MAX / 2;
-pub const PRIORITY_MIN: u8 = u8::MAX - 1; // Highest priority is 0
+pub const PRIORITY_MIN: u8 = u8::MAX - 1;
 
-const SLICE_MS: u64 = 10; // Under contention use this time slice per thread
+// Under contention use this time slice per thread
+const SLICE_MS: u64 = 16;
 
 static SCHEDULER: Scheduler = Scheduler::new();
 
-const _: () = assert!(
-    core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
-    "trap frame size must be a multiple of its alignment so it lands aligned at top of stack"
-);
-
 // Stack sizes must be power-of-two and aligned to their own size
+// This means that the stack base address is `size` aligned and can be found using a bitmask
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct StackClass(u8);
 
 #[allow(dead_code)]
 impl StackClass {
     pub const KB1: Self = Self(10);
-    const _MIN_CLASS_SIZE_CHECK: () =
-        assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
     pub const KB2: Self = Self(11);
     pub const KB4: Self = Self(12);
     pub const KB8: Self = Self(13);
     pub const KB16: Self = Self(14);
 
+    const _MIN_CLASS_SIZE_CHECK: () =
+        assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
+
     const fn size(self) -> usize {
         1usize << self.0
     }
+
     const fn mask(self) -> usize {
         self.size() - 1
     }
+
     const fn align(self) -> usize {
         self.size()
     }
+
     const fn layout(self) -> Layout {
         match Layout::from_size_align(self.size(), self.align()) {
             Ok(layout) => layout,
@@ -120,7 +124,7 @@ impl ThreadStack {
 #[derive(PartialEq)]
 enum PostSwitch {
     Ready,
-    Sleeping(u64),
+    Sleeping(u64), // Milliseconds of sleep time
 }
 
 #[derive(PartialEq)]
@@ -132,12 +136,16 @@ enum State {
     Sleeping(u64), // Milliseconds of sleep time
 }
 
+enum Stack {
+    Heap(StackClass), // Needs deallc on thread exit
+    Fixed,            // Set by hardware
+}
+
 struct ThreadControlBlock {
     id: u32,
     state: State,
     sp: *mut u8,
-    stack_class: Option<StackClass>,
-    stack_owned: bool,        // If true then stack is on the heap
+    stack: Option<Stack>,
     priority: u8,             // Lower number is higher priority
     pass: u64,                // The next ready thread with lowest pass wins
     last_started_cycles: u64, // Cycle stamp from last switch
@@ -149,8 +157,7 @@ impl ThreadControlBlock {
             id: 0,
             state: State::Avail,
             sp: core::ptr::null_mut(),
-            stack_class: None,
-            stack_owned: false,
+            stack: None,
             priority: PRIORITY_DEFAULT,
             pass: 0,
             last_started_cycles: 0,
@@ -167,18 +174,16 @@ impl ThreadControlBlock {
     // Deallocate the stack if heap-based
     #[expect(dead_code)]
     fn release_stack(&mut self) {
-        if self.stack_owned {
-            if let Some(class) = self.stack_class {
-                // Safety: base_ptr is derived from sp which was created using thread initialisation
-                unsafe { ThreadStack::deallocate(class, self.sp) };
-
-                self.sp = core::ptr::null_mut();
-                self.stack_owned = false;
-                self.stack_class = None;
+        let stack = self
+            .stack
+            .take()
+            .expect("should not be calling release_stack on uninitialised TCB");
+        if let Stack::Heap(class) = stack {
+            unsafe {
+                ThreadStack::deallocate(class, self.sp);
             }
-        } else {
-            panic!("cannot release stack with class not configured");
         }
+        self.sp = core::ptr::null_mut();
     }
 }
 
@@ -202,34 +207,6 @@ impl ThreadsInner {
         &mut self.hart_state[cpu_id()]
     }
 
-    // Wakes any threads past their deadlines
-    //
-    // Returns a tuple of next upcoming deadline if any sleepers, else None;
-    // and the number of runnable threads
-    fn wake_threads(&mut self) -> (Option<u64>, usize) {
-        let now = crate::kernel::timer::elapsed_ms();
-        let mut earliest_deadline: Option<u64> = None;
-        let mut ready: usize = 0;
-        // Iterate through thread control blocks
-        for tcb in &mut self.control_blocks {
-            let deadline = match tcb.state {
-                State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) => d,
-                State::Ready => {
-                    ready += 1;
-                    continue;
-                }
-                _ => continue,
-            };
-            if deadline <= now {
-                tcb.state = State::Ready;
-                ready += 1;
-            } else {
-                earliest_deadline = Some(earliest_deadline.map_or(deadline, |d| d.min(deadline)));
-            }
-        }
-        (earliest_deadline, ready)
-    }
-
     // Find a free thread slot
     fn free_slot(&mut self) -> Option<&mut ThreadControlBlock> {
         self.control_blocks
@@ -245,6 +222,39 @@ impl ThreadsInner {
             .map(|tcb| tcb.pass)
             .min()
             .unwrap_or(0)
+    }
+
+    // Wakes any threads past their deadlines
+    //
+    // Returns a count of the ready threads
+    fn wake_sleeping_threads(&mut self) -> usize {
+        let now = crate::kernel::timer::elapsed_ms();
+        let mut ready_count: usize = 0;
+        for tcb in &mut self.control_blocks {
+            match tcb.state {
+                State::Sleeping(deadline) if deadline <= now => {
+                    // Wake up
+                    tcb.state = State::Ready;
+                    ready_count += 1;
+                }
+                State::Ready => ready_count += 1,
+                _ => {} // Ignore switching, even if passed deadline
+            }
+        }
+        ready_count
+    }
+
+    // Gets the earliest wake up deadline (including threads busy switching)
+    // Returns None if no threads are sleeping
+    fn earliest_deadline(&self) -> Option<u64> {
+        self.control_blocks
+            .iter()
+            .filter_map(|tcb| match tcb.state {
+                State::Sleeping(d) => Some(d),
+                State::Switching(PostSwitch::Sleeping(d)) => Some(d),
+                _ => None,
+            })
+            .min()
     }
 
     // Get disjoint mutable TCBs for current and next
@@ -277,9 +287,6 @@ impl ThreadsInner {
             .expect("indices have been selected as disjoint");
         Some((curr, curr_idx, next, next_idx))
     }
-
-    // - 2+ runnable threads → next event = min(now + SLICE_QUANTUM, earliest_sleeper).
-    // - Otherwise → next event = earliest_sleeper (or u64::MAX).
 
     /// Set the timer to the earliest deadline or next slice
     fn set_next_timer(&mut self, sched: (Option<u64>, usize)) {
@@ -338,12 +345,31 @@ impl Scheduler {
             id,
             state: State::Running,
             priority: PRIORITY_MIN,
-            stack_class: Some(StackClass::KB4),
+            stack: Some(Stack::Fixed),
             last_started_cycles: crate::arch::csr::rdcycles(),
             ..ThreadControlBlock::new()
         };
         threads.set_next_timer((None, 2));
         threads.this_hart_mut().running_thread = slot_for_boot(hartid)
+    }
+
+    /// Helper function to clean up post switch threads
+    fn post_switch_cleanup(&self) {
+        // After switch_to returns (on this thread's eventual resume),
+        let mut threads = self.threads.lock();
+        let switched_idx = threads
+            .this_hart_mut()
+            .switching_thread
+            .take()
+            .expect("should have a Switching thread to set back to Ready");
+        let new_state = {
+            match threads.control_blocks[switched_idx].state {
+                State::Switching(PostSwitch::Ready) => State::Ready,
+                State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
+                _ => panic!("Post switch but not in Switched state"),
+            }
+        };
+        threads.control_blocks[switched_idx].state = new_state;
     }
 
     // Set up initial thread block and stack for a new thread
@@ -369,8 +395,7 @@ impl Scheduler {
             sp,
             state: State::Ready,
             priority,
-            stack_class: Some(class),
-            stack_owned: true,
+            stack: Some(Stack::Heap(class)),
             pass: baseline,
             ..ThreadControlBlock::new()
         };
@@ -389,13 +414,14 @@ impl Scheduler {
             // across the switch and block other harts/threads from rescheduling.
             let mut threads = self.threads.lock();
             // Check if any threads have reached or passed their deadline
-            let sched = threads.wake_threads();
+            // let sched = threads.wake_threads();
+            let ready_count = threads.wake_sleeping_threads();
+            let earliest_deadline = threads.earliest_deadline();
             // Get current and next TCBs
             let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
                 // Current and next are the same, return
-                threads.set_next_timer(sched);
+                threads.set_next_timer((earliest_deadline, ready_count));
                 drop(threads);
-                // crate::arch::restore_interrupts(prev);
                 return;
             };
 
@@ -418,7 +444,9 @@ impl Scheduler {
                 running_thread: next_idx,
                 switching_thread: Some(curr_idx),
             };
-            threads.set_next_timer(sched);
+            let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
+            // let sched = threads.wake_threads();
+            threads.set_next_timer((earliest_deadline, ready_count));
             drop(threads);
 
             unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
@@ -432,10 +460,12 @@ impl Scheduler {
     /// Note: if only one thread is runnable returns early.
     fn preempt(&self) {
         let mut threads = self.threads.lock();
-        let sched = threads.wake_threads();
+        // let sched = threads.wake_threads();
+        let ready_count = threads.wake_sleeping_threads();
+        let earliest_deadline = threads.earliest_deadline();
         let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
             // Same thread is running uncontended, increase slice deadline
-            threads.set_next_timer(sched);
+            threads.set_next_timer((earliest_deadline, ready_count));
             return;
         };
         // Ready to switch
@@ -456,7 +486,8 @@ impl Scheduler {
             running_thread: next_idx,
             switching_thread: Some(curr_idx),
         };
-        threads.set_next_timer(sched);
+        let earliest_deadline = threads.earliest_deadline();
+        threads.set_next_timer((earliest_deadline, ready_count));
         drop(threads);
 
         unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
@@ -478,6 +509,7 @@ impl Scheduler {
     }
 
     /// Blocks for `deadline` milliseconds
+    #[allow(dead_code)]
     fn sleep(&self, deadline_ms: u64) {
         self.sleep_until(crate::kernel::timer::elapsed_ms() + deadline_ms);
     }
@@ -485,25 +517,6 @@ impl Scheduler {
     /// Get currently running thread total cpu cycles
     pub fn get_current_cycles(&self, tcb_idx: usize) -> u64 {
         self.run_cycles[tcb_idx].get()
-    }
-
-    /// Helper function to clean up post switch threads
-    fn post_switch_cleanup(&self) {
-        // After switch_to returns (on this thread's eventual resume),
-        let mut threads = self.threads.lock();
-        let switched_idx = threads
-            .this_hart_mut()
-            .switching_thread
-            .take()
-            .expect("should have a Switching thread to set back to Ready");
-        let new_state = {
-            match threads.control_blocks[switched_idx].state {
-                State::Switching(PostSwitch::Ready) => State::Ready,
-                State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
-                _ => panic!("Post switch but not in Switched state"),
-            }
-        };
-        threads.control_blocks[switched_idx].state = new_state;
     }
 }
 
@@ -543,6 +556,7 @@ pub fn sleep_until(deadline_ms: u64) {
 }
 
 /// Blocks for `deadline` millseconds
+#[allow(dead_code)]
 pub fn sleep(deadline_ms: u64) {
     SCHEDULER.sleep(deadline_ms);
 }
@@ -632,7 +646,8 @@ mod tests {
 
     /// Smoke test 2: sched::sleep blocks for approximately the requested
     /// duration. Catches "sleep doesn't actually block" and "sleep returns
-    /// late."
+    /// late." Bound is tight (~one slice quantum of slack) since the
+    /// scheduler is now tickless with sub-quantum sleep precision.
     #[test_case]
     fn sleep_blocks_for_duration() {
         ensure_partner_spawned();
@@ -640,13 +655,35 @@ mod tests {
         crate::kernel::sched::sleep(100);
         let elapsed = crate::kernel::timer::elapsed_ms() - start;
         assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
-        assert!(elapsed <= 200, "sleep too long: {} ms", elapsed);
+        assert!(elapsed <= 115, "sleep too long: {} ms", elapsed);
+    }
+
+    /// Step 3 verification: a sub-slice-quantum sleep wakes at its actual
+    /// deadline, not the next slice boundary. Catches a regression where
+    /// reschedule fails to recompute the earliest sleeper deadline after
+    /// registering the current thread's new sleep state — without that
+    /// recompute, sleep(5) would round up to a slice boundary (~10ms+).
+    /// The upper bound has slack for UART drain noise from the test runner's
+    /// per-test name print (~6ms at 115200 baud) plus general overhead.
+    #[test_case]
+    fn sleep_below_quantum_wakes_at_deadline() {
+        ensure_partner_spawned();
+        let start = crate::kernel::timer::elapsed_ms();
+        crate::kernel::sched::sleep(5);
+        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
+        assert!(
+            elapsed <= 15,
+            "sub-quantum sleep rounded to slice boundary: {} ms",
+            elapsed
+        );
     }
 
     /// Smoke test 3: sleep_until with a past deadline returns immediately.
     /// Catches the wake-check edge case — deadline <= now should fire on the
     /// first reschedule iteration, never reach the wfi loop.
-    /// Tolerance is one tick (10 ms) since `ticks_ms()` has tick-granularity.
+    /// Tolerance is one slice quantum (~8 ms) — `elapsed_ms` is ms-granular
+    /// and the wake check happens during the next reschedule.
     #[test_case]
     fn sleep_until_past_returns_quickly() {
         ensure_partner_spawned();

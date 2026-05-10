@@ -47,6 +47,10 @@ const _: () = assert!(core::mem::offset_of!(TrapFrame, ra) == 0);
 // mepc and mstatus are always last
 const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 2) * 4);
 const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 1) * 4);
+const _: () = assert!(
+    core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
+    "trap frame size must be a multiple of its alignment so it lands aligned at top of a stack"
+);
 
 global_asm!(
     r#"
