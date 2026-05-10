@@ -19,7 +19,7 @@ pub fn cpu_id() -> usize {
 
 /// Enables machine-wide interrupts
 ///
-pub fn enable_interrupts() {
+pub(crate) fn enable_interrupts() {
     unsafe {
         // Write mstatus to set MIE
         core::arch::asm!("csrw mstatus, {}", in(reg) csr::mstatus::MIE);
@@ -29,7 +29,7 @@ pub fn enable_interrupts() {
 /// Disables interrupts
 ///
 /// - Returns prior machine status
-pub fn disable_interrupts() -> usize {
+pub(crate) fn disable_interrupts() -> usize {
     let mstatus: usize;
     unsafe {
         // Use csrrc to atomically read mstatus and clear MIE (bit 3)

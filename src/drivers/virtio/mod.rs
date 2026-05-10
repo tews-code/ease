@@ -11,8 +11,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::mmio;
 use crate::board::virtio_blk;
 use crate::hal::BLOCK_SIZE;
-use crate::kernel::sync::{IrqSpinLock, SpinLock};
-use crate::kernel::timer::ticks_ms;
+use crate::kernel::sync::{IrqSpinLock, SpinLock, with_interrupts_disabled};
+use crate::kernel::timer::elapsed_ms;
 
 mod queue;
 
@@ -262,18 +262,7 @@ pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_read(block))?;
 
-    let start = ticks_ms();
-    while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
-        if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
-            // Reset device and clean up queue
-            with_blk_dev(|blk| {
-                blk.vq = VirtioBlkDev::reset();
-            });
-            VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
-            return Err(BlkError::Timeout);
-        }
-        crate::hal::wait_for_interrupt();
-    }
+    wait_for_completion()?;
 
     with_blk_dev(|blk| blk.finish_read(buf))?;
     Ok(())
@@ -283,21 +272,43 @@ pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_write(block, buf))?;
 
-    let start = ticks_ms();
-    while !VIRTIO_COMPLETE.load(Ordering::Acquire) {
-        if ticks_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
-            // Reset device and clean up queue
-            with_blk_dev(|blk| {
-                blk.vq = VirtioBlkDev::reset();
-            });
-            VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
-            return Err(BlkError::Timeout);
-        }
-        crate::hal::wait_for_interrupt();
-    }
+    wait_for_completion()?;
 
     with_blk_dev(|blk| blk.finish_write())?;
     Ok(())
+}
+
+enum CompletionResult {
+    Done,
+    Timeout,
+    Continue,
+}
+
+// Check for completion of a VirtIO block
+fn wait_for_completion() -> Result<(), BlkError> {
+    let start = elapsed_ms();
+    loop {
+        let result = with_interrupts_disabled(|_cs| {
+            if VIRTIO_COMPLETE.load(Ordering::Acquire) {
+                return CompletionResult::Done;
+            }
+            if elapsed_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
+                // Reset device and clean up queue
+                with_blk_dev(|blk| {
+                    blk.vq = VirtioBlkDev::reset();
+                });
+                VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
+                return CompletionResult::Timeout;
+            }
+            crate::hal::wait_for_interrupt();
+            CompletionResult::Continue
+        });
+        match result {
+            CompletionResult::Done => return Ok(()),
+            CompletionResult::Timeout => return Err(BlkError::Timeout),
+            CompletionResult::Continue => {}
+        }
+    }
 }
 
 static BLK_DEV: IrqSpinLock<Option<VirtioBlkDev>> = IrqSpinLock::new(None);

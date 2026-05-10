@@ -9,9 +9,7 @@ extern "C" fn trap_handler() {
     match mcause::read() {
         Trap::Interrupt(code) => match code {
             TIMER => {
-                crate::kernel::timer::handle_interrupt();
-                // Safety: sp is a valid stack pointer
-                unsafe { crate::kernel::sched::preempt() };
+                crate::kernel::sched::preempt();
             }
             EXTERNAL => {
                 let irq = crate::drivers::plic::claim();

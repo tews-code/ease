@@ -1,57 +1,28 @@
-//! Timer support for QEMU virt platform
+//! Timer support
 
 use crate::arch::csr;
 use crate::board::clint::TIMER_FREQ_HZ;
 use crate::drivers::clint::{Clint, with_clint};
 
-/// Timer interval (QEMU runs at 10MHz, so 10_000 = 1ms)
-const TIMER_INTERVAL: u64 = crate::board::clint::TIMER_FREQ_HZ / 100; // 10ms
+/// Conversion factor (QEMU runs at 10MHz, so 10_000 = 1ms)
+const TICKS_PER_MS: u64 = TIMER_FREQ_HZ / 1000;
 
 /// Initialise the timer for a HART
 pub fn init() {
-    with_clint(|c| c.set_mtimecmp(Clint::mtime() + TIMER_INTERVAL));
+    with_clint(|c| c.set_mtimecmp(u64::MAX));
     csr::mie::enable_bits(csr::mie::MTIE);
 }
 
-/// Handle interrupt called by trap vector
-pub fn handle_interrupt() {
-    // if !stack_guard::check() {
-    //     panic!("Stack has grown into heap");
-    // }
-
+/// Set the next timer interrupt deadline
+pub fn set_next_deadline_ms(deadline_ms: u64) {
     with_clint(|c| {
-        let next = c.get_mtimecmp() + TIMER_INTERVAL;
-        c.set_mtimecmp(next);
+        c.set_mtimecmp(deadline_ms.saturating_mul(TICKS_PER_MS));
     })
 }
 
-/// Get current tick count (TIMER_INTERVAL is 10ms)
-pub fn ticks_ms() -> u64 {
-    Clint::mtime() / (TIMER_FREQ_HZ / 1000)
-}
-
-/// Sleep for given ms
-#[allow(dead_code)]
-pub fn sleep_ms(ms: u64) {
-    let start = ticks_ms();
-    debug_assert!(
-        crate::arch::interrupts_enabled(),
-        "sleep_ms called with interrupts disabled"
-    );
-    while ticks_ms().wrapping_sub(start) < ms {
-        unsafe {
-            core::arch::asm!("wfi");
-        }
-    }
-}
-
-/// Busy wait for given ms
-#[allow(dead_code)]
-pub fn busy_wait_ms(ms: usize) {
-    let count_start = Clint::mtime();
-    while Clint::mtime() - count_start < ms as u64 * TIMER_INTERVAL {
-        core::hint::spin_loop();
-    }
+/// Get elapsed time since boot
+pub fn elapsed_ms() -> u64 {
+    Clint::mtime() / TICKS_PER_MS
 }
 
 #[cfg(all(test, feature = "test-timer"))]
@@ -59,38 +30,9 @@ mod tests {
     use super::*;
 
     #[test_case]
-    fn test_ticks_incrementing() {
-        let t1 = ticks_ms();
-        for _ in 0..10000 {
-            core::hint::spin_loop();
-        }
-        let t2 = ticks_ms();
-        assert!(t2 >= t1, "ticks should not go backwards");
-    }
-
-    #[test_case]
-    fn test_sleep_ms() {
-        let start = ticks_ms();
-        sleep_ms(100);
-        let elapsed = ticks_ms() - start;
-        assert!(elapsed >= 90, "sleep too short: {}ms", elapsed);
-        assert!(elapsed <= 150, "sleep too long: {}ms", elapsed);
-    }
-
-    #[test_case]
-    fn test_sleep_zero() {
-        let start = ticks_ms();
-        sleep_ms(0);
-        let elapsed = ticks_ms() - start;
-        assert!(elapsed <= 5, "sleep(0) took too long: {}ms", elapsed);
-    }
-
-    #[test_case]
-    fn test_busy_wait_ms() {
-        let start = Clint::mtime();
-        busy_wait_ms(100);
-        let elapsed = (Clint::mtime() - start) / TIMER_INTERVAL;
-        assert!(elapsed >= 90, "busy_wait too short: {}ms", elapsed);
-        assert!(elapsed <= 150, "busy_wait too long: {}ms", elapsed);
+    fn timer_smoke_test() {
+        let then = elapsed_ms();
+        let now = elapsed_ms();
+        assert!(now >= then);
     }
 }

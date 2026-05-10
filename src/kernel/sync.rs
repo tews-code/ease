@@ -51,7 +51,6 @@ impl<'cs> CriticalSection<'cs> {
 /// Runs the closure with interrupts disabled, providing a `CriticalSection` token
 /// as proof. Interrupts are restored to their previous state when the closure returns.
 #[cfg(target_os = "none")]
-#[allow(dead_code)]
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce(CriticalSection<'_>) -> R,

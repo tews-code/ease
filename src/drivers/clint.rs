@@ -14,6 +14,7 @@ impl SiFiveClint {
     const MTIMECMP: usize = 0x4000;
 
     /// Get the timer comparison 'mtimecmp'
+    #[expect(dead_code)]
     pub fn get_mtimecmp(&self) -> u64 {
         let cpu_id = cpu_id();
         loop {

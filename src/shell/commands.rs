@@ -56,7 +56,7 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  help    - Show this help");
     let _ = writeln!(console, "  hexdump - Raw file output");
     let _ = writeln!(console, "  ls      - List files in directory");
-    let _ = writeln!(console, "  time    - Show system ticks");
+    let _ = writeln!(console, "  time    - Show system time since boot [ms]");
     let _ = writeln!(console, "  touch   - Create empty file");
     let _ = writeln!(console, "  rm      - Delete file");
     let _ = writeln!(console, "  write   - Write text to file");
@@ -163,10 +163,10 @@ pub fn ls(console: &mut Console, args: &Args) {
     });
 }
 
-/// Prints the current system tick count in milliseconds.
+/// Prints the elapsed time since boot in milliseconds.
 #[allow(dead_code)]
 pub fn time(console: &mut Console) {
-    let _ = writeln!(console, "{} [ms]", timer::ticks_ms());
+    let _ = writeln!(console, "{} [ms]", timer::elapsed_ms());
 }
 
 /// Panics the system.

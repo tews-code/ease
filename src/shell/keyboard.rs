@@ -34,7 +34,7 @@ impl Keyboard {
             ParseResult::InvalidSequence => None,
             ParseResult::Pending => {
                 // Wait for ESC_TIMEOUT_MS for rest of escape key sequence
-                let start = timer::ticks_ms();
+                let start = timer::elapsed_ms();
                 loop {
                     if let Some(next) = read_byte() {
                         match self.parser.parse(next) {
@@ -44,11 +44,12 @@ impl Keyboard {
                             ParseResult::Pending => continue, // still in sequence get next
                         }
                     }
-                    if timer::ticks_ms().wrapping_sub(start) >= ESC_TIMEOUT_MS {
+                    if timer::elapsed_ms().wrapping_sub(start) >= ESC_TIMEOUT_MS {
                         // Allow 2 ms
                         break;
                     }
-                    core::hint::spin_loop();
+                    // Yield while waiting
+                    crate::kernel::sched::yield_now();
                 }
                 // Timed out - let parser decide what to emit
                 self.parser.timeout().map(KeyEvent::Special)
