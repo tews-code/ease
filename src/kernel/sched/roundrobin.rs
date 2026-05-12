@@ -938,7 +938,7 @@ mod tests {
                 crate::kernel::sched::sleep(1);
             }
             loop {
-                crate::kernel::sched::yield_now();
+                crate::kernel::sched::sleep_until(u64::MAX);
             }
         }
 
@@ -979,6 +979,83 @@ mod tests {
             "spammer dominated (wake-spam regression?): spammer={}, hog={}",
             s_delta,
             h_delta
+        );
+    }
+
+    /// T4: a Qos::High sleeper wakes near its deadline even when a
+    /// Qos::Low neighbor has a much wider leeway window. Verifies that
+    /// the QoS-derived leeway formula in `Deadline::leeway` differentiates
+    /// the two classes, and that `earliest_deadline` picks the tight
+    /// upper bound so the wider Low neighbor doesn't drag the timer.
+    ///
+    /// Setup: Low sleeper does sleep(200), getting ~25 ms QoS-derived
+    /// leeway (window [200, 225] ms). High measurer does sleep(20),
+    /// getting near-zero leeway (window [20, ~20] ms). The Low sleeper's
+    /// window starts past the measurer's deadline, so coalescing leaves
+    /// the measurer alone.
+    #[test_case]
+    fn qos_high_wakes_precisely_with_low_neighbor() {
+        static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
+        static MEASURER_ELAPSED: AtomicUsize = AtomicUsize::new(0);
+        static MEASURER_DONE: AtomicUsize = AtomicUsize::new(0);
+
+        fn t4_low_neighbor() -> ! {
+            // Qos::Low + long sleep gives a wide leeway window.
+            crate::kernel::sched::sleep(200);
+            // Park in deep sleep — yield-loop would create a permanent
+            // low-pass thread that disturbs scheduling in later tests.
+            loop {
+                crate::kernel::sched::sleep_until(u64::MAX);
+            }
+        }
+
+        fn t4_high_measurer() -> ! {
+            let start = crate::kernel::timer::elapsed_ms();
+            crate::kernel::sched::sleep(20);
+            let elapsed = crate::kernel::timer::elapsed_ms() - start;
+            MEASURER_ELAPSED.store(elapsed as usize, Ordering::Relaxed);
+            MEASURER_DONE.store(1, Ordering::Relaxed);
+            loop {
+                crate::kernel::sched::sleep_until(u64::MAX);
+            }
+        }
+
+        ensure_partner_spawned();
+        if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+            crate::kernel::sched::spawn(
+                t4_low_neighbor,
+                PRIORITY_DEFAULT,
+                StackClass::KB2,
+                Qos::Low,
+            );
+        }
+        // Brief settle so the Low neighbor reaches its sleep before we
+        // spawn the measurer; otherwise it's just main vs measurer.
+        crate::kernel::sched::sleep(2);
+
+        crate::kernel::sched::spawn(
+            t4_high_measurer,
+            PRIORITY_DEFAULT,
+            StackClass::KB2,
+            Qos::High,
+        );
+
+        // Wait for the measurer to finish its 20 ms sleep and record.
+        crate::kernel::sched::sleep(60);
+        assert_eq!(
+            MEASURER_DONE.load(Ordering::Relaxed),
+            1,
+            "Qos::High measurer didn't finish in time"
+        );
+        let elapsed = MEASURER_ELAPSED.load(Ordering::Relaxed);
+        assert!(elapsed >= 20, "Qos::High sleep too short: {} ms", elapsed);
+        // Qos::High's formula yields essentially zero leeway for short
+        // sleeps. Tolerance covers scheduling jitter and the discrete
+        // `elapsed_ms` granularity, not aggressive leeway.
+        assert!(
+            elapsed <= 25,
+            "Qos::High wake delayed (likely pulled by Low neighbor): {} ms",
+            elapsed
         );
     }
 
