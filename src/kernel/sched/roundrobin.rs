@@ -201,10 +201,13 @@ impl ThreadControlBlock {
     }
 
     // Stride forward
-    fn stride(&mut self) {
-        // We add the priority value itself as the stride
+    fn stride(&mut self, ran_cycles: u64) {
+        // We add the priority value itself as the stride ratioed to the
+        // proportion of the slice used
         // Note that threads at priority 0 do not share CPU with other threads
-        self.pass += self.priority as u64;
+        self.pass = self
+            .pass
+            .saturating_add(ran_cycles.saturating_mul(self.priority as u64) / SLICE);
     }
 
     // Deallocate the stack if heap-based
@@ -333,7 +336,7 @@ impl ThreadsInner {
 
     // Get disjoint mutable TCBs for current and next
     // Returns None if current and next are the same
-    fn get_current_and_next_mut(
+    fn pick_next_ready_mut(
         &mut self,
     ) -> Option<(
         &mut ThreadControlBlock,
@@ -360,6 +363,36 @@ impl ThreadsInner {
             .get_disjoint_mut([curr_idx, next_idx])
             .expect("indices have been selected as disjoint");
         Some((curr, curr_idx, next, next_idx))
+    }
+
+    // Get disjoint mutable TCBs for current and next
+    fn pick_next_if_fairer_mut(
+        &mut self,
+    ) -> Option<(
+        &mut ThreadControlBlock,
+        usize,
+        &mut ThreadControlBlock,
+        usize,
+    )> {
+        // Find current index
+        let curr_idx = self.this_hart().running_thread;
+        // Find index of thread next to run (including current thread)
+        let next_idx = self
+            .control_blocks
+            .iter()
+            .enumerate()
+            .filter(|(idx, tcb)| tcb.state == State::Ready || *idx == curr_idx)
+            .min_by_key(|(_, tcb)| tcb.pass)
+            .map(|(idx, _)| idx)?;
+        if curr_idx == next_idx {
+            None
+        } else {
+            let [curr, next] = self
+                .control_blocks
+                .get_disjoint_mut([curr_idx, next_idx])
+                .expect("indices have been selected as disjoint");
+            Some((curr, curr_idx, next, next_idx))
+        }
     }
 }
 
@@ -477,7 +510,7 @@ impl Scheduler {
             let ready_count = threads.wake_sleeping_threads();
             let earliest_deadline = threads.earliest_deadline();
             // Get current and next TCBs
-            let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
+            let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_ready_mut() else {
                 // Current and next are the same, return
                 threads.set_next_timer(earliest_deadline, ready_count);
                 drop(threads);
@@ -488,12 +521,13 @@ impl Scheduler {
             // Set current thread to the new state
             curr.state = State::Switching(new_state);
             // Safety: Only writing to current within locked threads array - single writer
-            let curr_cycles = crate::arch::csr::rdcycles();
-            unsafe { self.run_cycles[curr_idx].add(curr_cycles - curr.last_started_cycles) };
-            curr.stride();
+            let now_cycles = crate::arch::csr::rdcycles();
+            let ran = now_cycles - curr.last_started_cycles;
+            unsafe { self.run_cycles[curr_idx].add(ran) };
+            curr.stride(ran);
 
             next.state = State::Running;
-            next.last_started_cycles = curr_cycles;
+            next.last_started_cycles = now_cycles;
 
             // Create local variables before dropping the lock
             let prev_sp_ptr = &raw mut curr.sp;
@@ -521,20 +555,31 @@ impl Scheduler {
         // let sched = threads.wake_threads();
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
-        let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
+
+        // Apply current's stride upfront so pass comparisons in
+        // pick_next_if_fairer_mut see a fresh value —
+        // otherwise a long-running
+        // thread keeps appearing to have its old (low) pass and
+        // never loses a comparison.
+        let now_cycles = crate::arch::csr::rdcycles();
+        let curr_idx = threads.this_hart().running_thread;
+        {
+            let curr = &mut threads.control_blocks[curr_idx];
+            let ran = now_cycles - curr.last_started_cycles;
+            curr.last_started_cycles = now_cycles;
+            unsafe { self.run_cycles[curr_idx].add(ran) };
+            curr.stride(ran);
+        }
+
+        let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_if_fairer_mut() else {
             // Same thread is running uncontended, increase slice deadline
             threads.set_next_timer(earliest_deadline, ready_count);
             return;
         };
-        // Ready to switch
-        // Update book-keeping
-        let curr_cycles = crate::arch::csr::rdcycles();
-        unsafe { self.run_cycles[curr_idx].add(curr_cycles - curr.last_started_cycles) };
         // Perform switch
         curr.state = State::Switching(PostSwitch::Ready);
-        curr.stride();
         next.state = State::Running;
-        next.last_started_cycles = curr_cycles;
+        next.last_started_cycles = now_cycles;
 
         // Create local variables before dropping the lock
         let prev_sp_ptr = &raw mut curr.sp;
@@ -853,6 +898,87 @@ mod tests {
             elapsed <= 50,
             "tight sleeper delayed by huge-leeway neighbor: {} ms",
             elapsed
+        );
+    }
+
+    /// T3: a sleep-spammer (busy + short sleep loop) must not get
+    /// disproportionately more CPU than a pure CPU-bound thread of equal
+    /// priority. Pre-fix (per-turn stride + unconditional switch-on-wake
+    /// in `preempt`), the spammer triggered a switch on every wake and
+    /// took ~67% of CPU at 2:1 over the hog. With time-weighted stride +
+    /// pass-aware preempt + upfront stride application, the spammer's
+    /// pass advances proportional to actual CPU consumed, so the attack
+    /// no longer pays off.
+    ///
+    /// Iter counters are loop-iteration counts. Both threads run the same
+    /// per-iter work (one atomic fetch_add), so the iter ratio equals the
+    /// CPU-time ratio.
+    ///
+    /// What this test does NOT guard: the dual problem of the spammer
+    /// being under-served because slice granularity is too coarse to let
+    /// sub-slice runs catch up to a long-running hog. Empirically the
+    /// post-fix ratio is ~20:1 hog:spammer, which would require sub-slice
+    /// preemption to improve. That's a separate fairness-precision
+    /// concern, not the wake-spam attack this test exists to guard.
+    #[test_case]
+    fn fair_stride_resists_wake_spammer() {
+        static T3_SPAMMER_ITERS: AtomicUsize = AtomicUsize::new(0);
+        static T3_HOG_ITERS: AtomicUsize = AtomicUsize::new(0);
+        static T3_SPAWNED: AtomicUsize = AtomicUsize::new(0);
+        // Active while the test is measuring. Cleared at the end so the
+        // contenders park (yield-loop) instead of hogging CPU during
+        // subsequent tests.
+        static T3_ACTIVE: AtomicUsize = AtomicUsize::new(1);
+
+        fn t3_spammer() -> ! {
+            while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
+                for _ in 0..10_000 {
+                    T3_SPAMMER_ITERS.fetch_add(1, Ordering::Relaxed);
+                }
+                crate::kernel::sched::sleep(1);
+            }
+            loop {
+                crate::kernel::sched::yield_now();
+            }
+        }
+
+        fn t3_hog() -> ! {
+            while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
+                for _ in 0..10_000 {
+                    T3_HOG_ITERS.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            loop {
+                crate::kernel::sched::yield_now();
+            }
+        }
+
+        if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+            crate::kernel::sched::spawn(t3_spammer, PRIORITY_DEFAULT, StackClass::KB2, Qos::Low);
+            crate::kernel::sched::spawn(t3_hog, PRIORITY_DEFAULT, StackClass::KB2, Qos::Low);
+        }
+        // Warmup so the contenders stabilise before we sample.
+        crate::kernel::sched::sleep(50);
+        let s_start = T3_SPAMMER_ITERS.load(Ordering::Relaxed);
+        let h_start = T3_HOG_ITERS.load(Ordering::Relaxed);
+        crate::kernel::sched::sleep(500);
+        let s_delta = T3_SPAMMER_ITERS.load(Ordering::Relaxed) - s_start;
+        let h_delta = T3_HOG_ITERS.load(Ordering::Relaxed) - h_start;
+
+        // Park the contenders before asserting, so a panic on assertion
+        // failure still leaves the test threads parked.
+        T3_ACTIVE.store(0, Ordering::Relaxed);
+
+        assert!(s_delta > 0, "spammer made no progress");
+        assert!(h_delta > 0, "hog made no progress");
+
+        // Original wake-spam bug produced ~2:1 spammer:hog. The 3:2 bound
+        // catches it with margin while tolerating per-run scheduler jitter.
+        assert!(
+            s_delta * 2 <= h_delta * 3,
+            "spammer dominated (wake-spam regression?): spammer={}, hog={}",
+            s_delta,
+            h_delta
         );
     }
 
