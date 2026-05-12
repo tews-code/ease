@@ -10,7 +10,7 @@ use crate::arch::{STACK_CANARY, cpu_id};
 use crate::board::HARTS_MAX;
 use crate::kernel::collection::StackVec;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
-use crate::kernel::timer::elapsed_ms;
+use crate::kernel::timer::{TICKS_PER_MS, TICKS_PER_US};
 
 const THREADS_MAX: usize = 32;
 // Helper function to determine the HART boot threads in the threads array
@@ -24,7 +24,11 @@ pub const PRIORITY_DEFAULT: u8 = u8::MAX / 2;
 pub const PRIORITY_MIN: u8 = u8::MAX - 1;
 
 // Under contention use this time slice per thread
-const SLICE_MS: u64 = 16;
+const SLICE_US: u64 = 16_000;
+const SLICE: u64 = SLICE_US * TICKS_PER_US;
+// Default slack period
+const LEEWAY_BASE_US: u64 = 100;
+const LEEWAY_BASE: u64 = LEEWAY_BASE_US * TICKS_PER_US;
 
 static SCHEDULER: Scheduler = Scheduler::new();
 
@@ -121,10 +125,32 @@ impl ThreadStack {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct Deadline {
+    min: u64,
+    fixed_leeway: Option<u64>, // None - use system default leeway
+}
+
+impl Deadline {
+    // Helper function - returns the leeway in clint cycles
+    fn leeway(&self, qos: &Qos) -> u64 {
+        if let Some(l) = self.fixed_leeway {
+            l
+        } else {
+            let now = crate::kernel::timer::elapsed();
+            let remaining = self.min.saturating_sub(now);
+            match qos {
+                Qos::High => (remaining >> 16).min(LEEWAY_BASE),
+                Qos::Low => remaining >> 3,
+            }
+        }
+    }
+}
+
 #[derive(PartialEq)]
 enum PostSwitch {
     Ready,
-    Sleeping(u64), // Milliseconds of sleep time
+    Sleeping(Deadline),
 }
 
 #[derive(PartialEq)]
@@ -133,12 +159,17 @@ enum State {
     Ready,
     Running,
     Switching(PostSwitch),
-    Sleeping(u64), // Milliseconds of sleep time
+    Sleeping(Deadline),
 }
 
 enum Stack {
-    Heap(StackClass), // Needs deallc on thread exit
+    Heap(StackClass), // Needs dealloc on thread exit
     Fixed,            // Set by hardware
+}
+
+enum Qos {
+    High,
+    Low,
 }
 
 struct ThreadControlBlock {
@@ -146,6 +177,7 @@ struct ThreadControlBlock {
     state: State,
     sp: *mut u8,
     stack: Option<Stack>,
+    qos: Qos,
     priority: u8,             // Lower number is higher priority
     pass: u64,                // The next ready thread with lowest pass wins
     last_started_cycles: u64, // Cycle stamp from last switch
@@ -158,6 +190,7 @@ impl ThreadControlBlock {
             state: State::Avail,
             sp: core::ptr::null_mut(),
             stack: None,
+            qos: Qos::Low,
             priority: PRIORITY_DEFAULT,
             pass: 0,
             last_started_cycles: 0,
@@ -184,6 +217,18 @@ impl ThreadControlBlock {
             }
         }
         self.sp = core::ptr::null_mut();
+    }
+
+    // Calculates the latest wake up interval for a thread
+    // Returns None if thread is not sleeping
+    fn wakeup_interval(&self) -> Option<(u64, u64)> {
+        match self.state {
+            State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) => {
+                let l = d.leeway(&self.qos);
+                Some((d.min, d.min.saturating_add(l)))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -228,12 +273,15 @@ impl ThreadsInner {
     //
     // Returns a count of the ready threads
     fn wake_sleeping_threads(&mut self) -> usize {
-        let now = crate::kernel::timer::elapsed_ms();
+        let now = crate::kernel::timer::elapsed();
         let mut ready_count: usize = 0;
         for tcb in &mut self.control_blocks {
             match tcb.state {
-                State::Sleeping(deadline) if deadline <= now => {
-                    // Wake up
+                State::Sleeping(Deadline {
+                    min,
+                    fixed_leeway: _,
+                }) if min <= now => {
+                    // If we are waking threads ignore slack and wake any passed min deadline
                     tcb.state = State::Ready;
                     ready_count += 1;
                 }
@@ -244,17 +292,46 @@ impl ThreadsInner {
         ready_count
     }
 
-    // Gets the earliest wake up deadline (including threads busy switching)
+    // Gets the first wake up deadline including leeway (including threads busy switching)
     // Returns None if no threads are sleeping
-    fn earliest_deadline(&self) -> Option<u64> {
+    fn earliest_deadline(&self) -> Option<(u64, u64)> {
         self.control_blocks
             .iter()
             .filter_map(|tcb| match tcb.state {
-                State::Sleeping(d) => Some(d),
-                State::Switching(PostSwitch::Sleeping(d)) => Some(d),
+                State::Sleeping(_) | State::Switching(PostSwitch::Sleeping(_)) => {
+                    tcb.wakeup_interval()
+                }
                 _ => None,
             })
             .min()
+    }
+
+    /// Set the timer to the earliest deadline or next slice under contention
+    fn set_next_timer(&mut self, earliest_deadline: Option<(u64, u64)>, ready_count: usize) {
+        let now = crate::kernel::timer::elapsed();
+        let slice_end = if ready_count >= 1 {
+            SLICE + now
+        } else {
+            u64::MAX
+        };
+
+        let wake = earliest_deadline.map(|(_a, b)| {
+            // Pin every overlapping sleeper to wake at `b`
+            for tcb in &mut self.control_blocks {
+                if let State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) =
+                    &mut tcb.state
+                {
+                    d.fixed_leeway = Some(d.leeway(&tcb.qos));
+                    if b >= d.min && b <= d.min + d.leeway(&tcb.qos) {
+                        d.min = b; // wake at the coalesced point
+                        d.fixed_leeway = Some(0); // no further slack
+                    }
+                }
+            }
+            b
+        });
+
+        crate::kernel::timer::set_next_deadline(slice_end.min(wake.unwrap_or(u64::MAX)));
     }
 
     // Get disjoint mutable TCBs for current and next
@@ -286,25 +363,6 @@ impl ThreadsInner {
             .get_disjoint_mut([curr_idx, next_idx])
             .expect("indices have been selected as disjoint");
         Some((curr, curr_idx, next, next_idx))
-    }
-
-    /// Set the timer to the earliest deadline or next slice
-    fn set_next_timer(&mut self, sched: (Option<u64>, usize)) {
-        let (earliest_deadline_ms, ready_count) = sched;
-        // Two or more threads contending, compare default slice and earliest
-        let deadline_ms = if let Some(next_deadline) = earliest_deadline_ms {
-            let now = crate::kernel::timer::elapsed_ms();
-            (SLICE_MS + now).min(next_deadline)
-        } else {
-            if ready_count >= 2 {
-                let now = crate::kernel::timer::elapsed_ms();
-                SLICE_MS + now
-            } else {
-                // Quiet system
-                u64::MAX
-            }
-        };
-        crate::kernel::timer::set_next_deadline_ms(deadline_ms);
     }
 }
 
@@ -349,7 +407,6 @@ impl Scheduler {
             last_started_cycles: crate::arch::csr::rdcycles(),
             ..ThreadControlBlock::new()
         };
-        threads.set_next_timer((None, 2));
         threads.this_hart_mut().running_thread = slot_for_boot(hartid)
     }
 
@@ -399,7 +456,12 @@ impl Scheduler {
             pass: baseline,
             ..ThreadControlBlock::new()
         };
-        Some(tcb.id)
+        let id = tcb.id;
+        // Set the timer
+        let ready_count = threads.wake_sleeping_threads();
+        let earliest_deadline = threads.earliest_deadline();
+        threads.set_next_timer(earliest_deadline, ready_count);
+        Some(id)
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
@@ -414,13 +476,12 @@ impl Scheduler {
             // across the switch and block other harts/threads from rescheduling.
             let mut threads = self.threads.lock();
             // Check if any threads have reached or passed their deadline
-            // let sched = threads.wake_threads();
             let ready_count = threads.wake_sleeping_threads();
             let earliest_deadline = threads.earliest_deadline();
             // Get current and next TCBs
             let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
                 // Current and next are the same, return
-                threads.set_next_timer((earliest_deadline, ready_count));
+                threads.set_next_timer(earliest_deadline, ready_count);
                 drop(threads);
                 return;
             };
@@ -445,8 +506,7 @@ impl Scheduler {
                 switching_thread: Some(curr_idx),
             };
             let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
-            // let sched = threads.wake_threads();
-            threads.set_next_timer((earliest_deadline, ready_count));
+            threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
 
             unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
@@ -465,12 +525,11 @@ impl Scheduler {
         let earliest_deadline = threads.earliest_deadline();
         let Some((curr, curr_idx, next, next_idx)) = threads.get_current_and_next_mut() else {
             // Same thread is running uncontended, increase slice deadline
-            threads.set_next_timer((earliest_deadline, ready_count));
+            threads.set_next_timer(earliest_deadline, ready_count);
             return;
         };
         // Ready to switch
         // Update book-keeping
-
         let curr_cycles = crate::arch::csr::rdcycles();
         unsafe { self.run_cycles[curr_idx].add(curr_cycles - curr.last_started_cycles) };
         // Perform switch
@@ -487,7 +546,7 @@ impl Scheduler {
             switching_thread: Some(curr_idx),
         };
         let earliest_deadline = threads.earliest_deadline();
-        threads.set_next_timer((earliest_deadline, ready_count));
+        threads.set_next_timer(earliest_deadline, ready_count);
         drop(threads);
 
         unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
@@ -505,7 +564,11 @@ impl Scheduler {
     ///
     /// Time is measured in milliseconds
     fn sleep_until(&self, deadline_ms: u64) {
-        self.reschedule(PostSwitch::Sleeping(deadline_ms));
+        let deadline = Deadline {
+            min: deadline_ms * TICKS_PER_MS,
+            fixed_leeway: None,
+        };
+        self.reschedule(PostSwitch::Sleeping(deadline));
     }
 
     /// Blocks for `deadline` milliseconds
@@ -667,10 +730,12 @@ mod tests {
     /// per-test name print (~6ms at 115200 baud) plus general overhead.
     #[test_case]
     fn sleep_below_quantum_wakes_at_deadline() {
+        use core::fmt::Write;
         ensure_partner_spawned();
         let start = crate::kernel::timer::elapsed_ms();
         crate::kernel::sched::sleep(5);
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        let post_sleep = crate::kernel::timer::elapsed_ms();
+        let elapsed = post_sleep - start;
         assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
         assert!(
             elapsed <= 15,
