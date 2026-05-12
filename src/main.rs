@@ -139,6 +139,7 @@ extern "C" fn main() -> ! {
         #[allow(unreachable_code)]
         sched::PRIORITY_DEFAULT,
         sched::StackClass::KB8,
+        sched::Qos::High,
     ) else {
         println!("failed to lanuch shell");
     };

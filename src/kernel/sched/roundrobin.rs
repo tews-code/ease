@@ -29,6 +29,9 @@ const SLICE: u64 = SLICE_US * TICKS_PER_US;
 // Default slack period
 const LEEWAY_BASE_US: u64 = 100;
 const LEEWAY_BASE: u64 = LEEWAY_BASE_US * TICKS_PER_US;
+// Maximum slack period - used to cap the maximum requested leeway to sensible values
+const LEEWAY_MAX_US: u64 = 1_000_000;
+const LEEWAY_MAX: u64 = LEEWAY_MAX_US * TICKS_PER_US;
 
 static SCHEDULER: Scheduler = Scheduler::new();
 
@@ -141,7 +144,7 @@ impl Deadline {
             let remaining = self.min.saturating_sub(now);
             match qos {
                 Qos::High => (remaining >> 16).min(LEEWAY_BASE),
-                Qos::Low => remaining >> 3,
+                Qos::Low => (remaining >> 3).min(LEEWAY_MAX),
             }
         }
     }
@@ -167,7 +170,7 @@ enum Stack {
     Fixed,            // Set by hardware
 }
 
-enum Qos {
+pub enum Qos {
     High,
     Low,
 }
@@ -219,13 +222,13 @@ impl ThreadControlBlock {
         self.sp = core::ptr::null_mut();
     }
 
-    // Calculates the latest wake up interval for a thread
+    // Calculates the latest wake up for a thread including leeway
     // Returns None if thread is not sleeping
-    fn wakeup_interval(&self) -> Option<(u64, u64)> {
+    fn wakeup_deadline(&self) -> Option<u64> {
         match self.state {
-            State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) => {
-                let l = d.leeway(&self.qos);
-                Some((d.min, d.min.saturating_add(l)))
+            State::Sleeping(deadline) | State::Switching(PostSwitch::Sleeping(deadline)) => {
+                let leeway = deadline.leeway(&self.qos);
+                Some(deadline.min.saturating_add(leeway))
             }
             _ => None,
         }
@@ -294,20 +297,15 @@ impl ThreadsInner {
 
     // Gets the first wake up deadline including leeway (including threads busy switching)
     // Returns None if no threads are sleeping
-    fn earliest_deadline(&self) -> Option<(u64, u64)> {
+    fn earliest_deadline(&self) -> Option<u64> {
         self.control_blocks
             .iter()
-            .filter_map(|tcb| match tcb.state {
-                State::Sleeping(_) | State::Switching(PostSwitch::Sleeping(_)) => {
-                    tcb.wakeup_interval()
-                }
-                _ => None,
-            })
+            .filter_map(|tcb| tcb.wakeup_deadline())
             .min()
     }
 
     /// Set the timer to the earliest deadline or next slice under contention
-    fn set_next_timer(&mut self, earliest_deadline: Option<(u64, u64)>, ready_count: usize) {
+    fn set_next_timer(&mut self, earliest_deadline: Option<u64>, ready_count: usize) {
         let now = crate::kernel::timer::elapsed();
         let slice_end = if ready_count >= 1 {
             SLICE + now
@@ -315,20 +313,19 @@ impl ThreadsInner {
             u64::MAX
         };
 
-        let wake = earliest_deadline.map(|(_a, b)| {
+        let wake = earliest_deadline.inspect(|&b| {
             // Pin every overlapping sleeper to wake at `b`
             for tcb in &mut self.control_blocks {
                 if let State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) =
                     &mut tcb.state
                 {
                     d.fixed_leeway = Some(d.leeway(&tcb.qos));
-                    if b >= d.min && b <= d.min + d.leeway(&tcb.qos) {
+                    if b >= d.min && b <= d.min.saturating_add(d.leeway(&tcb.qos)) {
                         d.min = b; // wake at the coalesced point
                         d.fixed_leeway = Some(0); // no further slack
                     }
                 }
             }
-            b
         });
 
         crate::kernel::timer::set_next_deadline(slice_end.min(wake.unwrap_or(u64::MAX)));
@@ -430,7 +427,7 @@ impl Scheduler {
     }
 
     // Set up initial thread block and stack for a new thread
-    fn spawn(&self, entry: fn() -> !, priority: u8, class: StackClass) -> Option<u32> {
+    fn spawn(&self, entry: fn() -> !, priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
         // First allocate before locking
         let base = ThreadStack::allocate(class)?;
         let sp = unsafe { ThreadStack::init_for_entry(base, class, entry) };
@@ -451,6 +448,7 @@ impl Scheduler {
             id: next_thread_id(),
             sp,
             state: State::Ready,
+            qos,
             priority,
             stack: Some(Stack::Heap(class)),
             pass: baseline,
@@ -563,10 +561,10 @@ impl Scheduler {
     /// Blocks until the timer has passed the deadline
     ///
     /// Time is measured in milliseconds
-    fn sleep_until(&self, deadline_ms: u64) {
+    fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
         let deadline = Deadline {
-            min: deadline_ms * TICKS_PER_MS,
-            fixed_leeway: None,
+            min: deadline_ms.saturating_mul(TICKS_PER_MS),
+            fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(TICKS_PER_MS)),
         };
         self.reschedule(PostSwitch::Sleeping(deadline));
     }
@@ -574,7 +572,17 @@ impl Scheduler {
     /// Blocks for `deadline` milliseconds
     #[allow(dead_code)]
     fn sleep(&self, deadline_ms: u64) {
-        self.sleep_until(crate::kernel::timer::elapsed_ms() + deadline_ms);
+        self.sleep_until(
+            crate::kernel::timer::elapsed_ms().saturating_add(deadline_ms),
+            None,
+        );
+    }
+
+    /// Blocks for `deadline` milliseconds
+    #[allow(dead_code)]
+    fn sleep_with_leeway(&self, deadline_ms: u64, leeway_ms: u64) {
+        let now_ms = crate::kernel::timer::elapsed_ms();
+        self.sleep_until(now_ms.saturating_add(deadline_ms), Some(leeway_ms));
     }
 
     /// Get currently running thread total cpu cycles
@@ -596,8 +604,8 @@ pub fn idle_thread() -> ! {
 }
 
 /// Spawn a new thread
-pub fn spawn(entry: fn() -> !, priority: u8, class: StackClass) -> Option<u32> {
-    SCHEDULER.spawn(entry, priority, class)
+pub fn spawn(entry: fn() -> !, priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
+    SCHEDULER.spawn(entry, priority, class, qos)
 }
 
 /// Set up the boot thread
@@ -611,17 +619,22 @@ pub fn yield_now() {
 }
 
 /// Blocks until the timer has passed the deadline
-///
 /// Time is measured in milliseconds
 #[allow(dead_code)]
 pub fn sleep_until(deadline_ms: u64) {
-    SCHEDULER.sleep_until(deadline_ms);
+    SCHEDULER.sleep_until(deadline_ms, None);
 }
 
 /// Blocks for `deadline` millseconds
 #[allow(dead_code)]
 pub fn sleep(deadline_ms: u64) {
     SCHEDULER.sleep(deadline_ms);
+}
+
+/// Blocks for `deadline` millseconds
+#[allow(dead_code)]
+pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
+    SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
 }
 
 /// Preempts thread
@@ -665,7 +678,7 @@ pub fn post_switch_cleanup() {
 
 #[cfg(all(test, feature = "test-sched"))]
 mod tests {
-    use crate::kernel::sched::StackClass;
+    use crate::kernel::sched::{Qos, StackClass};
 
     use super::PRIORITY_DEFAULT;
     use core::sync::atomic::{AtomicUsize, Ordering};
@@ -685,7 +698,12 @@ mod tests {
 
     fn ensure_partner_spawned() {
         if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(partner_thread, PRIORITY_DEFAULT, StackClass::KB2);
+            crate::kernel::sched::spawn(
+                partner_thread,
+                PRIORITY_DEFAULT,
+                StackClass::KB2,
+                Qos::High,
+            );
         }
     }
 
@@ -733,13 +751,107 @@ mod tests {
         use core::fmt::Write;
         ensure_partner_spawned();
         let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep(5);
+        crate::kernel::sched::sleep_with_leeway(5, 0);
         let post_sleep = crate::kernel::timer::elapsed_ms();
         let elapsed = post_sleep - start;
         assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
         assert!(
             elapsed <= 15,
             "sub-quantum sleep rounded to slice boundary: {} ms",
+            elapsed
+        );
+    }
+
+    /// T1: a tight-deadline sleeper should wake within its own window even
+    /// when another sleeper with a much wider leeway window is also pending.
+    /// Guards the `earliest_deadline` contract: the tightest *upper bound* `b`
+    /// wins, not the smallest `min`. A pre-fix `earliest_deadline` that sorted
+    /// lexicographically on `(min, b)` could pick a long-leeway neighbor and
+    /// pin the timer to that neighbor's far-future `b`. In practice the
+    /// coalescing/yield path tends to self-correct within microseconds, so
+    /// this test is a contract guard for future regressions rather than a
+    /// direct demonstration of an observable bug. Pre- and post-fix both
+    /// pass under normal scheduling.
+    #[test_case]
+    fn tight_deadline_wakes_with_long_leeway_neighbor() {
+        static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
+        fn long_leeway_sleeper() -> ! {
+            // Short min, huge leeway: window [now+5ms, now+1005ms].
+            crate::kernel::sched::sleep_with_leeway(5, 1000);
+            loop {
+                crate::kernel::sched::yield_now();
+            }
+        }
+        ensure_partner_spawned();
+        if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+            crate::kernel::sched::spawn(
+                long_leeway_sleeper,
+                PRIORITY_DEFAULT,
+                StackClass::KB2,
+                Qos::Low,
+            );
+        }
+        // Give the background sleeper a moment to reach its sleep_with_leeway.
+        crate::kernel::sched::sleep(2);
+        let start = crate::kernel::timer::elapsed_ms();
+        crate::kernel::sched::sleep_with_leeway(20, 0);
+        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        // Bound is generous: this test is a contract guard for future
+        // regressions in the earliest_deadline / coalescing path, not a tight
+        // jitter measurement. A real regression (e.g. timer pinned to the
+        // neighbor's far-future `b`) would blow past 100ms+.
+        assert!(
+            elapsed <= 50,
+            "tight sleeper dragged by long-leeway neighbor: {} ms",
+            elapsed
+        );
+    }
+
+    /// T2: a neighbor sleeper with extreme `fixed_leeway` (passed as
+    /// `u64::MAX` at the public API) must not corrupt the wake math for
+    /// other sleepers. Without saturating arithmetic, `leeway_ms *
+    /// TICKS_PER_MS` and `d.min + leeway` both wrap, potentially producing
+    /// a small bogus `wakeup_deadline` that `earliest_deadline` picks as
+    /// the global min, dragging tight sleepers' wake times forward. With
+    /// `saturating_mul` and `saturating_add` everywhere, the neighbor's
+    /// effective deadline pins to `u64::MAX` and falls out of the `.min()`,
+    /// leaving the tight sleeper undisturbed.
+    #[test_case]
+    fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
+        static SPAWNED: AtomicUsize = AtomicUsize::new(0);
+        fn huge_leeway_sleeper() -> ! {
+            // u64::MAX in both args — exercises every saturating site on the
+            // path from public API to the Deadline struct.
+            crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
+            loop {
+                crate::kernel::sched::yield_now();
+            }
+        }
+        ensure_partner_spawned();
+        if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+            crate::kernel::sched::spawn(
+                huge_leeway_sleeper,
+                PRIORITY_DEFAULT,
+                StackClass::KB2,
+                Qos::Low,
+            );
+        }
+        // Give the background sleeper a moment to reach its sleep call.
+        crate::kernel::sched::sleep(2);
+        let start = crate::kernel::timer::elapsed_ms();
+        crate::kernel::sched::sleep_with_leeway(20, 0);
+        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        // Lower bound catches "bogus wrapped wakeup pulled main forward"
+        // (the original arithmetic-overflow failure mode).
+        assert!(
+            elapsed >= 5,
+            "tight sleeper woke too early — likely wrapped neighbor deadline: {} ms",
+            elapsed
+        );
+        // Upper bound catches "neighbor dragged main past slice boundary".
+        assert!(
+            elapsed <= 50,
+            "tight sleeper delayed by huge-leeway neighbor: {} ms",
             elapsed
         );
     }

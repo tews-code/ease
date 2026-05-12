@@ -7,6 +7,7 @@ mod roundrobin;
 #[cfg(feature = "sched-rr")]
 pub use roundrobin::{
     PRIORITY_DEFAULT,
+    Qos,
     StackClass,
     bootstrap,
     get_current_cycles,
@@ -16,6 +17,7 @@ pub use roundrobin::{
     preempt,
     sleep,
     sleep_until,
+    sleep_with_leeway,
     spawn,
     yield_now,
 };
