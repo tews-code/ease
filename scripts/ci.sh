@@ -1,13 +1,36 @@
 #!/bin/bash
 # Local CI script for EASE
 # Run this before committing to catch issues early
+#
+# Usage:
+#   ./scripts/ci.sh                          # full run (default test-all)
+#   ./scripts/ci.sh --test=test-sched        # focused run: only test-sched
+#                                            # in the QEMU stage; skips host
+#                                            # tests, miri, and docs for fast
+#                                            # iteration on one feature.
+#   ./scripts/ci.sh --allocator=alloc-slab   # use a different allocator
+#   ./scripts/ci.sh --scheduler=sched-stride # (currently the only option)
+#   ./scripts/ci.sh --help                   # this message
 
-set -e  # Exit immediately on any failure
+set -e
 
-ALLOCATOR="${1:-alloc-kalloc}"
-SCHEDULER="${2:-sched-stride}"
-TEST_SET="${3:-${TEST_SET:-test-all}}"
-FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
+ALLOCATOR="alloc-kalloc"
+SCHEDULER="sched-stride"
+TEST_SET="test-all"
+
+for arg in "$@"; do
+    case "$arg" in
+        --test=*)      TEST_SET="${arg#*=}" ;;
+        --allocator=*) ALLOCATOR="${arg#*=}" ;;
+        --scheduler=*) SCHEDULER="${arg#*=}" ;;
+        --help|-h)
+            sed -n '2,14p' "$0"
+            exit 0 ;;
+        *)
+            echo "error: unknown option '$arg' (try --help)" >&2
+            exit 1 ;;
+    esac
+done
 
 case "$ALLOCATOR" in
     alloc-slab|alloc-freelist|alloc-bump|alloc-buddy|alloc-kalloc) ;;
@@ -23,6 +46,14 @@ case "$SCHEDULER" in
        exit 1 ;;
 esac
 
+# Focused mode: a non-default --test skips orthogonal slow stages (host
+# tests, miri, docs) so you can iterate rapidly on one feature. Pass
+# nothing for the full run.
+FOCUSED=0
+[ "$TEST_SET" != "test-all" ] && FOCUSED=1
+
+FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
+
 # Allocator modules (bump, freelist, slab, buddy, tier) are declared
 # unconditionally so the tier can pull in slab and buddy. That means every
 # allocator-specific build has dead code in the inactive allocators —
@@ -31,7 +62,10 @@ esac
 # (allocations larger than one slot), which leaves more code dead.
 CLIPPY_EXTRA="-A dead-code"
 
-echo "Global allocator set to : $ALLOCATOR";
+echo "Global allocator set to : $ALLOCATOR"
+echo "Scheduler set to        : $SCHEDULER"
+echo "Test set                : $TEST_SET"
+[ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 
 # Unconditionally reformat to pass clippy
 cargo fmt
@@ -53,6 +87,12 @@ cargo clippy --target riscv32imac-unknown-none-elf \
 echo ""
 echo "=== QEMU Tests ==="
 cargo test --bin ease --no-default-features --features "$FEATURES"
+
+if [ $FOCUSED -eq 1 ]; then
+    echo ""
+    echo "✓ Focused checks passed (host tests, miri, docs skipped)"
+    exit 0
+fi
 
 echo ""
 echo "=== Host Tests ==="
