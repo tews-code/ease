@@ -106,7 +106,7 @@ fn kernel_init() {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn secondary_main() -> ! {
+extern "C" fn secondary_main() {
     // Spin on initialisation completion
     while !INIT_COMPLETE.load(Ordering::Acquire) {
         core::hint::spin_loop();
@@ -121,10 +121,32 @@ extern "C" fn secondary_main() -> ! {
 extern "C" fn main() -> ! {
     let _fb = kernel_init();
 
-    test_main();
+    // Move the test workload off the 4 KiB bootstrap stack onto a dedicated
+    // 16 KiB heap stack. The test framework (format machinery, ~211 result
+    // prints across test-all, FAT-format buffers, virtio sector reads on
+    // stack) accumulates a surprisingly deep peak
+    let id = sched::spawn(
+        test_runner_thread,
+        sched::PRIORITY_DEFAULT,
+        sched::StackClass::KB16,
+        sched::Qos::High,
+    );
+    assert!(id.is_some(), "could not spawn test runner thread");
+
+    // Bootstrap parks. The scheduler will pick `test_runner_thread`
+    // (lower pass than us at this point).
     loop {
-        core::hint::spin_loop();
+        sched::sleep_until(u64::MAX);
     }
+}
+
+/// Wrap `test_main` so it can be spawned as a thread entry.
+#[cfg(test)]
+fn test_runner_thread() {
+    test_main();
+    // `test_main` calls `qemu::exit_success` once all tests pass, so under
+    // normal circumstances this never returns. If it ever does, the
+    // implicit `exit()` in the trampoline cleans up this thread.
 }
 
 #[cfg(not(test))]

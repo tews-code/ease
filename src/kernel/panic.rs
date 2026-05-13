@@ -98,8 +98,18 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         use crate::io::DirectWriter;
         use core::fmt::Write;
         let _ = writeln!(DirectWriter, "PANIC: {info}");
+        let _ = writeln!(
+            DirectWriter,
+            "Stack canary corrupted: {}",
+            crate::kernel::sched::stack_ok_panic()
+        );
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
+        let _ = writeln!(
+            console,
+            "Stack canary corrupted: {}",
+            crate::kernel::sched::stack_ok_panic()
+        );
     }
     #[cfg(test)]
     {

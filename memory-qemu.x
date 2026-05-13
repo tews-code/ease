@@ -77,7 +77,7 @@ SECTIONS {
         __bss_end = .;
     } > SRAM
 
-    .heap (NOLOAD) : ALIGN(4096) { /* For buddy allocator need heap to be aligned to largest alloc size */
+    .heap (NOLOAD) : ALIGN(256K) { /* For buddy allocator need heap to be aligned to largest alloc size */
         __heap_start = .;
         . = . + 256K;               /* For buddy allcoator must be power of two */
         __heap_end = .;

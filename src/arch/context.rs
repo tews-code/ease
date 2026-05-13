@@ -31,7 +31,7 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(Context, ra) == 0);
 
 impl Context {
-    pub fn for_entry(entry: fn() -> !) -> Self {
+    pub fn for_entry(entry: fn()) -> Self {
         Self {
             ra: thread_entry as *const () as usize,
             s0: entry as usize,
@@ -52,10 +52,12 @@ unsafe extern "C" fn thread_entry() {
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn thread_first_run(entry: extern "C" fn() -> !) -> ! {
+unsafe extern "C" fn thread_first_run(entry: extern "C" fn()) -> ! {
     crate::kernel::sched::post_switch_cleanup();
     crate::arch::enable_interrupts();
-    entry()
+    entry();
+    // If entry() returned, the thread is done. Clean up.
+    crate::kernel::sched::exit()
 }
 
 global_asm!(

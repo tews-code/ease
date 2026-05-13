@@ -10,6 +10,7 @@ pub use stride::{
     Qos,
     StackClass,
     bootstrap,
+    exit,
     get_current_cycles,
     idle_thread,
     // stack_ok_panic,
@@ -19,5 +20,6 @@ pub use stride::{
     sleep_until,
     sleep_with_leeway,
     spawn,
+    stack_ok_panic,
     yield_now,
 };

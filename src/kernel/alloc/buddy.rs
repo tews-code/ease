@@ -219,6 +219,10 @@ impl Buddy {
         assert!(size.is_power_of_two());
         assert!(size >= MIN_BLOCK_SIZE);
         assert!(size <= MIN_BLOCK_SIZE << MAX_ORDER);
+        assert!(
+            start.addr().is_multiple_of(size),
+            "buddy heap must be aligned to its size for natural block alignment"
+        );
         // Get the provenance of the heap pointer
         inner.heap_addr = start.addr();
         // Derive the top order from the heap size. `size / MIN_BLOCK_SIZE` is
@@ -336,7 +340,7 @@ mod host_tests {
     impl TestHeap {
         fn new(size: usize) -> Self {
             // 4096-aligned so high-alignment allocation tests have somewhere to land
-            let layout = Layout::from_size_align(size, 4096).unwrap();
+            let layout = Layout::from_size_align(size, size).unwrap();
             // SAFETY: Layout is non-zero and aligned; std::alloc returns
             // a region we own until we call dealloc with the same layout.
             let ptr = unsafe { std::alloc::alloc(layout) };

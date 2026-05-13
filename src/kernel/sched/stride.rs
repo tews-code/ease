@@ -46,6 +46,9 @@ impl StackClass {
     pub const KB4: Self = Self(12);
     pub const KB8: Self = Self(13);
     pub const KB16: Self = Self(14);
+    pub const KB32: Self = Self(15);
+    pub const KB64: Self = Self(16);
+    pub const KB128: Self = Self(17);
 
     const _MIN_CLASS_SIZE_CHECK: () =
         assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
@@ -70,9 +73,9 @@ impl StackClass {
     }
 }
 
-struct ThreadStack;
+struct HeapStack;
 
-impl ThreadStack {
+impl HeapStack {
     // Allocates a thread stack from the heap and returns a pointer
     // to the stack base
     // Returns None if allocation fails
@@ -88,7 +91,7 @@ impl ThreadStack {
     pub unsafe fn init_for_entry(
         stack_base: NonNull<u8>,
         class: StackClass,
-        entry: fn() -> !,
+        entry: fn(),
     ) -> *mut u8 {
         // Safety: Caller has provided a valid stack base pointer
         unsafe {
@@ -106,15 +109,6 @@ impl ThreadStack {
             *context_ptr = Context::for_entry(entry);
         }
         context_ptr as *mut u8
-    }
-
-    // Check canary
-    // Safety: sp must point inside a stack region that was set up
-    // class must equal the StackClass used to set up this region
-    // and has not been deallocated.
-    #[expect(dead_code)]
-    unsafe fn canary_ok(class: StackClass, sp: *mut u8) -> bool {
-        unsafe { *(sp.with_addr(sp.addr() & !class.mask()) as *const usize) == STACK_CANARY }
     }
 
     // Deallocate the heap-backed thread stack.
@@ -153,6 +147,7 @@ impl Deadline {
 enum PostSwitch {
     Ready,
     Sleeping(Deadline),
+    Dead,
 }
 
 #[derive(PartialEq, Debug)]
@@ -166,7 +161,17 @@ enum State {
 
 enum Stack {
     Heap(StackClass), // Needs dealloc on thread exit
-    Fixed,            // Set by hardware
+    Fixed,            // Set by linker script
+}
+
+impl Stack {
+    // Returns the stack class based on the current Stack
+    const fn class(&self) -> StackClass {
+        match self {
+            Stack::Heap(c) => *c,
+            Stack::Fixed => StackClass::KB4,
+        }
+    }
 }
 
 pub enum Qos {
@@ -188,7 +193,7 @@ struct ThreadControlBlock {
 impl ThreadControlBlock {
     const fn new() -> Self {
         Self {
-            id: 0,
+            id: u32::MAX,
             state: State::Avail,
             sp: core::ptr::null_mut(),
             stack: None,
@@ -218,7 +223,6 @@ impl ThreadControlBlock {
     }
 
     // Deallocate the stack if heap-based
-    #[expect(dead_code)]
     fn release_stack(&mut self) {
         let stack = self
             .stack
@@ -226,7 +230,7 @@ impl ThreadControlBlock {
             .expect("should not be calling release_stack on uninitialised TCB");
         if let Stack::Heap(class) = stack {
             unsafe {
-                ThreadStack::deallocate(class, self.sp);
+                HeapStack::deallocate(class, self.sp);
             }
         }
         self.sp = core::ptr::null_mut();
@@ -416,6 +420,24 @@ impl ThreadsInner {
             Some((curr, curr_idx, next, next_idx))
         }
     }
+
+    fn check_curr_canary(&self) {
+        let curr = &self.control_blocks[self.this_hart().running_thread];
+        if let Some(stack) = &curr.stack {
+            let class = stack.class();
+            let base_addr = curr.sp.addr() & !class.mask();
+            let val = unsafe { core::ptr::read(base_addr as *const usize) };
+            assert!(
+                val == STACK_CANARY,
+                "stack canary corrupted in thread {}: sp={:p}, base={:#x}, read={:#x}, expected={:#x}",
+                curr.id,
+                curr.sp,
+                base_addr,
+                val,
+                STACK_CANARY,
+            );
+        }
+    }
 }
 
 // Safety: All access to the TCB array elements is via a spin lock that disables interrupts
@@ -467,6 +489,7 @@ impl Scheduler {
             id,
             state: State::Running,
             priority,
+            sp: crate::arch::csr::regs::sp() as *mut u8,
             stack: Some(Stack::Fixed),
             last_started_cycles: timer::elapsed(),
             ..ThreadControlBlock::new()
@@ -487,6 +510,11 @@ impl Scheduler {
             match threads.control_blocks[switched_idx].state {
                 State::Switching(PostSwitch::Ready) => State::Ready,
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
+                State::Switching(PostSwitch::Dead) => {
+                    threads.control_blocks[switched_idx].release_stack();
+                    threads.control_blocks[switched_idx] = ThreadControlBlock::new();
+                    State::Avail
+                }
                 _ => panic!("Post switch but not in Switched state"),
             }
         };
@@ -494,10 +522,10 @@ impl Scheduler {
     }
 
     // Set up initial thread block and stack for a new thread
-    fn spawn(&self, entry: fn() -> !, priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
+    fn spawn(&self, entry: fn(), priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
         // First allocate before locking
-        let base = ThreadStack::allocate(class)?;
-        let sp = unsafe { ThreadStack::init_for_entry(base, class, entry) };
+        let base = HeapStack::allocate(class)?;
+        let sp = unsafe { HeapStack::init_for_entry(base, class, entry) };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
         // Get the current pass baselines so we don't schedule ahead of other threads
@@ -506,7 +534,7 @@ impl Scheduler {
         let Some(tcb) = threads.free_slot() else {
             drop(threads);
             unsafe {
-                ThreadStack::deallocate(class, sp);
+                HeapStack::deallocate(class, sp);
             }
             return None;
         };
@@ -540,6 +568,7 @@ impl Scheduler {
             // thread's stack frame, so switch_to would otherwise carry the lock
             // across the switch and block other harts/threads from rescheduling.
             let mut threads = self.threads.lock();
+            threads.check_curr_canary();
             // Check if any threads have reached or passed their deadline
             let ready_count = threads.wake_sleeping_threads();
             let earliest_deadline = threads.earliest_deadline();
@@ -586,6 +615,7 @@ impl Scheduler {
     /// Note: if only one thread is runnable returns early.
     fn preempt(&self) {
         let mut threads = self.threads.lock();
+        threads.check_curr_canary();
         // let sched = threads.wake_threads();
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
@@ -668,6 +698,15 @@ impl Scheduler {
     pub fn get_current_cycles(&self, tcb_idx: usize) -> u64 {
         self.run_cycles[tcb_idx].get()
     }
+
+    fn exit(&self) -> ! {
+        self.reschedule(PostSwitch::Dead);
+        // reschedule switches away. If we get here, no other thread was
+        // available to switch to, which means this thread is the only one
+        // alive on this hart and we can't actually die. Panic — it's a
+        // programmer error to call exit() on the last thread.
+        unreachable!("exit() called but no other thread to switch to");
+    }
 }
 
 /// Generate a new thread id
@@ -676,14 +715,14 @@ fn next_thread_id() -> u32 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn idle_thread() -> ! {
+pub fn idle_thread() {
     loop {
         crate::arch::wait_for_interrupt();
     }
 }
 
 /// Spawn a new thread
-pub fn spawn(entry: fn() -> !, priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
+pub fn spawn(entry: fn(), priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
     SCHEDULER.spawn(entry, priority, class, qos)
 }
 
@@ -732,15 +771,44 @@ pub fn post_switch_cleanup() {
     SCHEDULER.post_switch_cleanup();
 }
 
-// #[allow(dead_code)]
-// Check the stack canary is in place using lock-free check
-// Lock free for use by panic
-// pub fn stack_ok_panic() -> bool {
-//     let sp = crate::arch::csr::regs::sp() as *const u8;
-//
-//     let stack_base = sp.with_addr(sp.addr() & !(STACK_SIZE - 1));
-//     unsafe { core::ptr::read_volatile(stack_base as *const usize) == STACK_CANARY }
-// }
+/// Voluntarily terminate the current thread. Doesn't return.
+#[allow(dead_code)] // currently only used from test helpers
+pub fn exit() -> ! {
+    SCHEDULER.exit()
+}
+
+/// Check that this thread's stack canary is intact, without locking
+/// the scheduler. Safe to call from panic.
+///
+/// We don't know the current thread's stack class from inside a panic
+/// handler (the scheduler is potentially in an inconsistent state, and
+/// taking its lock would deadlock if we panicked while holding it).
+/// Instead, try each plausible class. A stack region of size S is
+/// S-aligned, so `sp & !(S - 1)` recovers its base — but only for the
+/// correct S. We try each `StackClass`; if any of them reads the canary
+/// value at its computed base, the canary is intact.
+///
+/// Why this is safe: `STACK_CANARY = 0xDEADBEEF` is a chosen-magic value.
+/// The probability of a "wrong" mask happening to point at memory that
+/// coincidentally contains `0xDEADBEEF` is ~5 / 2^32 ≈ 1e-9 — negligible.
+pub fn stack_ok_panic() -> bool {
+    let sp_addr = crate::arch::csr::regs::sp();
+    // Powers-of-two shifts matching StackClass::KB1..KB16.
+    const STACK_SHIFTS: [u32; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
+    for &shift in &STACK_SHIFTS {
+        let mask = (1usize << shift) - 1;
+        let base = (sp_addr & !mask) as *const usize;
+        // SAFETY: `base` is some address in the kernel's address space.
+        // Reading a `usize` there is safe under our flat memory model —
+        // we have no virtual memory, no MMU exceptions. `read_volatile`
+        // discourages the compiler from reordering this against other
+        // panic-handler diagnostics.
+        if unsafe { core::ptr::read_volatile(base) } == STACK_CANARY {
+            return true;
+        }
+    }
+    false
+}
 
 // =============================================================================
 // Smoke tests + cycle-count benchmark
@@ -768,7 +836,7 @@ mod tests {
     /// Set to 1 once the partner has been spawned; ensure-once across tests.
     static PARTNER_SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
-    fn partner_thread() -> ! {
+    fn partner_thread() {
         loop {
             PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
             crate::kernel::sched::yield_now();
@@ -784,6 +852,36 @@ mod tests {
                 Qos::High,
             );
         }
+    }
+
+    /// Verify that `exit()` actually runs the dying-thread's last
+    /// instructions, then cleans up its TCB slot so it can be reused.
+    /// Spawns a tiny thread that flips a flag and exits; after a brief
+    /// wait, the flag must be set. Slot reuse is exercised implicitly:
+    /// spawning the helper THREADS_MAX times across a test session would
+    /// fail if exit() didn't recycle slots.
+    #[test_case]
+    fn exit_runs_and_recycles_slot() {
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+        fn marker_then_exit() {
+            DONE.store(1, Ordering::Relaxed);
+            crate::kernel::sched::exit()
+        }
+        ensure_partner_spawned();
+        let id = crate::kernel::sched::spawn(
+            marker_then_exit,
+            PRIORITY_DEFAULT,
+            StackClass::KB2,
+            Qos::Low,
+        );
+        assert!(id.is_some(), "spawn failed (no free slot?)");
+        // Give the thread time to run, mark, and exit.
+        crate::kernel::sched::sleep(50);
+        assert_eq!(
+            DONE.load(Ordering::Relaxed),
+            1,
+            "spawned thread did not run to completion",
+        );
     }
 
     /// Smoke test 1: yield_now lets at least one other thread make progress.
@@ -854,14 +952,12 @@ mod tests {
     #[test_case]
     fn tight_deadline_wakes_with_long_leeway_neighbor() {
         static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        fn long_leeway_sleeper() -> ! {
+        fn long_leeway_sleeper() {
             // Short min, huge leeway: window [now+5ms, now+1005ms].
             crate::kernel::sched::sleep_with_leeway(5, 1000);
-            // Park in deep sleep — yield-loop would create a permanent
-            // low-pass thread that disturbs scheduling in later tests.
-            loop {
-                crate::kernel::sched::sleep_until(u64::MAX);
-            }
+            // Exit cleanly so the slot is recycled and we don't leave a
+            // ghost thread disturbing later tests' scheduling.
+            crate::kernel::sched::exit()
         }
         ensure_partner_spawned();
         if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -900,13 +996,11 @@ mod tests {
     #[test_case]
     fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
         static SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        fn huge_leeway_sleeper() -> ! {
+        fn huge_leeway_sleeper() {
             // u64::MAX in both args — exercises every saturating site on the
             // path from public API to the Deadline struct.
             crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
-            loop {
-                crate::kernel::sched::yield_now();
-            }
+            crate::kernel::sched::exit()
         }
         ensure_partner_spawned();
         if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -966,27 +1060,23 @@ mod tests {
         // subsequent tests.
         static T3_ACTIVE: AtomicUsize = AtomicUsize::new(1);
 
-        fn t3_spammer() -> ! {
+        fn t3_spammer() {
             while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
                 for _ in 0..10_000 {
                     T3_SPAMMER_ITERS.fetch_add(1, Ordering::Relaxed);
                 }
                 crate::kernel::sched::sleep(1);
             }
-            loop {
-                crate::kernel::sched::sleep_until(u64::MAX);
-            }
+            crate::kernel::sched::exit()
         }
 
-        fn t3_hog() -> ! {
+        fn t3_hog() {
             while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
                 for _ in 0..10_000 {
                     T3_HOG_ITERS.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            loop {
-                crate::kernel::sched::yield_now();
-            }
+            crate::kernel::sched::exit()
         }
 
         if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -1035,25 +1125,19 @@ mod tests {
         static MEASURER_ELAPSED: AtomicUsize = AtomicUsize::new(0);
         static MEASURER_DONE: AtomicUsize = AtomicUsize::new(0);
 
-        fn t4_low_neighbor() -> ! {
+        fn t4_low_neighbor() {
             // Qos::Low + long sleep gives a wide leeway window.
             crate::kernel::sched::sleep(200);
-            // Park in deep sleep — yield-loop would create a permanent
-            // low-pass thread that disturbs scheduling in later tests.
-            loop {
-                crate::kernel::sched::sleep_until(u64::MAX);
-            }
+            crate::kernel::sched::exit()
         }
 
-        fn t4_high_measurer() -> ! {
+        fn t4_high_measurer() {
             let start = crate::kernel::timer::elapsed_ms();
             crate::kernel::sched::sleep(20);
             let elapsed = crate::kernel::timer::elapsed_ms() - start;
             MEASURER_ELAPSED.store(elapsed as usize, Ordering::Relaxed);
             MEASURER_DONE.store(1, Ordering::Relaxed);
-            loop {
-                crate::kernel::sched::sleep_until(u64::MAX);
-            }
+            crate::kernel::sched::exit()
         }
 
         ensure_partner_spawned();
