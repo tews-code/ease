@@ -5,7 +5,7 @@
 set -e  # Exit immediately on any failure
 
 ALLOCATOR="${1:-alloc-kalloc}"
-SCHEDULER="${2:-sched-rr}"
+SCHEDULER="${2:-sched-stride}"
 TEST_SET="${3:-${TEST_SET:-test-all}}"
 FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
 
@@ -17,9 +17,9 @@ case "$ALLOCATOR" in
 esac
 
 case "$SCHEDULER" in
-    sched-rr) ;;
+    sched-stride) ;;
     *) echo "error: unknown scheduler '$SCHEDULER'" >&2
-       echo "       expected one of: sched-rr" >&2
+       echo "       expected one of: sched-stride" >&2
        exit 1 ;;
 esac
 

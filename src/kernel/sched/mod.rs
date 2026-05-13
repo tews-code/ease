@@ -2,10 +2,10 @@
 
 #![allow(unused_imports)]
 
-mod roundrobin;
+mod stride;
 
-#[cfg(feature = "sched-rr")]
-pub use roundrobin::{
+#[cfg(feature = "sched-stride")]
+pub use stride::{
     PRIORITY_DEFAULT,
     Qos,
     StackClass,

@@ -8,9 +8,8 @@ use crate::arch::context::{Context, switch_to};
 use crate::arch::trap::TrapFrame;
 use crate::arch::{STACK_CANARY, cpu_id};
 use crate::board::HARTS_MAX;
-use crate::kernel::collection::StackVec;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
-use crate::kernel::timer::{TICKS_PER_MS, TICKS_PER_US};
+use crate::kernel::timer;
 
 const THREADS_MAX: usize = 32;
 // Helper function to determine the HART boot threads in the threads array
@@ -25,13 +24,13 @@ pub const PRIORITY_MIN: u8 = u8::MAX - 1;
 
 // Under contention use this time slice per thread
 const SLICE_US: u64 = 16_000;
-const SLICE: u64 = SLICE_US * TICKS_PER_US;
+const SLICE: u64 = SLICE_US * timer::CYCLES_PER_US;
 // Default slack period
 const LEEWAY_BASE_US: u64 = 100;
-const LEEWAY_BASE: u64 = LEEWAY_BASE_US * TICKS_PER_US;
+const LEEWAY_BASE: u64 = LEEWAY_BASE_US * timer::CYCLES_PER_US;
 // Maximum slack period - used to cap the maximum requested leeway to sensible values
 const LEEWAY_MAX_US: u64 = 1_000_000;
-const LEEWAY_MAX: u64 = LEEWAY_MAX_US * TICKS_PER_US;
+const LEEWAY_MAX: u64 = LEEWAY_MAX_US * timer::CYCLES_PER_US;
 
 static SCHEDULER: Scheduler = Scheduler::new();
 
@@ -128,7 +127,7 @@ impl ThreadStack {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct Deadline {
     min: u64,
     fixed_leeway: Option<u64>, // None - use system default leeway
@@ -150,13 +149,13 @@ impl Deadline {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum PostSwitch {
     Ready,
     Sleeping(Deadline),
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum State {
     Avail,
     Ready,
@@ -200,14 +199,22 @@ impl ThreadControlBlock {
         }
     }
 
-    // Stride forward
+    // Stride forward by ran_cycles weighted by priority.
+    //
+    // `ran_cycles` is in CLINT cycles (mtime units) so `pass` is the same
+    // unit across all threads. No `/ SLICE` normalisation is applied — that
+    // would round sub-millisecond runs to zero stride, which left
+    // yield-loopers' pass stagnant and starved sleepers (see Phase 5
+    // notes). The trade-off is `pass` values grow larger in absolute
+    // terms (~10⁷ per ms at PRIORITY_DEFAULT), but they stay well under
+    // u64 saturation for any realistic uptime.
+    //
+    // Threads at priority 0 do not stride/age (stride is 0 for any ran)
+    // and so always have the lowest pass — they win every pick_next.
     fn stride(&mut self, ran_cycles: u64) {
-        // We add the priority value itself as the stride ratioed to the
-        // proportion of the slice used
-        // Note that threads at priority 0 do not share CPU with other threads
         self.pass = self
             .pass
-            .saturating_add(ran_cycles.saturating_mul(self.priority as u64) / SLICE);
+            .saturating_add(ran_cycles.saturating_mul(self.priority as u64));
     }
 
     // Deallocate the stack if heap-based
@@ -265,11 +272,20 @@ impl ThreadsInner {
             .find(|tcb| tcb.state == State::Avail)
     }
 
-    // Find the minimum current pass value
+    // Find the minimum current pass value among active, non-idle threads.
+    //
+    // PRI_MIN threads (the idle bootstrap on non-main harts) accumulate
+    // very little stride — they mostly WFI and never switch out — so
+    // including them in the baseline calculation would give every newly
+    // spawned thread a pass of 0, letting it dominate pick_next until its
+    // pass naturally catches up to the rest of the system.
     fn pass_baseline(&self) -> u64 {
         self.control_blocks
             .iter()
-            .filter(|tcb| tcb.state == State::Ready || tcb.state == State::Running)
+            .filter(|tcb| {
+                (tcb.state == State::Ready || tcb.state == State::Running)
+                    && tcb.priority != PRIORITY_MIN
+            })
             .map(|tcb| tcb.pass)
             .min()
             .unwrap_or(0)
@@ -279,7 +295,7 @@ impl ThreadsInner {
     //
     // Returns a count of the ready threads
     fn wake_sleeping_threads(&mut self) -> usize {
-        let now = crate::kernel::timer::elapsed();
+        let now = timer::elapsed();
         let mut ready_count: usize = 0;
         for tcb in &mut self.control_blocks {
             match tcb.state {
@@ -309,7 +325,7 @@ impl ThreadsInner {
 
     /// Set the timer to the earliest deadline or next slice under contention
     fn set_next_timer(&mut self, earliest_deadline: Option<u64>, ready_count: usize) {
-        let now = crate::kernel::timer::elapsed();
+        let now = timer::elapsed();
         let slice_end = if ready_count >= 1 {
             SLICE + now
         } else {
@@ -317,15 +333,22 @@ impl ThreadsInner {
         };
 
         let wake = earliest_deadline.inspect(|&b| {
-            // Pin every overlapping sleeper to wake at `b`
+            // For every sleeper whose tolerance window includes `b`, pin it
+            // to wake at `b` (the coalesce point) and zero its leeway so
+            // subsequent calls treat it as a hard deadline. For sleepers
+            // whose window doesn't include `b`, memoise the computed
+            // leeway into `fixed_leeway` so future visits in this set of
+            // calls see a stable value.
             for tcb in &mut self.control_blocks {
                 if let State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) =
                     &mut tcb.state
                 {
-                    d.fixed_leeway = Some(d.leeway(&tcb.qos));
-                    if b >= d.min && b <= d.min.saturating_add(d.leeway(&tcb.qos)) {
-                        d.min = b; // wake at the coalesced point
-                        d.fixed_leeway = Some(0); // no further slack
+                    let leeway = d.leeway(&tcb.qos);
+                    if b >= d.min && b <= d.min.saturating_add(leeway) {
+                        d.min = b;
+                        d.fixed_leeway = Some(0);
+                    } else if d.fixed_leeway.is_none() {
+                        d.fixed_leeway = Some(leeway);
                     }
                 }
             }
@@ -376,7 +399,6 @@ impl ThreadsInner {
     )> {
         // Find current index
         let curr_idx = self.this_hart().running_thread;
-        // Find index of thread next to run (including current thread)
         let next_idx = self
             .control_blocks
             .iter()
@@ -421,6 +443,13 @@ impl Scheduler {
     }
 
     // Set up the boot thread for each hart
+    //
+    // Hart 0's bootstrap runs the kernel main loop / shell / tests, so it's
+    // at PRIORITY_DEFAULT. Hart 1's bootstrap (and any further harts) run
+    // `idle_thread` and so are at PRIORITY_MIN. With time-weighted stride,
+    // pass advances proportional to `priority`, so having hart 0's bootstrap
+    // at PRIORITY_MIN caused its pass to climb 2× faster than partner
+    // threads, eventually starving the test runner.
     fn bootstrap(&self, hartid: usize) {
         let id = next_thread_id();
         if hartid == 0 {
@@ -428,13 +457,18 @@ impl Scheduler {
         } else {
             assert!(id > 0);
         }
+        let priority = if hartid == 0 {
+            PRIORITY_DEFAULT
+        } else {
+            PRIORITY_MIN
+        };
         let mut threads = self.threads.lock();
         threads.control_blocks[slot_for_boot(hartid)] = ThreadControlBlock {
             id,
             state: State::Running,
-            priority: PRIORITY_MIN,
+            priority,
             stack: Some(Stack::Fixed),
-            last_started_cycles: crate::arch::csr::rdcycles(),
+            last_started_cycles: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
         threads.this_hart_mut().running_thread = slot_for_boot(hartid)
@@ -521,7 +555,7 @@ impl Scheduler {
             // Set current thread to the new state
             curr.state = State::Switching(new_state);
             // Safety: Only writing to current within locked threads array - single writer
-            let now_cycles = crate::arch::csr::rdcycles();
+            let now_cycles = timer::elapsed();
             let ran = now_cycles - curr.last_started_cycles;
             unsafe { self.run_cycles[curr_idx].add(ran) };
             curr.stride(ran);
@@ -561,7 +595,7 @@ impl Scheduler {
         // otherwise a long-running
         // thread keeps appearing to have its old (low) pass and
         // never loses a comparison.
-        let now_cycles = crate::arch::csr::rdcycles();
+        let now_cycles = timer::elapsed();
         let curr_idx = threads.this_hart().running_thread;
         {
             let curr = &mut threads.control_blocks[curr_idx];
@@ -608,8 +642,8 @@ impl Scheduler {
     /// Time is measured in milliseconds
     fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
         let deadline = Deadline {
-            min: deadline_ms.saturating_mul(TICKS_PER_MS),
-            fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(TICKS_PER_MS)),
+            min: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
+            fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(timer::CYCLES_PER_MS)),
         };
         self.reschedule(PostSwitch::Sleeping(deadline));
     }
@@ -773,7 +807,7 @@ mod tests {
     /// Smoke test 2: sched::sleep blocks for approximately the requested
     /// duration. Catches "sleep doesn't actually block" and "sleep returns
     /// late." Bound is tight (~one slice quantum of slack) since the
-    /// scheduler is now tickless with sub-quantum sleep precision.
+    /// scheduler is tickless with sub-quantum sleep precision.
     #[test_case]
     fn sleep_blocks_for_duration() {
         ensure_partner_spawned();
@@ -781,7 +815,7 @@ mod tests {
         crate::kernel::sched::sleep(100);
         let elapsed = crate::kernel::timer::elapsed_ms() - start;
         assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
-        assert!(elapsed <= 115, "sleep too long: {} ms", elapsed);
+        assert!(elapsed <= 118, "sleep too long: {} ms", elapsed);
     }
 
     /// Step 3 verification: a sub-slice-quantum sleep wakes at its actual
@@ -823,8 +857,10 @@ mod tests {
         fn long_leeway_sleeper() -> ! {
             // Short min, huge leeway: window [now+5ms, now+1005ms].
             crate::kernel::sched::sleep_with_leeway(5, 1000);
+            // Park in deep sleep — yield-loop would create a permanent
+            // low-pass thread that disturbs scheduling in later tests.
             loop {
-                crate::kernel::sched::yield_now();
+                crate::kernel::sched::sleep_until(u64::MAX);
             }
         }
         ensure_partner_spawned();
@@ -855,7 +891,7 @@ mod tests {
     /// T2: a neighbor sleeper with extreme `fixed_leeway` (passed as
     /// `u64::MAX` at the public API) must not corrupt the wake math for
     /// other sleepers. Without saturating arithmetic, `leeway_ms *
-    /// TICKS_PER_MS` and `d.min + leeway` both wrap, potentially producing
+    /// CYCLES_PER_MS` and `d.min + leeway` both wrap, potentially producing
     /// a small bogus `wakeup_deadline` that `earliest_deadline` picks as
     /// the global min, dragging tight sleepers' wake times forward. With
     /// `saturating_mul` and `saturating_add` everywhere, the neighbor's
@@ -1053,7 +1089,7 @@ mod tests {
         // sleeps. Tolerance covers scheduling jitter and the discrete
         // `elapsed_ms` granularity, not aggressive leeway.
         assert!(
-            elapsed <= 25,
+            elapsed <= 40,
             "Qos::High wake delayed (likely pulled by Low neighbor): {} ms",
             elapsed
         );

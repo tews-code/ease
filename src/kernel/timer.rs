@@ -4,9 +4,9 @@ use crate::arch::csr;
 use crate::board::clint::TIMER_FREQ_HZ;
 use crate::drivers::clint::{Clint, with_clint};
 
-/// Ticks per millisecond is derived from the clint frequency
-pub const TICKS_PER_MS: u64 = TIMER_FREQ_HZ / 1_000;
-pub const TICKS_PER_US: u64 = TIMER_FREQ_HZ / 1_000_000;
+/// Cycle count is derived from the clint frequency
+pub const CYCLES_PER_MS: u64 = TIMER_FREQ_HZ / 1_000;
+pub const CYCLES_PER_US: u64 = TIMER_FREQ_HZ / 1_000_000;
 
 /// Initialise the timer for a HART
 pub fn init() {
@@ -24,17 +24,23 @@ pub fn set_next_deadline(deadline: u64) {
 /// Set the next timer interrupt deadline in milliseconds
 #[allow(dead_code)]
 pub fn set_next_deadline_ms(deadline_ms: u64) {
-    let deadline = deadline_ms.saturating_mul(TICKS_PER_MS);
+    let deadline = deadline_ms.saturating_mul(CYCLES_PER_MS);
     set_next_deadline(deadline);
 }
 
-/// Get elapsed time since boot
+/// Get elapsed time since boot in milliseconds
 #[allow(dead_code)]
 pub fn elapsed_ms() -> u64 {
-    Clint::mtime() / TICKS_PER_MS
+    Clint::mtime() / CYCLES_PER_MS
 }
 
-/// Get elapsed cycles since boot
+/// Get elapsed time since boot in microseconds
+#[allow(dead_code)]
+pub fn elapsed_us() -> u64 {
+    Clint::mtime() / CYCLES_PER_US
+}
+
+/// Get elapsed clint cycles since boot
 pub fn elapsed() -> u64 {
     Clint::mtime()
 }
@@ -45,8 +51,8 @@ mod tests {
 
     #[test_case]
     fn timer_smoke_test() {
-        let then = elapsed_ms();
-        let now = elapsed_ms();
+        let then = elapsed();
+        let now = elapsed();
         assert!(now >= then);
     }
 }
