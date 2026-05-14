@@ -1,25 +1,94 @@
-//! Schedulers
-
-#![allow(unused_imports)]
+//! Scheduler
 
 mod stride;
+#[cfg(all(test, feature = "test-sched"))]
+mod tests;
+mod types;
 
-#[cfg(feature = "sched-stride")]
-pub use stride::{
-    PRIORITY_DEFAULT,
-    Qos,
-    StackClass,
-    bootstrap,
-    exit,
-    get_current_cycles,
-    idle_thread,
-    // stack_ok_panic,
-    post_switch_cleanup,
-    preempt,
-    sleep,
-    sleep_until,
-    sleep_with_leeway,
-    spawn,
-    stack_ok_panic,
-    yield_now,
-};
+use stride::SCHEDULER;
+
+#[allow(unused_imports)]
+pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
+pub use types::{Qos, StackClass, ThreadHandle};
+
+pub fn idle_thread() -> ! {
+    loop {
+        crate::arch::wait_for_interrupt();
+    }
+}
+
+/// Spawn a new thread
+pub fn spawn<F: FnOnce() + Send + 'static>(
+    entry: F,
+    priority: u8,
+    class: StackClass,
+    qos: Qos,
+) -> Option<ThreadHandle> {
+    SCHEDULER.spawn(entry, priority, class, qos)
+}
+
+/// Set up the boot thread
+pub fn bootstrap(hartid: usize) {
+    SCHEDULER.bootstrap(hartid);
+}
+
+/// Voluntarily yield the current thread
+pub fn yield_now() {
+    SCHEDULER.yield_now();
+}
+
+/// Blocks until the timer has passed the deadline
+/// Time is measured in milliseconds
+#[allow(dead_code)]
+pub fn sleep_until(deadline_ms: u64) {
+    SCHEDULER.sleep_until(deadline_ms, None);
+}
+
+/// Blocks for `deadline` millseconds
+#[allow(dead_code)]
+pub fn sleep(deadline_ms: u64) {
+    SCHEDULER.sleep(deadline_ms);
+}
+
+/// Blocks for `deadline` millseconds
+#[allow(dead_code)]
+pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
+    SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
+}
+
+/// Preempts thread
+pub fn preempt() {
+    SCHEDULER.preempt();
+}
+
+/// Get cycles of running thread
+#[allow(dead_code)]
+pub fn get_current_cycles(tcb_idx: usize) -> u64 {
+    SCHEDULER.get_current_cycles(tcb_idx)
+}
+
+/// Clean up switched status threads
+pub fn post_switch_cleanup() {
+    SCHEDULER.post_switch_cleanup();
+}
+
+/// Voluntarily terminate the current thread. Doesn't return.
+#[allow(dead_code)] // currently only used from test helpers
+pub fn exit() -> ! {
+    SCHEDULER.exit()
+}
+
+/// Park the current thread
+pub fn park() {
+    SCHEDULER.park()
+}
+
+/// Park the current thread by thread index
+pub fn unpark(handle: ThreadHandle) {
+    SCHEDULER.unpark(handle)
+}
+
+/// Get a handle to the thread
+pub fn current_thread() -> ThreadHandle {
+    SCHEDULER.current_thread()
+}

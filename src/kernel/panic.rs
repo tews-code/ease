@@ -101,14 +101,14 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let _ = writeln!(
             DirectWriter,
             "Stack canary corrupted: {}",
-            crate::kernel::sched::stack_ok_panic()
+            crate::kernel::sched::StackClass::canary_intact_at_current_sp()
         );
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
         let _ = writeln!(
             console,
             "Stack canary corrupted: {}",
-            crate::kernel::sched::stack_ok_panic()
+            crate::kernel::sched::StackClass::canary_intact_at_current_sp()
         );
     }
     #[cfg(test)]

@@ -31,10 +31,11 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(Context, ra) == 0);
 
 impl Context {
-    pub fn for_entry(entry: fn()) -> Self {
+    pub fn for_entry(trampoline_ptr: extern "C" fn(*mut u8) -> !, closure_ptr: *mut u8) -> Self {
         Self {
             ra: thread_entry as *const () as usize,
-            s0: entry as usize,
+            s0: trampoline_ptr as usize,
+            s1: closure_ptr as usize,
             ..Self::default()
         }
     }
@@ -46,18 +47,20 @@ impl Context {
 unsafe extern "C" fn thread_entry() {
     naked_asm!(
         "mv a0, s0",
+        "mv a1, s1",
         "tail {trampoline}",
         trampoline = sym thread_first_run,
     );
 }
 
 #[unsafe(no_mangle)]
-unsafe extern "C" fn thread_first_run(entry: extern "C" fn()) -> ! {
+unsafe extern "C" fn thread_first_run(
+    trampoline_ptr: extern "C" fn(*mut u8) -> !,
+    closure_ptr: *mut u8,
+) -> ! {
     crate::kernel::sched::post_switch_cleanup();
     crate::arch::enable_interrupts();
-    entry();
-    // If entry() returned, the thread is done. Clean up.
-    crate::kernel::sched::exit()
+    trampoline_ptr(closure_ptr);
 }
 
 global_asm!(

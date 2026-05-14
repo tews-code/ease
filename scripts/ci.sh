@@ -15,14 +15,12 @@
 set -e
 
 ALLOCATOR="alloc-kalloc"
-SCHEDULER="sched-stride"
 TEST_SET="test-all"
 
 for arg in "$@"; do
     case "$arg" in
         --test=*)      TEST_SET="${arg#*=}" ;;
         --allocator=*) ALLOCATOR="${arg#*=}" ;;
-        --scheduler=*) SCHEDULER="${arg#*=}" ;;
         --help|-h)
             sed -n '2,14p' "$0"
             exit 0 ;;
@@ -39,20 +37,13 @@ case "$ALLOCATOR" in
        exit 1 ;;
 esac
 
-case "$SCHEDULER" in
-    sched-stride) ;;
-    *) echo "error: unknown scheduler '$SCHEDULER'" >&2
-       echo "       expected one of: sched-stride" >&2
-       exit 1 ;;
-esac
-
 # Focused mode: a non-default --test skips orthogonal slow stages (host
 # tests, miri, docs) so you can iterate rapidly on one feature. Pass
 # nothing for the full run.
 FOCUSED=0
 [ "$TEST_SET" != "test-all" ] && FOCUSED=1
 
-FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
+FEATURES="$TEST_SET,$ALLOCATOR"
 
 # Allocator modules (bump, freelist, slab, buddy, tier) are declared
 # unconditionally so the tier can pull in slab and buddy. That means every
@@ -63,7 +54,6 @@ FEATURES="$TEST_SET,$ALLOCATOR,$SCHEDULER"
 CLIPPY_EXTRA="-A dead-code"
 
 echo "Global allocator set to : $ALLOCATOR"
-echo "Scheduler set to        : $SCHEDULER"
 echo "Test set                : $TEST_SET"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 

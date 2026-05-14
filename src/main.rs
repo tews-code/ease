@@ -56,7 +56,7 @@ static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 // =============================================================================
 
 #[allow(dead_code)]
-fn shell_thread() -> ! {
+fn shell_thread() {
     let fb = FB_HANDOFF.lock().take().expect("FB already handed off");
     let console = shell::console::Console::new(fb);
     let mut shell = shell::Shell::new(console);
@@ -133,11 +133,9 @@ extern "C" fn main() -> ! {
     );
     assert!(id.is_some(), "could not spawn test runner thread");
 
-    // Bootstrap parks. The scheduler will pick `test_runner_thread`
-    // (lower pass than us at this point).
-    loop {
-        sched::sleep_until(u64::MAX);
-    }
+    // Bootstrap converts into the idle thread
+    sched::idle_thread();
+    unreachable!("Idle thread should never return");
 }
 
 /// Wrap `test_main` so it can be spawned as a thread entry.
@@ -156,14 +154,14 @@ extern "C" fn main() -> ! {
     println!("Hello from EASE HART{}!", crate::arch::cpu_id());
 
     #[allow(clippy::diverging_sub_expression)]
-    let Some(id) = sched::spawn(
-        shell_thread(),
+    let Some(_id) = sched::spawn(
+        shell_thread,
         #[allow(unreachable_code)]
         sched::PRIORITY_DEFAULT,
-        sched::StackClass::KB8,
+        sched::StackClass::KB16,
         sched::Qos::High,
     ) else {
-        println!("failed to lanuch shell");
+        panic!("failed to lanuch shell");
     };
 
     // Main drops into idle_thread

@@ -1,17 +1,19 @@
-//! Preemptive multitasking with round robin scheduling
+//! Preemptive multitasking with stride scheduling
 
-use core::alloc::Layout;
-use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU32, Ordering};
+use alloc::boxed::Box;
 
-use crate::arch::context::{Context, switch_to};
-use crate::arch::trap::TrapFrame;
-use crate::arch::{STACK_CANARY, cpu_id};
+use crate::arch::STACK_CANARY;
+use crate::arch::context::switch_to;
 use crate::board::HARTS_MAX;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::timer;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-const THREADS_MAX: usize = 32;
+use super::types::{
+    Deadline, HartState, HeapStack, PostSwitch, Qos, Stack, StackClass, State, THREADS_MAX,
+    ThreadControlBlock, ThreadHandle, ThreadsInner,
+};
+
 // Helper function to determine the HART boot threads in the threads array
 // To match hardware - HART0 using SRAM4 and HART1 using SRAM5
 // Note: all other threads have their stack in the heap
@@ -32,100 +34,7 @@ const LEEWAY_BASE: u64 = LEEWAY_BASE_US * timer::CYCLES_PER_US;
 const LEEWAY_MAX_US: u64 = 1_000_000;
 const LEEWAY_MAX: u64 = LEEWAY_MAX_US * timer::CYCLES_PER_US;
 
-static SCHEDULER: Scheduler = Scheduler::new();
-
-// Stack sizes must be power-of-two and aligned to their own size
-// This means that the stack base address is `size` aligned and can be found using a bitmask
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct StackClass(u8);
-
-#[allow(dead_code)]
-impl StackClass {
-    pub const KB1: Self = Self(10);
-    pub const KB2: Self = Self(11);
-    pub const KB4: Self = Self(12);
-    pub const KB8: Self = Self(13);
-    pub const KB16: Self = Self(14);
-    pub const KB32: Self = Self(15);
-    pub const KB64: Self = Self(16);
-    pub const KB128: Self = Self(17);
-
-    const _MIN_CLASS_SIZE_CHECK: () =
-        assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
-
-    const fn size(self) -> usize {
-        1usize << self.0
-    }
-
-    const fn mask(self) -> usize {
-        self.size() - 1
-    }
-
-    const fn align(self) -> usize {
-        self.size()
-    }
-
-    const fn layout(self) -> Layout {
-        match Layout::from_size_align(self.size(), self.align()) {
-            Ok(layout) => layout,
-            Err(_) => panic!("invalid layout"),
-        }
-    }
-}
-
-struct HeapStack;
-
-impl HeapStack {
-    // Allocates a thread stack from the heap and returns a pointer
-    // to the stack base
-    // Returns None if allocation fails
-    pub fn allocate(class: StackClass) -> Option<NonNull<u8>> {
-        NonNull::new(unsafe { alloc::alloc::alloc(class.layout()) })
-    }
-
-    // Forges a heap-based thread Context
-    // The thread entry function is stored in s0
-    // Returns the stack pointer
-    // Safety: stack_base must be class.size()-aligned and point to
-    // writeable memory of at least class.size() bytes
-    pub unsafe fn init_for_entry(
-        stack_base: NonNull<u8>,
-        class: StackClass,
-        entry: fn(),
-    ) -> *mut u8 {
-        // Safety: Caller has provided a valid stack base pointer
-        unsafe {
-            core::ptr::write(stack_base.as_ptr() as *mut usize, STACK_CANARY);
-        }
-        let context_ptr = unsafe {
-            stack_base
-                .as_ptr()
-                .add(class.size() - core::mem::size_of::<Context>()) as *mut Context
-        };
-        // Safety: context_ptr is derived from stack_base, and
-        // aligned because sizeof(Context) is a multiple of align(Context).
-        unsafe {
-            core::ptr::write_bytes(context_ptr, 0, 1); // writes 0 across one Context's worth of bytes
-            *context_ptr = Context::for_entry(entry);
-        }
-        context_ptr as *mut u8
-    }
-
-    // Deallocate the heap-backed thread stack.
-    // Safety: sp must point inside a stack region that was set up
-    // by init_for_entry and has not been deallocated.
-    // The caller transfers ownership of the sp; further use is UB.
-    unsafe fn deallocate(class: StackClass, sp: *mut u8) {
-        let base = sp.with_addr(sp.addr() & !class.mask());
-        unsafe { alloc::alloc::dealloc(base, class.layout()) };
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-struct Deadline {
-    min: u64,
-    fixed_leeway: Option<u64>, // None - use system default leeway
-}
+pub(super) static SCHEDULER: Scheduler = Scheduler::new();
 
 impl Deadline {
     // Helper function - returns the leeway in clint cycles
@@ -143,62 +52,15 @@ impl Deadline {
     }
 }
 
-#[derive(PartialEq, Debug)]
-enum PostSwitch {
-    Ready,
-    Sleeping(Deadline),
-    Dead,
-}
-
-#[derive(PartialEq, Debug)]
-enum State {
-    Avail,
-    Ready,
-    Running,
-    Switching(PostSwitch),
-    Sleeping(Deadline),
-}
-
-enum Stack {
-    Heap(StackClass), // Needs dealloc on thread exit
-    Fixed,            // Set by linker script
-}
-
-impl Stack {
-    // Returns the stack class based on the current Stack
-    const fn class(&self) -> StackClass {
-        match self {
-            Stack::Heap(c) => *c,
-            Stack::Fixed => StackClass::KB4,
-        }
-    }
-}
-
-pub enum Qos {
-    High,
-    Low,
-}
-
-struct ThreadControlBlock {
-    id: u32,
-    state: State,
-    sp: *mut u8,
-    stack: Option<Stack>,
-    qos: Qos,
-    priority: u8,             // Lower number is higher priority
-    pass: u64,                // The next ready thread with lowest pass wins
-    last_started_cycles: u64, // Cycle stamp from last switch
-}
-
 impl ThreadControlBlock {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             id: u32::MAX,
             state: State::Avail,
             sp: core::ptr::null_mut(),
             stack: None,
             qos: Qos::Low,
-            priority: PRIORITY_DEFAULT,
+            priority: PRIORITY_MIN,
             pass: 0,
             last_started_cycles: 0,
         }
@@ -249,31 +111,13 @@ impl ThreadControlBlock {
     }
 }
 
-struct HartState {
-    running_thread: usize,
-    switching_thread: Option<usize>,
-}
-
-struct ThreadsInner {
-    control_blocks: [ThreadControlBlock; THREADS_MAX],
-    hart_state: [HartState; HARTS_MAX],
-}
-
 impl ThreadsInner {
-    // Returns the hart_state for this thread
-    fn this_hart(&self) -> &HartState {
-        &self.hart_state[cpu_id()]
-    }
-
-    fn this_hart_mut(&mut self) -> &mut HartState {
-        &mut self.hart_state[cpu_id()]
-    }
-
     // Find a free thread slot
-    fn free_slot(&mut self) -> Option<&mut ThreadControlBlock> {
+    fn free_slot(&mut self) -> Option<(usize, &mut ThreadControlBlock)> {
         self.control_blocks
             .iter_mut()
-            .find(|tcb| tcb.state == State::Avail)
+            .enumerate()
+            .find(|(_, tcb)| tcb.state == State::Avail)
     }
 
     // Find the minimum current pass value among active, non-idle threads.
@@ -362,15 +206,16 @@ impl ThreadsInner {
     }
 
     // Get disjoint mutable TCBs for current and next
-    // Returns None if current and next are the same
+    // Given there is always an idle thread in Ready
+    // Panics if there is no idle thread, or idle calls reschedule
     fn pick_next_ready_mut(
         &mut self,
-    ) -> Option<(
+    ) -> (
         &mut ThreadControlBlock,
         usize,
         &mut ThreadControlBlock,
         usize,
-    )> {
+    ) {
         // Find current index
         let curr_idx = self.this_hart().running_thread;
         // Find next index
@@ -380,16 +225,14 @@ impl ThreadsInner {
             .enumerate()
             .filter(|(_, tcb)| tcb.state == State::Ready)
             .min_by_key(|(_, tcb)| tcb.pass)
-            .map(|(i, _)| i)?;
-        if curr_idx == next_idx {
-            return None;
-        };
+            .map(|(i, _)| i)
+            .expect("there must be at least one Ready thread - idle is missing");
         // Get disjoint TCBs
         let [curr, next] = self
             .control_blocks
             .get_disjoint_mut([curr_idx, next_idx])
             .expect("indices have been selected as disjoint");
-        Some((curr, curr_idx, next, next_idx))
+        (curr, curr_idx, next, next_idx)
     }
 
     // Get disjoint mutable TCBs for current and next
@@ -443,7 +286,7 @@ impl ThreadsInner {
 // Safety: All access to the TCB array elements is via a spin lock that disables interrupts
 unsafe impl Send for ThreadsInner {}
 
-struct Scheduler {
+pub(super) struct Scheduler {
     threads: IrqSpinLock<ThreadsInner>,
     run_cycles: [CounterU64; THREADS_MAX], // Outside of threads for lock-free read
 }
@@ -465,30 +308,12 @@ impl Scheduler {
     }
 
     // Set up the boot thread for each hart
-    //
-    // Hart 0's bootstrap runs the kernel main loop / shell / tests, so it's
-    // at PRIORITY_DEFAULT. Hart 1's bootstrap (and any further harts) run
-    // `idle_thread` and so are at PRIORITY_MIN. With time-weighted stride,
-    // pass advances proportional to `priority`, so having hart 0's bootstrap
-    // at PRIORITY_MIN caused its pass to climb 2× faster than partner
-    // threads, eventually starving the test runner.
-    fn bootstrap(&self, hartid: usize) {
+    pub(super) fn bootstrap(&self, hartid: usize) {
         let id = next_thread_id();
-        if hartid == 0 {
-            assert!(id == 0); // We want to make sure HART0 is bootstrapped first
-        } else {
-            assert!(id > 0);
-        }
-        let priority = if hartid == 0 {
-            PRIORITY_DEFAULT
-        } else {
-            PRIORITY_MIN
-        };
         let mut threads = self.threads.lock();
         threads.control_blocks[slot_for_boot(hartid)] = ThreadControlBlock {
             id,
             state: State::Running,
-            priority,
             sp: crate::arch::csr::regs::sp() as *mut u8,
             stack: Some(Stack::Fixed),
             last_started_cycles: timer::elapsed(),
@@ -498,7 +323,7 @@ impl Scheduler {
     }
 
     /// Helper function to clean up post switch threads
-    fn post_switch_cleanup(&self) {
+    pub(super) fn post_switch_cleanup(&self) {
         // After switch_to returns (on this thread's eventual resume),
         let mut threads = self.threads.lock();
         let switched_idx = threads
@@ -510,28 +335,50 @@ impl Scheduler {
             match threads.control_blocks[switched_idx].state {
                 State::Switching(PostSwitch::Ready) => State::Ready,
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
+                State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::Dead) => {
                     threads.control_blocks[switched_idx].release_stack();
                     threads.control_blocks[switched_idx] = ThreadControlBlock::new();
                     State::Avail
                 }
-                _ => panic!("Post switch but not in Switched state"),
+                _ => panic!("Post switch but not in not in switching state"),
             }
         };
         threads.control_blocks[switched_idx].state = new_state;
     }
 
     // Set up initial thread block and stack for a new thread
-    fn spawn(&self, entry: fn(), priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
+    pub(super) fn spawn<F: FnOnce() + Send + 'static>(
+        &self,
+        entry: F,
+        priority: u8,
+        class: StackClass,
+        qos: Qos,
+    ) -> Option<ThreadHandle> {
         // First allocate before locking
         let base = HeapStack::allocate(class)?;
-        let sp = unsafe { HeapStack::init_for_entry(base, class, entry) };
+        let b = Box::new(entry);
+        let closure_ptr = Box::into_raw(b) as *mut u8;
+        {
+            use crate::io::DirectWriter;
+            use core::fmt::Write;
+            let _ = writeln!(
+                DirectWriter,
+                "spawn: base={:p} size_of::<F>()={} closure_ptr={:p}",
+                base.as_ptr(),
+                core::mem::size_of::<F>(),
+                closure_ptr,
+            );
+        }
+
+        let sp =
+            unsafe { HeapStack::init_for_entry(base, class, closure_trampoline::<F>, closure_ptr) };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
         // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
-        let Some(tcb) = threads.free_slot() else {
+        let Some((idx, tcb)) = threads.free_slot() else {
             drop(threads);
             unsafe {
                 HeapStack::deallocate(class, sp);
@@ -549,16 +396,17 @@ impl Scheduler {
             pass: baseline,
             ..ThreadControlBlock::new()
         };
-        let id = tcb.id;
+        // Local variables to drop threads
+        let handle = ThreadHandle { id: tcb.id, idx };
         // Set the timer
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
-        Some(id)
+        Some(handle)
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
-    fn reschedule(&self, new_state: PostSwitch) {
+    pub(super) fn reschedule(&self, new_state: PostSwitch) {
         // Note - the closure body will contain switch_to, which is unusual
         // It's a non-local control transfer wearing the disguise of a function call.
         // It works correctly because the closure frame is preserved on the suspended thread's stack
@@ -571,14 +419,8 @@ impl Scheduler {
             threads.check_curr_canary();
             // Check if any threads have reached or passed their deadline
             let ready_count = threads.wake_sleeping_threads();
-            let earliest_deadline = threads.earliest_deadline();
             // Get current and next TCBs
-            let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_ready_mut() else {
-                // Current and next are the same, return
-                threads.set_next_timer(earliest_deadline, ready_count);
-                drop(threads);
-                return;
-            };
+            let (curr, curr_idx, next, next_idx) = threads.pick_next_ready_mut();
 
             // Ready to switch
             // Set current thread to the new state
@@ -613,7 +455,7 @@ impl Scheduler {
     /// Preempts from current thread to next thread
     ///
     /// Note: if only one thread is runnable returns early.
-    fn preempt(&self) {
+    pub(super) fn preempt(&self) {
         let mut threads = self.threads.lock();
         threads.check_curr_canary();
         // let sched = threads.wake_threads();
@@ -663,14 +505,14 @@ impl Scheduler {
     }
 
     /// Yields current thread
-    fn yield_now(&self) {
+    pub(super) fn yield_now(&self) {
         self.reschedule(PostSwitch::Ready);
     }
 
     /// Blocks until the timer has passed the deadline
     ///
     /// Time is measured in milliseconds
-    fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
+    pub(super) fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
         let deadline = Deadline {
             min: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
             fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(timer::CYCLES_PER_MS)),
@@ -680,7 +522,7 @@ impl Scheduler {
 
     /// Blocks for `deadline` milliseconds
     #[allow(dead_code)]
-    fn sleep(&self, deadline_ms: u64) {
+    pub(super) fn sleep(&self, deadline_ms: u64) {
         self.sleep_until(
             crate::kernel::timer::elapsed_ms().saturating_add(deadline_ms),
             None,
@@ -689,7 +531,7 @@ impl Scheduler {
 
     /// Blocks for `deadline` milliseconds
     #[allow(dead_code)]
-    fn sleep_with_leeway(&self, deadline_ms: u64, leeway_ms: u64) {
+    pub(super) fn sleep_with_leeway(&self, deadline_ms: u64, leeway_ms: u64) {
         let now_ms = crate::kernel::timer::elapsed_ms();
         self.sleep_until(now_ms.saturating_add(deadline_ms), Some(leeway_ms));
     }
@@ -699,13 +541,39 @@ impl Scheduler {
         self.run_cycles[tcb_idx].get()
     }
 
-    fn exit(&self) -> ! {
+    pub(super) fn exit(&self) -> ! {
         self.reschedule(PostSwitch::Dead);
         // reschedule switches away. If we get here, no other thread was
         // available to switch to, which means this thread is the only one
         // alive on this hart and we can't actually die. Panic — it's a
         // programmer error to call exit() on the last thread.
         unreachable!("exit() called but no other thread to switch to");
+    }
+
+    // Park the current thread
+    pub(super) fn park(&self) {
+        self.reschedule(PostSwitch::Blocked)
+    }
+
+    // Unpark the thread at index
+    pub(super) fn unpark(&self, handle: ThreadHandle) {
+        let mut threads = self.threads.lock();
+        if threads.control_blocks[handle.idx].state == State::Blocked
+            && threads.control_blocks[handle.idx].id == handle.id
+        {
+            // Note - does not deal with lost wakeup yet
+            threads.control_blocks[handle.idx].state = State::Ready;
+        }
+    }
+
+    /// Get the current thread handle
+    pub fn current_thread(&self) -> ThreadHandle {
+        let threads = self.threads.lock();
+        let idx = threads.this_hart().running_thread;
+        ThreadHandle {
+            id: threads.control_blocks[idx].id,
+            idx,
+        }
     }
 }
 
@@ -715,518 +583,9 @@ fn next_thread_id() -> u32 {
     COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
-pub fn idle_thread() {
-    loop {
-        crate::arch::wait_for_interrupt();
-    }
-}
-
-/// Spawn a new thread
-pub fn spawn(entry: fn(), priority: u8, class: StackClass, qos: Qos) -> Option<u32> {
-    SCHEDULER.spawn(entry, priority, class, qos)
-}
-
-/// Set up the boot thread
-pub fn bootstrap(hartid: usize) {
-    SCHEDULER.bootstrap(hartid);
-}
-
-/// Voluntarily yield the current thread
-pub fn yield_now() {
-    SCHEDULER.yield_now();
-}
-
-/// Blocks until the timer has passed the deadline
-/// Time is measured in milliseconds
-#[allow(dead_code)]
-pub fn sleep_until(deadline_ms: u64) {
-    SCHEDULER.sleep_until(deadline_ms, None);
-}
-
-/// Blocks for `deadline` millseconds
-#[allow(dead_code)]
-pub fn sleep(deadline_ms: u64) {
-    SCHEDULER.sleep(deadline_ms);
-}
-
-/// Blocks for `deadline` millseconds
-#[allow(dead_code)]
-pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
-    SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
-}
-
-/// Preempts thread
-pub fn preempt() {
-    SCHEDULER.preempt();
-}
-
-/// Get cycles of running thread
-#[allow(dead_code)]
-pub fn get_current_cycles(tcb_idx: usize) -> u64 {
-    SCHEDULER.get_current_cycles(tcb_idx)
-}
-
-/// Clean up switched status threads
-pub fn post_switch_cleanup() {
-    SCHEDULER.post_switch_cleanup();
-}
-
-/// Voluntarily terminate the current thread. Doesn't return.
-#[allow(dead_code)] // currently only used from test helpers
-pub fn exit() -> ! {
+/// Call exit at the end of a spawned closure
+extern "C" fn closure_trampoline<F: FnOnce() + Send + 'static>(entry_ptr: *mut u8) -> ! {
+    let e = unsafe { Box::from_raw(entry_ptr as *mut F) };
+    e(); // runs the closure exactly once and consumes both the closure and the Box.
     SCHEDULER.exit()
-}
-
-/// Check that this thread's stack canary is intact, without locking
-/// the scheduler. Safe to call from panic.
-///
-/// We don't know the current thread's stack class from inside a panic
-/// handler (the scheduler is potentially in an inconsistent state, and
-/// taking its lock would deadlock if we panicked while holding it).
-/// Instead, try each plausible class. A stack region of size S is
-/// S-aligned, so `sp & !(S - 1)` recovers its base — but only for the
-/// correct S. We try each `StackClass`; if any of them reads the canary
-/// value at its computed base, the canary is intact.
-///
-/// Why this is safe: `STACK_CANARY = 0xDEADBEEF` is a chosen-magic value.
-/// The probability of a "wrong" mask happening to point at memory that
-/// coincidentally contains `0xDEADBEEF` is ~5 / 2^32 ≈ 1e-9 — negligible.
-pub fn stack_ok_panic() -> bool {
-    let sp_addr = crate::arch::csr::regs::sp();
-    // Powers-of-two shifts matching StackClass::KB1..KB16.
-    const STACK_SHIFTS: [u32; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
-    for &shift in &STACK_SHIFTS {
-        let mask = (1usize << shift) - 1;
-        let base = (sp_addr & !mask) as *const usize;
-        // SAFETY: `base` is some address in the kernel's address space.
-        // Reading a `usize` there is safe under our flat memory model —
-        // we have no virtual memory, no MMU exceptions. `read_volatile`
-        // discourages the compiler from reordering this against other
-        // panic-handler diagnostics.
-        if unsafe { core::ptr::read_volatile(base) } == STACK_CANARY {
-            return true;
-        }
-    }
-    false
-}
-
-// =============================================================================
-// Smoke tests + cycle-count benchmark
-// =============================================================================
-//
-// Tests pin down observable behaviour rather than implementation details, so
-// they should survive future rung changes (preemption, priorities, etc.).
-//
-// The cycle-count benchmark prints a single line; no pass/fail. Useful as a
-// number to eyeball across rungs. Note that with the test-sched background
-// threads (thread1/thread2 spawned in kernel_init), the measured round-trip
-// includes some time in those threads — it's "yield round-trip in this
-// system" rather than bare context-switch cost. Still informative.
-
-#[cfg(all(test, feature = "test-sched"))]
-mod tests {
-    use crate::kernel::sched::{Qos, StackClass};
-
-    use super::PRIORITY_DEFAULT;
-    use core::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Counter the partner thread bumps each iteration. We only assert it
-    /// INCREASES during a test, so the absolute value across tests is fine.
-    static PARTNER_COUNT: AtomicUsize = AtomicUsize::new(0);
-    /// Set to 1 once the partner has been spawned; ensure-once across tests.
-    static PARTNER_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-
-    fn partner_thread() {
-        loop {
-            PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
-            crate::kernel::sched::yield_now();
-        }
-    }
-
-    fn ensure_partner_spawned() {
-        if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(
-                partner_thread,
-                PRIORITY_DEFAULT,
-                StackClass::KB2,
-                Qos::High,
-            );
-        }
-    }
-
-    /// Verify that `exit()` actually runs the dying-thread's last
-    /// instructions, then cleans up its TCB slot so it can be reused.
-    /// Spawns a tiny thread that flips a flag and exits; after a brief
-    /// wait, the flag must be set. Slot reuse is exercised implicitly:
-    /// spawning the helper THREADS_MAX times across a test session would
-    /// fail if exit() didn't recycle slots.
-    #[test_case]
-    fn exit_runs_and_recycles_slot() {
-        static DONE: AtomicUsize = AtomicUsize::new(0);
-        fn marker_then_exit() {
-            DONE.store(1, Ordering::Relaxed);
-            crate::kernel::sched::exit()
-        }
-        ensure_partner_spawned();
-        let id = crate::kernel::sched::spawn(
-            marker_then_exit,
-            PRIORITY_DEFAULT,
-            StackClass::KB2,
-            Qos::Low,
-        );
-        assert!(id.is_some(), "spawn failed (no free slot?)");
-        // Give the thread time to run, mark, and exit.
-        crate::kernel::sched::sleep(50);
-        assert_eq!(
-            DONE.load(Ordering::Relaxed),
-            1,
-            "spawned thread did not run to completion",
-        );
-    }
-
-    /// Smoke test 1: yield_now lets at least one other thread make progress.
-    /// Catches "scheduler never switches" or "switch corrupts state."
-    #[test_case]
-    fn yield_makes_progress() {
-        ensure_partner_spawned();
-        let before = PARTNER_COUNT.load(Ordering::Relaxed);
-        for _ in 0..10 {
-            crate::kernel::sched::yield_now();
-        }
-        let after = PARTNER_COUNT.load(Ordering::Relaxed);
-        assert!(
-            after > before,
-            "partner thread didn't run during yields (before={}, after={})",
-            before,
-            after
-        );
-    }
-
-    /// Smoke test 2: sched::sleep blocks for approximately the requested
-    /// duration. Catches "sleep doesn't actually block" and "sleep returns
-    /// late." Bound is tight (~one slice quantum of slack) since the
-    /// scheduler is tickless with sub-quantum sleep precision.
-    #[test_case]
-    fn sleep_blocks_for_duration() {
-        ensure_partner_spawned();
-        let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep(100);
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
-        assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
-        assert!(elapsed <= 118, "sleep too long: {} ms", elapsed);
-    }
-
-    /// Step 3 verification: a sub-slice-quantum sleep wakes at its actual
-    /// deadline, not the next slice boundary. Catches a regression where
-    /// reschedule fails to recompute the earliest sleeper deadline after
-    /// registering the current thread's new sleep state — without that
-    /// recompute, sleep(5) would round up to a slice boundary (~10ms+).
-    /// The upper bound has slack for UART drain noise from the test runner's
-    /// per-test name print (~6ms at 115200 baud) plus general overhead.
-    #[test_case]
-    fn sleep_below_quantum_wakes_at_deadline() {
-        use core::fmt::Write;
-        ensure_partner_spawned();
-        let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep_with_leeway(5, 0);
-        let post_sleep = crate::kernel::timer::elapsed_ms();
-        let elapsed = post_sleep - start;
-        assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
-        assert!(
-            elapsed <= 15,
-            "sub-quantum sleep rounded to slice boundary: {} ms",
-            elapsed
-        );
-    }
-
-    /// T1: a tight-deadline sleeper should wake within its own window even
-    /// when another sleeper with a much wider leeway window is also pending.
-    /// Guards the `earliest_deadline` contract: the tightest *upper bound* `b`
-    /// wins, not the smallest `min`. A pre-fix `earliest_deadline` that sorted
-    /// lexicographically on `(min, b)` could pick a long-leeway neighbor and
-    /// pin the timer to that neighbor's far-future `b`. In practice the
-    /// coalescing/yield path tends to self-correct within microseconds, so
-    /// this test is a contract guard for future regressions rather than a
-    /// direct demonstration of an observable bug. Pre- and post-fix both
-    /// pass under normal scheduling.
-    #[test_case]
-    fn tight_deadline_wakes_with_long_leeway_neighbor() {
-        static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        fn long_leeway_sleeper() {
-            // Short min, huge leeway: window [now+5ms, now+1005ms].
-            crate::kernel::sched::sleep_with_leeway(5, 1000);
-            // Exit cleanly so the slot is recycled and we don't leave a
-            // ghost thread disturbing later tests' scheduling.
-            crate::kernel::sched::exit()
-        }
-        ensure_partner_spawned();
-        if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(
-                long_leeway_sleeper,
-                PRIORITY_DEFAULT,
-                StackClass::KB2,
-                Qos::Low,
-            );
-        }
-        // Give the background sleeper a moment to reach its sleep_with_leeway.
-        crate::kernel::sched::sleep(2);
-        let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep_with_leeway(20, 0);
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
-        // Bound is generous: this test is a contract guard for future
-        // regressions in the earliest_deadline / coalescing path, not a tight
-        // jitter measurement. A real regression (e.g. timer pinned to the
-        // neighbor's far-future `b`) would blow past 100ms+.
-        assert!(
-            elapsed <= 50,
-            "tight sleeper dragged by long-leeway neighbor: {} ms",
-            elapsed
-        );
-    }
-
-    /// T2: a neighbor sleeper with extreme `fixed_leeway` (passed as
-    /// `u64::MAX` at the public API) must not corrupt the wake math for
-    /// other sleepers. Without saturating arithmetic, `leeway_ms *
-    /// CYCLES_PER_MS` and `d.min + leeway` both wrap, potentially producing
-    /// a small bogus `wakeup_deadline` that `earliest_deadline` picks as
-    /// the global min, dragging tight sleepers' wake times forward. With
-    /// `saturating_mul` and `saturating_add` everywhere, the neighbor's
-    /// effective deadline pins to `u64::MAX` and falls out of the `.min()`,
-    /// leaving the tight sleeper undisturbed.
-    #[test_case]
-    fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
-        static SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        fn huge_leeway_sleeper() {
-            // u64::MAX in both args — exercises every saturating site on the
-            // path from public API to the Deadline struct.
-            crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
-            crate::kernel::sched::exit()
-        }
-        ensure_partner_spawned();
-        if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(
-                huge_leeway_sleeper,
-                PRIORITY_DEFAULT,
-                StackClass::KB2,
-                Qos::Low,
-            );
-        }
-        // Give the background sleeper a moment to reach its sleep call.
-        crate::kernel::sched::sleep(2);
-        let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep_with_leeway(20, 0);
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
-        // Lower bound catches "bogus wrapped wakeup pulled main forward"
-        // (the original arithmetic-overflow failure mode).
-        assert!(
-            elapsed >= 5,
-            "tight sleeper woke too early — likely wrapped neighbor deadline: {} ms",
-            elapsed
-        );
-        // Upper bound catches "neighbor dragged main past slice boundary".
-        assert!(
-            elapsed <= 50,
-            "tight sleeper delayed by huge-leeway neighbor: {} ms",
-            elapsed
-        );
-    }
-
-    /// T3: a sleep-spammer (busy + short sleep loop) must not get
-    /// disproportionately more CPU than a pure CPU-bound thread of equal
-    /// priority. Pre-fix (per-turn stride + unconditional switch-on-wake
-    /// in `preempt`), the spammer triggered a switch on every wake and
-    /// took ~67% of CPU at 2:1 over the hog. With time-weighted stride +
-    /// pass-aware preempt + upfront stride application, the spammer's
-    /// pass advances proportional to actual CPU consumed, so the attack
-    /// no longer pays off.
-    ///
-    /// Iter counters are loop-iteration counts. Both threads run the same
-    /// per-iter work (one atomic fetch_add), so the iter ratio equals the
-    /// CPU-time ratio.
-    ///
-    /// What this test does NOT guard: the dual problem of the spammer
-    /// being under-served because slice granularity is too coarse to let
-    /// sub-slice runs catch up to a long-running hog. Empirically the
-    /// post-fix ratio is ~20:1 hog:spammer, which would require sub-slice
-    /// preemption to improve. That's a separate fairness-precision
-    /// concern, not the wake-spam attack this test exists to guard.
-    #[test_case]
-    fn fair_stride_resists_wake_spammer() {
-        static T3_SPAMMER_ITERS: AtomicUsize = AtomicUsize::new(0);
-        static T3_HOG_ITERS: AtomicUsize = AtomicUsize::new(0);
-        static T3_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        // Active while the test is measuring. Cleared at the end so the
-        // contenders park (yield-loop) instead of hogging CPU during
-        // subsequent tests.
-        static T3_ACTIVE: AtomicUsize = AtomicUsize::new(1);
-
-        fn t3_spammer() {
-            while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
-                for _ in 0..10_000 {
-                    T3_SPAMMER_ITERS.fetch_add(1, Ordering::Relaxed);
-                }
-                crate::kernel::sched::sleep(1);
-            }
-            crate::kernel::sched::exit()
-        }
-
-        fn t3_hog() {
-            while T3_ACTIVE.load(Ordering::Relaxed) != 0 {
-                for _ in 0..10_000 {
-                    T3_HOG_ITERS.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            crate::kernel::sched::exit()
-        }
-
-        if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(t3_spammer, PRIORITY_DEFAULT, StackClass::KB2, Qos::Low);
-            crate::kernel::sched::spawn(t3_hog, PRIORITY_DEFAULT, StackClass::KB2, Qos::Low);
-        }
-        // Warmup so the contenders stabilise before we sample.
-        crate::kernel::sched::sleep(50);
-        let s_start = T3_SPAMMER_ITERS.load(Ordering::Relaxed);
-        let h_start = T3_HOG_ITERS.load(Ordering::Relaxed);
-        crate::kernel::sched::sleep(500);
-        let s_delta = T3_SPAMMER_ITERS.load(Ordering::Relaxed) - s_start;
-        let h_delta = T3_HOG_ITERS.load(Ordering::Relaxed) - h_start;
-
-        // Park the contenders before asserting, so a panic on assertion
-        // failure still leaves the test threads parked.
-        T3_ACTIVE.store(0, Ordering::Relaxed);
-
-        assert!(s_delta > 0, "spammer made no progress");
-        assert!(h_delta > 0, "hog made no progress");
-
-        // Original wake-spam bug produced ~2:1 spammer:hog. The 3:2 bound
-        // catches it with margin while tolerating per-run scheduler jitter.
-        assert!(
-            s_delta * 2 <= h_delta * 3,
-            "spammer dominated (wake-spam regression?): spammer={}, hog={}",
-            s_delta,
-            h_delta
-        );
-    }
-
-    /// T4: a Qos::High sleeper wakes near its deadline even when a
-    /// Qos::Low neighbor has a much wider leeway window. Verifies that
-    /// the QoS-derived leeway formula in `Deadline::leeway` differentiates
-    /// the two classes, and that `earliest_deadline` picks the tight
-    /// upper bound so the wider Low neighbor doesn't drag the timer.
-    ///
-    /// Setup: Low sleeper does sleep(200), getting ~25 ms QoS-derived
-    /// leeway (window [200, 225] ms). High measurer does sleep(20),
-    /// getting near-zero leeway (window [20, ~20] ms). The Low sleeper's
-    /// window starts past the measurer's deadline, so coalescing leaves
-    /// the measurer alone.
-    #[test_case]
-    fn qos_high_wakes_precisely_with_low_neighbor() {
-        static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-        static MEASURER_ELAPSED: AtomicUsize = AtomicUsize::new(0);
-        static MEASURER_DONE: AtomicUsize = AtomicUsize::new(0);
-
-        fn t4_low_neighbor() {
-            // Qos::Low + long sleep gives a wide leeway window.
-            crate::kernel::sched::sleep(200);
-            crate::kernel::sched::exit()
-        }
-
-        fn t4_high_measurer() {
-            let start = crate::kernel::timer::elapsed_ms();
-            crate::kernel::sched::sleep(20);
-            let elapsed = crate::kernel::timer::elapsed_ms() - start;
-            MEASURER_ELAPSED.store(elapsed as usize, Ordering::Relaxed);
-            MEASURER_DONE.store(1, Ordering::Relaxed);
-            crate::kernel::sched::exit()
-        }
-
-        ensure_partner_spawned();
-        if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-            crate::kernel::sched::spawn(
-                t4_low_neighbor,
-                PRIORITY_DEFAULT,
-                StackClass::KB2,
-                Qos::Low,
-            );
-        }
-        // Brief settle so the Low neighbor reaches its sleep before we
-        // spawn the measurer; otherwise it's just main vs measurer.
-        crate::kernel::sched::sleep(2);
-
-        crate::kernel::sched::spawn(
-            t4_high_measurer,
-            PRIORITY_DEFAULT,
-            StackClass::KB2,
-            Qos::High,
-        );
-
-        // Wait for the measurer to finish its 20 ms sleep and record.
-        crate::kernel::sched::sleep(60);
-        assert_eq!(
-            MEASURER_DONE.load(Ordering::Relaxed),
-            1,
-            "Qos::High measurer didn't finish in time"
-        );
-        let elapsed = MEASURER_ELAPSED.load(Ordering::Relaxed);
-        assert!(elapsed >= 20, "Qos::High sleep too short: {} ms", elapsed);
-        // Qos::High's formula yields essentially zero leeway for short
-        // sleeps. Tolerance covers scheduling jitter and the discrete
-        // `elapsed_ms` granularity, not aggressive leeway.
-        assert!(
-            elapsed <= 40,
-            "Qos::High wake delayed (likely pulled by Low neighbor): {} ms",
-            elapsed
-        );
-    }
-
-    /// Smoke test 3: sleep_until with a past deadline returns immediately.
-    /// Catches the wake-check edge case — deadline <= now should fire on the
-    /// first reschedule iteration, never reach the wfi loop.
-    /// Tolerance is one slice quantum (~8 ms) — `elapsed_ms` is ms-granular
-    /// and the wake check happens during the next reschedule.
-    #[test_case]
-    fn sleep_until_past_returns_quickly() {
-        ensure_partner_spawned();
-        let now = crate::kernel::timer::elapsed_ms();
-        let deadline = now.saturating_sub(20);
-        let start = crate::kernel::timer::elapsed_ms();
-        crate::kernel::sched::sleep_until(deadline);
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
-        assert!(
-            elapsed <= 15,
-            "past deadline should return quickly, took {} ms",
-            elapsed
-        );
-    }
-
-    /// Benchmark: average yield_now round-trip cycles. No assertion.
-    /// Reports cpu (this thread only) and wall (includes partner thread).
-    #[cfg(feature = "test-bench")]
-    #[test_case]
-    fn sched_benchmarks() {
-        use crate::bench;
-        use crate::println;
-
-        println!();
-        println!("====== SCHEDULER ====== ");
-        println!();
-
-        ensure_partner_spawned();
-        const N: u32 = 1000;
-        let c = bench::measure(|| {
-            for _ in 0..N {
-                crate::kernel::sched::yield_now();
-            }
-        });
-        println!(
-            "  yield_now round-trip: cpu={} wall={} cycles/call ({} calls)",
-            c.cpu / N as u64,
-            c.wall / N as u64,
-            N
-        );
-
-        println!();
-        println!("===================== ");
-        println!();
-    }
 }
