@@ -117,6 +117,54 @@ mod kernel {
     pub mod alloc;
     pub mod collection;
     pub mod sync;
+
+    #[allow(dead_code)]
+    pub mod sched {
+
+        #[derive(Clone, Copy)]
+        pub struct ThreadHandle {
+            pub id: u32,
+            pub idx: usize,
+        }
+
+        impl ThreadHandle {
+            pub fn idx(&self) -> usize {
+                self.idx
+            }
+        }
+
+        pub fn current_thread() -> ThreadHandle {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn set_next_waiter(_handle: &ThreadHandle, _next: Option<ThreadHandle>) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn get_next_waiter(_thread: &ThreadHandle) -> Option<ThreadHandle> {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn park() {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn park_if_blocked() {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn unpark(_handle: &ThreadHandle) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn unpark_by_index(_idx: usize) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        pub fn set_self_blocked() {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+    }
 }
 
 // Pull the fs module tree in directly via fs/mod.rs (which loads bpb,

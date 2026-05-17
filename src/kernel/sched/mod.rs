@@ -75,20 +75,47 @@ pub fn post_switch_cleanup() {
 /// Voluntarily terminate the current thread. Doesn't return.
 #[allow(dead_code)] // currently only used from test helpers
 pub fn exit() -> ! {
-    SCHEDULER.exit()
+    SCHEDULER.exit();
 }
 
 /// Park the current thread
+///
+/// Note this can race. For race-free use `park_if_blocked`
 pub fn park() {
-    SCHEDULER.park()
+    SCHEDULER.park();
 }
 
-/// Park the current thread by thread index
-pub fn unpark(handle: ThreadHandle) {
-    SCHEDULER.unpark(handle)
+/// Park the current thread if it is in Blocked state
+pub fn park_if_blocked() {
+    SCHEDULER.park_if_blocked();
+}
+
+/// Unpark the current thread by thread handle
+pub fn unpark(handle: &ThreadHandle) {
+    SCHEDULER.unpark(handle);
 }
 
 /// Get a handle to the thread
 pub fn current_thread() -> ThreadHandle {
     SCHEDULER.current_thread()
+}
+
+/// Set the waiter tcb index
+pub fn set_next_waiter(handle: &ThreadHandle, next: Option<ThreadHandle>) {
+    SCHEDULER.set_next_waiter(handle, next);
+}
+
+/// Get waiter tcb index
+pub fn get_next_waiter(handle: &ThreadHandle) -> Option<ThreadHandle> {
+    SCHEDULER.get_next_waiter(handle)
+}
+
+/// Unpark using TCB index instead of thread handle
+pub fn unpark_by_index(idx: usize) {
+    SCHEDULER.unpark_by_index(idx);
+}
+
+/// Set this thread to blocked state without rescheduling
+pub fn set_self_blocked() {
+    SCHEDULER.set_self_blocked()
 }

@@ -63,6 +63,7 @@ impl ThreadControlBlock {
             priority: PRIORITY_MIN,
             pass: 0,
             last_started_cycles: 0,
+            next_waiter: None,
         }
     }
 
@@ -359,17 +360,6 @@ impl Scheduler {
         let base = HeapStack::allocate(class)?;
         let b = Box::new(entry);
         let closure_ptr = Box::into_raw(b) as *mut u8;
-        {
-            use crate::io::DirectWriter;
-            use core::fmt::Write;
-            let _ = writeln!(
-                DirectWriter,
-                "spawn: base={:p} size_of::<F>()={} closure_ptr={:p}",
-                base.as_ptr(),
-                core::mem::size_of::<F>(),
-                closure_ptr,
-            );
-        }
 
         let sp =
             unsafe { HeapStack::init_for_entry(base, class, closure_trampoline::<F>, closure_ptr) };
@@ -406,7 +396,10 @@ impl Scheduler {
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
-    pub(super) fn reschedule(&self, new_state: PostSwitch) {
+    // If `currrent_state` is Some(State), reschedule only takes place if the
+    // current thread state matches; if `current_state` is None then reschedule
+    // unconditionally
+    pub(super) fn reschedule(&self, current_state: Option<State>, new_state: PostSwitch) {
         // Note - the closure body will contain switch_to, which is unusual
         // It's a non-local control transfer wearing the disguise of a function call.
         // It works correctly because the closure frame is preserved on the suspended thread's stack
@@ -417,6 +410,13 @@ impl Scheduler {
             // across the switch and block other harts/threads from rescheduling.
             let mut threads = self.threads.lock();
             threads.check_curr_canary();
+            // First check if current state matches pre-condition
+            if let Some(state) = current_state {
+                let idx = threads.this_hart().running_thread;
+                if threads.control_blocks[idx].state != state {
+                    return;
+                }
+            }
             // Check if any threads have reached or passed their deadline
             let ready_count = threads.wake_sleeping_threads();
             // Get current and next TCBs
@@ -506,7 +506,7 @@ impl Scheduler {
 
     /// Yields current thread
     pub(super) fn yield_now(&self) {
-        self.reschedule(PostSwitch::Ready);
+        self.reschedule(None, PostSwitch::Ready);
     }
 
     /// Blocks until the timer has passed the deadline
@@ -517,7 +517,7 @@ impl Scheduler {
             min: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
             fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(timer::CYCLES_PER_MS)),
         };
-        self.reschedule(PostSwitch::Sleeping(deadline));
+        self.reschedule(None, PostSwitch::Sleeping(deadline));
     }
 
     /// Blocks for `deadline` milliseconds
@@ -542,7 +542,7 @@ impl Scheduler {
     }
 
     pub(super) fn exit(&self) -> ! {
-        self.reschedule(PostSwitch::Dead);
+        self.reschedule(None, PostSwitch::Dead);
         // reschedule switches away. If we get here, no other thread was
         // available to switch to, which means this thread is the only one
         // alive on this hart and we can't actually die. Panic — it's a
@@ -552,11 +552,16 @@ impl Scheduler {
 
     // Park the current thread
     pub(super) fn park(&self) {
-        self.reschedule(PostSwitch::Blocked)
+        self.reschedule(None, PostSwitch::Blocked);
+    }
+
+    // Park the current thread if it is in blocked state
+    pub(super) fn park_if_blocked(&self) {
+        self.reschedule(Some(State::Blocked), PostSwitch::Blocked);
     }
 
     // Unpark the thread at index
-    pub(super) fn unpark(&self, handle: ThreadHandle) {
+    pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
         if threads.control_blocks[handle.idx].state == State::Blocked
             && threads.control_blocks[handle.idx].id == handle.id
@@ -574,6 +579,39 @@ impl Scheduler {
             id: threads.control_blocks[idx].id,
             idx,
         }
+    }
+
+    /// Sets the TCB's next_waiter for the thread the handle points to.
+    pub fn set_next_waiter(&self, handle: &ThreadHandle, next: Option<ThreadHandle>) {
+        let mut threads = self.threads.lock();
+        if threads.control_blocks[handle.idx].id == handle.id {
+            threads.control_blocks[handle.idx].next_waiter = next;
+        }
+    }
+
+    /// Get waiter tcb index
+    pub fn get_next_waiter(&self, handle: &ThreadHandle) -> Option<ThreadHandle> {
+        let threads = self.threads.lock();
+        if threads.control_blocks[handle.idx].id == handle.id {
+            threads.control_blocks[handle.idx].next_waiter
+        } else {
+            None
+        }
+    }
+
+    /// Unpark a thread by TCB index
+    pub fn unpark_by_index(&self, idx: usize) {
+        let threads = self.threads.lock();
+        if threads.control_blocks[idx].state == State::Blocked {
+            let _ = threads.control_blocks[idx].state == State::Ready;
+        }
+    }
+
+    /// Set this thread to blocked state without rescheduling
+    pub fn set_self_blocked(&self) {
+        let current = self.current_thread();
+        let mut threads = self.threads.lock();
+        threads.control_blocks[current.idx].state = State::Blocked;
     }
 }
 

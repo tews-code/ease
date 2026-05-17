@@ -189,6 +189,7 @@ pub(super) struct ThreadControlBlock {
     pub(super) priority: u8,             // Lower number is higher priority
     pub(super) pass: u64,                // The next ready thread with lowest pass wins
     pub(super) last_started_cycles: u64, // Cycle stamp from last switch
+    pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
 }
 
 pub(super) struct HartState {
@@ -221,5 +222,9 @@ pub struct ThreadHandle {
 impl ThreadHandle {
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    pub fn idx(&self) -> usize {
+        self.idx
     }
 }
