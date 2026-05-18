@@ -603,65 +603,583 @@ fn mutex_high_contention_stress() {
 /// holding it. A second thread tries to acquire — it should *park* (not
 /// busy-spin) until the holder releases. Verifies that contenders actually
 /// reach the slow path's park() rather than spinning forever, and that the
-/// release path's unpark wakes them. Indirectly proves blocking happens by
-/// measuring contender latency: if the contender spun rather than parked,
-/// it would still acquire ~immediately after release; if it parked
-/// correctly, the acquire latency reflects the holder's full sleep
-/// duration.
+/// release path's unpark wakes them.
+///
+/// Records timestamps from BOTH sides (holder records its own sleep
+/// duration and release time; contender records its own start and
+/// acquire time) so a failure panic shows exactly where the missing
+/// milliseconds went. The historical failure mode is "contender acquired
+/// in 70-79 ms instead of >=80 ms"; the diagnostic breakdown
+/// distinguishes "holder's sleep was short" from "contender's start
+/// was recorded late" from "everything looks fine and the bound is
+/// wrong".
+///
+/// All times reported in the panic are relative to scenario T0 (just
+/// before holder spawn) so the spacing is human-readable.
 #[test_case]
 fn mutex_holder_sleep_parks_contender() {
     const HOLD_MS: u64 = 100;
     static M: crate::kernel::sync::Mutex<u32> = crate::kernel::sync::Mutex::new(0);
+    static T0: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_LOCKED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_SLEEP_STARTED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_SLEEP_ENDED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_RELEASED_AT: AtomicUsize = AtomicUsize::new(0);
+    static CONTENDER_STARTED_AT: AtomicUsize = AtomicUsize::new(0);
+    static CONTENDER_ACQUIRED_AT: AtomicUsize = AtomicUsize::new(0);
     static CONTENDER_DONE: AtomicUsize = AtomicUsize::new(0);
-    static CONTENDER_LATENCY_MS: AtomicUsize = AtomicUsize::new(0);
+    static MAIN_AFTER_SLEEP10_AT: AtomicUsize = AtomicUsize::new(0);
+    static MAIN_AFTER_SPAWN_CONTENDER_AT: AtomicUsize = AtomicUsize::new(0);
 
     *M.lock() = 0;
-    CONTENDER_DONE.store(0, Ordering::Relaxed);
-    CONTENDER_LATENCY_MS.store(0, Ordering::Relaxed);
+    for s in [
+        &T0,
+        &HOLDER_LOCKED_AT,
+        &HOLDER_SLEEP_STARTED_AT,
+        &HOLDER_SLEEP_ENDED_AT,
+        &HOLDER_RELEASED_AT,
+        &CONTENDER_STARTED_AT,
+        &CONTENDER_ACQUIRED_AT,
+        &CONTENDER_DONE,
+        &MAIN_AFTER_SLEEP10_AT,
+        &MAIN_AFTER_SPAWN_CONTENDER_AT,
+    ] {
+        s.store(0, Ordering::Relaxed);
+    }
 
     fn holder() {
         let mut g = M.lock();
+        HOLDER_LOCKED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
         *g = 1;
+        let sleep_start = crate::kernel::timer::elapsed_ms();
+        HOLDER_SLEEP_STARTED_AT.store(sleep_start as usize, Ordering::Relaxed);
         crate::kernel::sched::sleep(HOLD_MS);
+        HOLDER_SLEEP_ENDED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
         *g = 2;
+        HOLDER_RELEASED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
         // Drop the guard; the contender should be parked and get woken.
     }
 
     fn contender() {
         let start = crate::kernel::timer::elapsed_ms();
+        CONTENDER_STARTED_AT.store(start as usize, Ordering::Relaxed);
         let g = M.lock();
-        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        let acquired = crate::kernel::timer::elapsed_ms();
+        CONTENDER_ACQUIRED_AT.store(acquired as usize, Ordering::Relaxed);
         // We should see value == 2 (set by holder before release).
         assert_eq!(*g, 2, "contender saw stale value (memory ordering)");
-        CONTENDER_LATENCY_MS.store(elapsed as usize, Ordering::Relaxed);
         CONTENDER_DONE.store(1, Ordering::Relaxed);
     }
 
     ensure_partner_spawned();
+    T0.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
     let id1 = crate::kernel::sched::spawn(holder, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
     assert!(id1.is_some(), "holder spawn failed");
     // Brief delay so holder definitely grabs the lock first.
     crate::kernel::sched::sleep(10);
+    MAIN_AFTER_SLEEP10_AT.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
     let id2 = crate::kernel::sched::spawn(contender, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
     assert!(id2.is_some(), "contender spawn failed");
+    MAIN_AFTER_SPAWN_CONTENDER_AT.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
 
     // Wait for contender to complete.
-    let start = crate::kernel::timer::elapsed_ms();
+    let wait_start = crate::kernel::timer::elapsed_ms();
     while CONTENDER_DONE.load(Ordering::Relaxed) == 0 {
         crate::kernel::sched::sleep(10);
-        if crate::kernel::timer::elapsed_ms() - start > 1000 {
+        if crate::kernel::timer::elapsed_ms() - wait_start > 1000 {
             panic!("contender did not acquire lock");
         }
     }
 
-    let latency = CONTENDER_LATENCY_MS.load(Ordering::Relaxed) as u64;
+    let t0 = T0.load(Ordering::Relaxed);
+    let hlocked = HOLDER_LOCKED_AT.load(Ordering::Relaxed);
+    let hsleep_start = HOLDER_SLEEP_STARTED_AT.load(Ordering::Relaxed);
+    let hsleep_end = HOLDER_SLEEP_ENDED_AT.load(Ordering::Relaxed);
+    let hreleased = HOLDER_RELEASED_AT.load(Ordering::Relaxed);
+    let cstarted = CONTENDER_STARTED_AT.load(Ordering::Relaxed);
+    let cacquired = CONTENDER_ACQUIRED_AT.load(Ordering::Relaxed);
+    let main_after_sleep10 = MAIN_AFTER_SLEEP10_AT.load(Ordering::Relaxed);
+    let main_after_spawn = MAIN_AFTER_SPAWN_CONTENDER_AT.load(Ordering::Relaxed);
+
+    let latency = cacquired - cstarted;
+    let holder_sleep_duration = hsleep_end - hsleep_start;
     // Holder sleeps HOLD_MS while holding. Contender should wait at least
     // most of that. Allow generous slack for scheduling jitter.
     assert!(
-        latency >= HOLD_MS - 20,
-        "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking",
+        latency >= HOLD_MS as usize - 20,
+        "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking.\n  \
+         T0={} ms (reference). All times below are ms-since-T0.\n  \
+         holder_locked          @ +{} ms\n  \
+         holder_sleep_started   @ +{} ms\n  \
+         holder_sleep_ended     @ +{} ms  (sleep_duration={} ms, requested={} ms)\n  \
+         holder_released        @ +{} ms\n  \
+         main_after_sleep10     @ +{} ms  (requested 10 ms)\n  \
+         main_after_spawn_contender @ +{} ms\n  \
+         contender_started      @ +{} ms\n  \
+         contender_acquired     @ +{} ms",
         latency,
-        HOLD_MS
+        HOLD_MS,
+        t0,
+        hlocked - t0,
+        hsleep_start - t0,
+        hsleep_end - t0,
+        holder_sleep_duration,
+        HOLD_MS,
+        hreleased - t0,
+        main_after_sleep10 - t0,
+        main_after_spawn - t0,
+        cstarted - t0,
+        cacquired - t0,
+    );
+}
+
+/// Direct sleep-precision test: a single dedicated thread records its OWN
+/// sleep duration while the partner yield-loop runs in the background.
+/// This isolates "is sleep itself short?" from contender measurement
+/// noise. If `mutex_holder_sleep_parks_contender` fails with a short
+/// `holder_sleep_duration`, this test should fail too.
+///
+/// Bound is tighter than `sleep_blocks_for_duration` (which runs from
+/// the main test runner thread) because this thread has no other
+/// responsibilities — its measured elapsed should be dominated by the
+/// sleep itself, not by per-test setup/teardown noise.
+#[test_case]
+fn sleep_precision_dedicated_thread() {
+    const SLEEP_MS: u64 = 100;
+    static MEASURED_MS: AtomicUsize = AtomicUsize::new(0);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    MEASURED_MS.store(0, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+
+    fn sleeper() {
+        let start = crate::kernel::timer::elapsed_ms();
+        crate::kernel::sched::sleep(SLEEP_MS);
+        let elapsed = crate::kernel::timer::elapsed_ms() - start;
+        MEASURED_MS.store(elapsed as usize, Ordering::Relaxed);
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::spawn(sleeper, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id.is_some(), "sleeper spawn failed");
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(20);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 1000 {
+            panic!("sleeper did not finish");
+        }
+    }
+
+    let measured = MEASURED_MS.load(Ordering::Relaxed) as u64;
+    assert!(
+        measured >= SLEEP_MS - 5,
+        "dedicated-thread sleep too short: {} ms (requested {} ms)",
+        measured,
+        SLEEP_MS,
+    );
+    assert!(
+        measured <= SLEEP_MS + 30,
+        "dedicated-thread sleep too long: {} ms (requested {} ms)",
+        measured,
+        SLEEP_MS,
+    );
+}
+
+/// Wake-after-spawn latency test: measures how long it takes a freshly
+/// spawned thread to actually start running, from the spawner's point
+/// of view. If this is consistently >0 ms, the stride scheduler is
+/// delaying the new thread's first instruction by some scheduling
+/// quantum.
+///
+/// Pattern mirrors how `mutex_holder_sleep_parks_contender` spawns the
+/// contender: spawn from a sleep-waking thread, then immediately yield
+/// via sleep(0). The new thread should run before the spawner resumes.
+#[test_case]
+fn spawn_to_first_instruction_latency() {
+    static SPAWN_TIME: AtomicUsize = AtomicUsize::new(0);
+    static CHILD_FIRST_INSTRUCTION: AtomicUsize = AtomicUsize::new(0);
+    static CHILD_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    SPAWN_TIME.store(0, Ordering::Relaxed);
+    CHILD_FIRST_INSTRUCTION.store(0, Ordering::Relaxed);
+    CHILD_DONE.store(0, Ordering::Relaxed);
+
+    fn child() {
+        CHILD_FIRST_INSTRUCTION.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        CHILD_DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    // First sleep so we're in the "just-woken" state, mirroring the
+    // mutex_holder test's flow (main spawns contender right after its
+    // sleep(10) wakes).
+    crate::kernel::sched::sleep(10);
+    let spawn_at = crate::kernel::timer::elapsed_ms();
+    SPAWN_TIME.store(spawn_at as usize, Ordering::Relaxed);
+    let id = crate::kernel::sched::spawn(child, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id.is_some(), "child spawn failed");
+
+    // Wait for child to record its first instruction.
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while CHILD_DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(10);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 500 {
+            panic!("child did not run");
+        }
+    }
+
+    let spawn = SPAWN_TIME.load(Ordering::Relaxed);
+    let first = CHILD_FIRST_INSTRUCTION.load(Ordering::Relaxed);
+    let latency = first.saturating_sub(spawn);
+    // The child should start running within one slice quantum (16 ms)
+    // of being spawned. A larger latency means the spawner kept running
+    // (or some other thread won the pick) for longer than expected.
+    assert!(
+        latency <= 16,
+        "child took {} ms to start running after spawn (spawn @ {} ms, first instruction @ {} ms)",
+        latency,
+        spawn,
+        first,
+    );
+}
+
+/// Mutex hold-across-sleep WITHOUT the heuristic 10ms barrier: holder
+/// signals a Completion once it has acquired the lock and started its
+/// sleep, so the contender can be spawned with certainty rather than
+/// hoping 10 ms is enough.
+///
+/// This is the same scenario as `mutex_holder_sleep_parks_contender`
+/// but with explicit synchronization. If THIS test passes reliably
+/// while the original flakes, the flake is in the "sleep(10) as
+/// barrier" heuristic, not in the mutex itself.
+///
+/// Diagnostic timestamps mirror the sleep-variant test: on failure
+/// the panic message shows every interesting transition so we can see
+/// whether the latency was eaten by main's wake-from-wait, by the spawn
+/// call, or by the contender's own first-instruction delay.
+#[test_case]
+fn mutex_holder_parks_contender_with_completion() {
+    const HOLD_MS: u64 = 100;
+    static M: crate::kernel::sync::Mutex<u32> = crate::kernel::sync::Mutex::new(0);
+    static HOLDER_LOCKED: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+    static T0: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_LOCKED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_SIGNALED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_SLEEP_STARTED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_SLEEP_ENDED_AT: AtomicUsize = AtomicUsize::new(0);
+    static HOLDER_RELEASED_AT: AtomicUsize = AtomicUsize::new(0);
+    static MAIN_WOKE_FROM_WAIT_AT: AtomicUsize = AtomicUsize::new(0);
+    static MAIN_AFTER_SPAWN_AT: AtomicUsize = AtomicUsize::new(0);
+    static CONTENDER_STARTED_AT: AtomicUsize = AtomicUsize::new(0);
+    static CONTENDER_ACQUIRED_AT: AtomicUsize = AtomicUsize::new(0);
+    static CONTENDER_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    *M.lock() = 0;
+    for s in [
+        &T0,
+        &HOLDER_LOCKED_AT,
+        &HOLDER_SIGNALED_AT,
+        &HOLDER_SLEEP_STARTED_AT,
+        &HOLDER_SLEEP_ENDED_AT,
+        &HOLDER_RELEASED_AT,
+        &MAIN_WOKE_FROM_WAIT_AT,
+        &MAIN_AFTER_SPAWN_AT,
+        &CONTENDER_STARTED_AT,
+        &CONTENDER_ACQUIRED_AT,
+        &CONTENDER_DONE,
+    ] {
+        s.store(0, Ordering::Relaxed);
+    }
+    // Safe: this test owns the completion, no waiter is parked at this point.
+    unsafe { HOLDER_LOCKED.reset() };
+
+    fn holder() {
+        let mut g = M.lock();
+        HOLDER_LOCKED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        *g = 1;
+        HOLDER_LOCKED.signal();
+        HOLDER_SIGNALED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        let sleep_start = crate::kernel::timer::elapsed_ms();
+        HOLDER_SLEEP_STARTED_AT.store(sleep_start as usize, Ordering::Relaxed);
+        crate::kernel::sched::sleep(HOLD_MS);
+        HOLDER_SLEEP_ENDED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        *g = 2;
+        HOLDER_RELEASED_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn contender() {
+        let start = crate::kernel::timer::elapsed_ms();
+        CONTENDER_STARTED_AT.store(start as usize, Ordering::Relaxed);
+        let g = M.lock();
+        let acquired = crate::kernel::timer::elapsed_ms();
+        CONTENDER_ACQUIRED_AT.store(acquired as usize, Ordering::Relaxed);
+        assert_eq!(*g, 2, "contender saw stale value");
+        CONTENDER_DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    T0.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
+    let id1 = crate::kernel::sched::spawn(holder, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id1.is_some(), "holder spawn failed");
+    // Wait until the holder confirms it has the lock and is about to
+    // sleep. No 10-ms heuristic — the completion is a hard barrier.
+    HOLDER_LOCKED.wait();
+    MAIN_WOKE_FROM_WAIT_AT.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
+    let id2 = crate::kernel::sched::spawn(contender, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id2.is_some(), "contender spawn failed");
+    MAIN_AFTER_SPAWN_AT.store(
+        crate::kernel::timer::elapsed_ms() as usize,
+        Ordering::Relaxed,
+    );
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while CONTENDER_DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(10);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 1000 {
+            panic!("contender did not acquire lock");
+        }
+    }
+
+    let t0 = T0.load(Ordering::Relaxed);
+    let hlocked = HOLDER_LOCKED_AT.load(Ordering::Relaxed);
+    let hsig = HOLDER_SIGNALED_AT.load(Ordering::Relaxed);
+    let hsleep_start = HOLDER_SLEEP_STARTED_AT.load(Ordering::Relaxed);
+    let hsleep_end = HOLDER_SLEEP_ENDED_AT.load(Ordering::Relaxed);
+    let hreleased = HOLDER_RELEASED_AT.load(Ordering::Relaxed);
+    let mwoke = MAIN_WOKE_FROM_WAIT_AT.load(Ordering::Relaxed);
+    let mspawn = MAIN_AFTER_SPAWN_AT.load(Ordering::Relaxed);
+    let cstart = CONTENDER_STARTED_AT.load(Ordering::Relaxed);
+    let cacq = CONTENDER_ACQUIRED_AT.load(Ordering::Relaxed);
+    let latency = cacq - cstart;
+    let holder_sleep = hsleep_end - hsleep_start;
+
+    // With explicit sync, the contender was spawned WHILE the holder
+    // already held the lock and was about to sleep for HOLD_MS. So the
+    // contender's latency should be at least HOLD_MS minus the tiny
+    // window between HOLDER_LOCKED.signal() and the sleep call (a few
+    // microseconds in practice).
+    assert!(
+        latency >= HOLD_MS as usize - 5,
+        "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking.\n  \
+         T0={} ms (reference). All times below are ms-since-T0.\n  \
+         holder_locked          @ +{} ms\n  \
+         holder_signaled        @ +{} ms\n  \
+         holder_sleep_started   @ +{} ms\n  \
+         holder_sleep_ended     @ +{} ms  (sleep_duration={} ms, requested={} ms)\n  \
+         holder_released        @ +{} ms\n  \
+         main_woke_from_wait    @ +{} ms\n  \
+         main_after_spawn       @ +{} ms\n  \
+         contender_started      @ +{} ms\n  \
+         contender_acquired     @ +{} ms",
+        latency,
+        HOLD_MS,
+        t0,
+        hlocked - t0,
+        hsig - t0,
+        hsleep_start - t0,
+        hsleep_end - t0,
+        holder_sleep,
+        HOLD_MS,
+        hreleased - t0,
+        mwoke - t0,
+        mspawn - t0,
+        cstart - t0,
+        cacq - t0,
+    );
+}
+
+/// Directly measure how long a thread is delayed after waking from
+/// sleep. The thread records the elapsed time of its own short sleep
+/// and we assert that elapsed is close to requested.
+///
+/// The "wake-up delay" we are probing is: when a sleeping thread's
+/// deadline fires, how long until it actually runs again? Under the
+/// current stride scheduler, a high-`pass` thread that wakes alongside
+/// a low-`pass` competitor (like the always-running partner) can be
+/// passed over on the post-wake `pick_next_*` call and forced to
+/// re-queue. This shows up as `sleep(N)` returning at N+δ rather than
+/// at N exactly.
+///
+/// We use sleep(10) deliberately: a short sleep magnifies the issue
+/// since δ is roughly bounded by the scheduling delay, independent of
+/// the sleep duration. Failure surfaces the wake-delay directly with
+/// a precise number rather than as a knock-on effect in another test.
+#[test_case]
+fn sleep10_wakes_promptly_under_partner_load() {
+    const N_SAMPLES: usize = 10;
+    static SAMPLES: [AtomicUsize; N_SAMPLES] = [const { AtomicUsize::new(0) }; N_SAMPLES];
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    for s in SAMPLES.iter() {
+        s.store(0, Ordering::Relaxed);
+    }
+    DONE.store(0, Ordering::Relaxed);
+
+    fn sleeper() {
+        for i in 0..N_SAMPLES {
+            let start = crate::kernel::timer::elapsed_ms();
+            crate::kernel::sched::sleep(10);
+            let elapsed = crate::kernel::timer::elapsed_ms() - start;
+            SAMPLES[i].store(elapsed as usize, Ordering::Relaxed);
+        }
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::spawn(sleeper, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id.is_some(), "sleeper spawn failed");
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(50);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 1000 {
+            panic!("sleeper did not finish");
+        }
+    }
+
+    let mut worst: usize = 0;
+    let mut sum: usize = 0;
+    for s in SAMPLES.iter() {
+        let v = s.load(Ordering::Relaxed);
+        if v > worst {
+            worst = v;
+        }
+        sum += v;
+    }
+    let avg = sum / N_SAMPLES;
+    // Bound is tight: sleep(10) should land within one slice quantum
+    // (16 ms) above requested even under worst-case scheduling. A
+    // failure here is the direct cause of `mutex_holder_*` flakes —
+    // the test's "sleep(10) as barrier" is no barrier if sleep(10) can
+    // be 25 ms.
+    assert!(
+        worst <= 20,
+        "worst sleep(10) over {} samples was {} ms (avg {} ms) — wake-from-sleep is delayed beyond one slice quantum.\n  \
+         samples (ms): [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}]",
+        N_SAMPLES,
+        worst,
+        avg,
+        SAMPLES[0].load(Ordering::Relaxed),
+        SAMPLES[1].load(Ordering::Relaxed),
+        SAMPLES[2].load(Ordering::Relaxed),
+        SAMPLES[3].load(Ordering::Relaxed),
+        SAMPLES[4].load(Ordering::Relaxed),
+        SAMPLES[5].load(Ordering::Relaxed),
+        SAMPLES[6].load(Ordering::Relaxed),
+        SAMPLES[7].load(Ordering::Relaxed),
+        SAMPLES[8].load(Ordering::Relaxed),
+        SAMPLES[9].load(Ordering::Relaxed),
+    );
+}
+
+/// Mirror of `sleep10_wakes_promptly_under_partner_load` but for the
+/// blocked→ready transition: a thread parks on a Completion, another
+/// thread signals it, and we measure how long the wait() call took. A
+/// signal that happens "very soon after" the wait should return
+/// quickly; if instead the woken thread is passed over in favor of the
+/// low-`pass` partner, the wait returns several ms later than the
+/// signal fired.
+#[test_case]
+fn completion_wait_wakes_promptly_under_partner_load() {
+    static C: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+    static SIGNAL_AT: AtomicUsize = AtomicUsize::new(0);
+    static WAKE_AT: AtomicUsize = AtomicUsize::new(0);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    SIGNAL_AT.store(0, Ordering::Relaxed);
+    WAKE_AT.store(0, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+    unsafe { C.reset() };
+
+    fn waiter() {
+        C.wait();
+        WAKE_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    fn signaler() {
+        // Sleep long enough for the waiter to definitely park.
+        crate::kernel::sched::sleep(30);
+        SIGNAL_AT.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
+        C.signal();
+    }
+
+    ensure_partner_spawned();
+    let id1 = crate::kernel::sched::spawn(waiter, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id1.is_some(), "waiter spawn failed");
+    let id2 = crate::kernel::sched::spawn(signaler, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id2.is_some(), "signaler spawn failed");
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(20);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 1000 {
+            panic!("waiter did not wake");
+        }
+    }
+
+    let signal_at = SIGNAL_AT.load(Ordering::Relaxed);
+    let wake_at = WAKE_AT.load(Ordering::Relaxed);
+    let delay = wake_at.saturating_sub(signal_at);
+    // The waiter parked first, signal fires later. The delay from
+    // signal to the waiter actually resuming should be sub-millisecond
+    // ideally; we allow a slice quantum (16 ms) for scheduling noise.
+    // A larger delay indicates the woken thread is being passed over
+    // by the scheduler in favor of the low-`pass` partner.
+    assert!(
+        delay <= 20,
+        "wake-from-completion delay was {} ms (signal @ {} ms, woken @ {} ms) — \
+         scheduler is not promptly picking the just-unparked thread",
+        delay,
+        signal_at,
+        wake_at,
     );
 }
 
