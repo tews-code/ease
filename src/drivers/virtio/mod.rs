@@ -6,13 +6,11 @@ use alloc::boxed::Box;
 
 use core::mem::{self, MaybeUninit};
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::mmio;
 use crate::board::virtio_blk;
 use crate::hal::BLOCK_SIZE;
-use crate::kernel::sync::{IrqSpinLock, Mutex, with_interrupts_disabled};
-use crate::kernel::timer::elapsed_ms;
+use crate::kernel::sync::{Completion, IrqSpinLock, Mutex, TimedOut};
 
 mod queue;
 
@@ -205,11 +203,13 @@ impl VirtioBlkDev {
 
     // Bounds check, clear VIRTIO_COMPLETE, set up sector/type, call queue_submit
     fn submit_read(&mut self, block: u32) -> Result<(), BlkError> {
+        //  Safe in Virtio's use because IO_IN_PROGRESS serialises I/O.
+        unsafe {
+            VIRTIO_COMPLETE.reset();
+        }
         if block as u64 >= self.capacity / BLOCK_SIZE as u64 {
             return Err(BlkError::SectorOutOfRange);
         }
-        VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
-
         unsafe { write_volatile(&raw mut self.req.sector, block as u64) };
         unsafe { write_volatile(&raw mut self.req.req_type, VIRTIO_BLK_T_IN) };
         Self::queue_submit(&mut self.req, &mut self.vq, VIRTQ_DESC_F_WRITE);
@@ -222,7 +222,6 @@ impl VirtioBlkDev {
         if status != 0 {
             return Err(BlkError::DeviceError(status));
         }
-
         let data = unsafe { read_volatile(&raw const self.req.data) };
         buf.copy_from_slice(&data);
         Ok(())
@@ -230,12 +229,13 @@ impl VirtioBlkDev {
 
     // Bounds check, clear flag, copy data in, set up sector/type, queue_submit
     fn submit_write(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+        //  Safe in Virtio's use because IO_IN_PROGRESS serialises I/O.
+        unsafe {
+            VIRTIO_COMPLETE.reset();
+        }
         if block as u64 >= self.capacity / BLOCK_SIZE as u64 {
             return Err(BlkError::SectorOutOfRange);
         }
-
-        VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
-
         unsafe { write_volatile(&raw mut self.req.sector, block as u64) };
         unsafe { write_volatile(&raw mut self.req.req_type, VIRTIO_BLK_T_OUT) };
         unsafe { write_volatile(&raw mut self.req.data, *buf) };
@@ -278,35 +278,16 @@ pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     Ok(())
 }
 
-enum CompletionResult {
-    Done,
-    Timeout,
-    Continue,
-}
-
 // Check for completion of a VirtIO block
 fn wait_for_completion() -> Result<(), BlkError> {
-    let start = elapsed_ms();
-    loop {
-        let result = with_interrupts_disabled(|_cs| {
-            if VIRTIO_COMPLETE.load(Ordering::Acquire) {
-                return CompletionResult::Done;
-            }
-            if elapsed_ms().wrapping_sub(start) >= IO_TIMEOUT_MS {
-                // Reset device and clean up queue
-                with_blk_dev(|blk| {
-                    blk.vq = VirtioBlkDev::reset();
-                });
-                VIRTIO_COMPLETE.store(false, Ordering::Relaxed);
-                return CompletionResult::Timeout;
-            }
-            crate::hal::wait_for_interrupt();
-            CompletionResult::Continue
-        });
-        match result {
-            CompletionResult::Done => return Ok(()),
-            CompletionResult::Timeout => return Err(BlkError::Timeout),
-            CompletionResult::Continue => {}
+    match VIRTIO_COMPLETE.wait_with_deadline(IO_TIMEOUT_MS) {
+        Ok(_) => Ok(()),
+        Err(TimedOut) => {
+            // Timed out - reset the device
+            with_blk_dev(|blk| {
+                blk.vq = VirtioBlkDev::reset();
+            });
+            Err(BlkError::Timeout)
         }
     }
 }
@@ -328,12 +309,14 @@ where
 }
 
 // Flag tracks completion for interrupt-driven IO
-static VIRTIO_COMPLETE: AtomicBool = AtomicBool::new(false);
+// static VIRTIO_COMPLETE: AtomicBool = AtomicBool::new(false);
+static VIRTIO_COMPLETE: Completion = Completion::new();
 
 pub fn handle_virtio_interrupt() {
     let status = mmio::read32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_STATUS);
     mmio::write32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_ACK, status);
-    VIRTIO_COMPLETE.store(true, Ordering::Release);
+    VIRTIO_COMPLETE.signal();
+    crate::kernel::sched::preempt();
 }
 
 #[cfg(all(test, feature = "test-virtio"))]

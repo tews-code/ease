@@ -103,7 +103,10 @@ impl ThreadControlBlock {
     // Returns None if thread is not sleeping
     fn wakeup_deadline(&self) -> Option<u64> {
         match self.state {
-            State::Sleeping(deadline) | State::Switching(PostSwitch::Sleeping(deadline)) => {
+            State::Sleeping(deadline)
+            | State::Switching(PostSwitch::Sleeping(deadline))
+            | State::BlockedUntil(deadline)
+            | State::Switching(PostSwitch::BlockedUntil(deadline)) => {
                 let leeway = deadline.leeway(&self.qos);
                 Some(deadline.min.saturating_add(leeway))
             }
@@ -145,10 +148,18 @@ impl ThreadsInner {
     // Returns a count of the ready threads
     fn wake_sleeping_threads(&mut self) -> usize {
         let now = timer::elapsed();
+        let running_idx = self.this_hart().running_thread;
         let mut ready_count: usize = 0;
-        for tcb in &mut self.control_blocks {
+        for (idx, tcb) in self.control_blocks.iter_mut().enumerate() {
+            if idx == running_idx {
+                continue;
+            }
             match tcb.state {
                 State::Sleeping(Deadline {
+                    min,
+                    fixed_leeway: _,
+                })
+                | State::BlockedUntil(Deadline {
                     min,
                     fixed_leeway: _,
                 }) if min <= now => {
@@ -211,12 +222,12 @@ impl ThreadsInner {
     // Panics if there is no idle thread, or idle calls reschedule
     fn pick_next_ready_mut(
         &mut self,
-    ) -> (
+    ) -> Option<(
         &mut ThreadControlBlock,
         usize,
         &mut ThreadControlBlock,
         usize,
-    ) {
+    )> {
         // Find current index
         let curr_idx = self.this_hart().running_thread;
         // Find next index
@@ -226,14 +237,16 @@ impl ThreadsInner {
             .enumerate()
             .filter(|(_, tcb)| tcb.state == State::Ready)
             .min_by_key(|(_, tcb)| tcb.pass)
-            .map(|(i, _)| i)
-            .expect("there must be at least one Ready thread - idle is missing");
+            .map(|(i, _)| i)?;
+        if curr_idx == next_idx {
+            return None;
+        }
         // Get disjoint TCBs
         let [curr, next] = self
             .control_blocks
             .get_disjoint_mut([curr_idx, next_idx])
             .expect("indices have been selected as disjoint");
-        (curr, curr_idx, next, next_idx)
+        Some((curr, curr_idx, next, next_idx))
     }
 
     // Get disjoint mutable TCBs for current and next
@@ -337,12 +350,13 @@ impl Scheduler {
                 State::Switching(PostSwitch::Ready) => State::Ready,
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
+                State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
                 State::Switching(PostSwitch::Dead) => {
                     threads.control_blocks[switched_idx].release_stack();
                     threads.control_blocks[switched_idx] = ThreadControlBlock::new();
                     State::Avail
                 }
-                _ => panic!("Post switch but not in not in switching state"),
+                _ => panic!("Post switch but not in switching state"),
             }
         };
         threads.control_blocks[switched_idx].state = new_state;
@@ -420,8 +434,12 @@ impl Scheduler {
             // Check if any threads have reached or passed their deadline
             let ready_count = threads.wake_sleeping_threads();
             // Get current and next TCBs
-            let (curr, curr_idx, next, next_idx) = threads.pick_next_ready_mut();
-
+            let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_ready_mut() else {
+                let earliest_deadline = threads.earliest_deadline();
+                threads.set_next_timer(earliest_deadline, ready_count);
+                drop(threads);
+                return;
+            };
             // Ready to switch
             // Set current thread to the new state
             curr.state = State::Switching(new_state);
@@ -560,11 +578,25 @@ impl Scheduler {
         self.reschedule(Some(State::Blocked), PostSwitch::Blocked);
     }
 
+    // Park the current thread if it is in blocked until deadline state
+    pub(super) fn park_if_blocked_until(&self, deadline_ms: u64) {
+        let deadline = Deadline {
+            min: deadline_ms * timer::CYCLES_PER_MS,
+            fixed_leeway: None,
+        };
+        self.reschedule(
+            Some(State::BlockedUntil(deadline)),
+            PostSwitch::BlockedUntil(deadline),
+        );
+    }
+
     // Unpark the thread at index
     pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
-        if threads.control_blocks[handle.idx].state == State::Blocked
-            && threads.control_blocks[handle.idx].id == handle.id
+        if matches!(
+            threads.control_blocks[handle.idx].state,
+            State::Blocked | State::BlockedUntil(_)
+        ) && threads.control_blocks[handle.idx].id == handle.id
         {
             // Note - does not deal with lost wakeup yet
             threads.control_blocks[handle.idx].state = State::Ready;
@@ -612,6 +644,17 @@ impl Scheduler {
         let current = self.current_thread();
         let mut threads = self.threads.lock();
         threads.control_blocks[current.idx].state = State::Blocked;
+    }
+
+    /// Set this thread to blocked state without rescheduling with a wake up deadline
+    pub fn set_self_blocked_until(&self, deadline_ms: u64) {
+        let deadline = Deadline {
+            min: deadline_ms * timer::CYCLES_PER_MS,
+            fixed_leeway: None,
+        };
+        let current = self.current_thread();
+        let mut threads = self.threads.lock();
+        threads.control_blocks[current.idx].state = State::BlockedUntil(deadline);
     }
 }
 

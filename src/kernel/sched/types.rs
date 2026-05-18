@@ -145,6 +145,7 @@ pub(super) struct Deadline {
 #[derive(PartialEq, Debug)]
 pub(super) enum PostSwitch {
     Blocked,
+    BlockedUntil(Deadline),
     Ready,
     Sleeping(Deadline),
     Dead,
@@ -154,6 +155,7 @@ pub(super) enum PostSwitch {
 pub(super) enum State {
     Avail,
     Blocked,
+    BlockedUntil(Deadline),
     Ready,
     Running,
     Switching(PostSwitch),

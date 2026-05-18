@@ -119,3 +119,12 @@ pub fn unpark_by_index(idx: usize) {
 pub fn set_self_blocked() {
     SCHEDULER.set_self_blocked()
 }
+
+/// Set this thread to blocked state, with a wakeup deadline
+pub fn set_self_blocked_until(deadline_ms: u64) {
+    SCHEDULER.set_self_blocked_until(deadline_ms);
+}
+/// Park this thread in blocked state with wakeup deadline
+pub fn park_if_blocked_until(deadline_ms: u64) {
+    SCHEDULER.park_if_blocked_until(deadline_ms);
+}

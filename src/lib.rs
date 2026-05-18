@@ -117,6 +117,11 @@ mod kernel {
     pub mod alloc;
     pub mod collection;
     pub mod sync;
+    pub mod timer {
+        pub fn elapsed_ms() -> u64 {
+            panic!("timer stub: must not be called from the lib crate")
+        }
+    }
 
     #[allow(dead_code)]
     pub mod sched {
@@ -164,9 +169,26 @@ mod kernel {
         pub fn set_self_blocked() {
             panic!("sched stub: must not be called from the lib crate");
         }
+
+        pub fn set_self_blocked_until(_deadline_ms: u64) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+        /// Park this thread in blocked state with wakeup deadline
+        pub fn park_if_blocked_until(_deadline_ms: u64) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
     }
 }
 
+#[allow(dead_code)]
+mod io {
+    pub struct DirectWriter;
+    impl core::fmt::Write for DirectWriter {
+        fn write_str(&mut self, _: &str) -> core::fmt::Result {
+            Ok(())
+        }
+    }
+}
 // Pull the fs module tree in directly via fs/mod.rs (which loads bpb,
 // dir_entry, and volume). bpb.rs and dir_entry.rs are pure logic and
 // run as host tests; volume.rs's production code compiles fine against

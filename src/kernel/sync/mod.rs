@@ -18,7 +18,7 @@ pub mod tests;
 
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
-pub use completion::Completion;
+pub use completion::{Completion, TimedOut};
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub use counteru64::CounterU64;
