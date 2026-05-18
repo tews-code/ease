@@ -1,6 +1,6 @@
 //! Kernel services
 //!
-//! Future home of:
+//!  Home of:
 //! - Memory management (heap allocator)
 //! - Synchronization primitives (Mutex, Spinlock)
 //! - Timer and scheduling
