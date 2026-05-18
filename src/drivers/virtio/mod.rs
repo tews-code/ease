@@ -11,7 +11,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::mmio;
 use crate::board::virtio_blk;
 use crate::hal::BLOCK_SIZE;
-use crate::kernel::sync::{IrqSpinLock, SpinLock, with_interrupts_disabled};
+use crate::kernel::sync::{IrqSpinLock, Mutex, with_interrupts_disabled};
 use crate::kernel::timer::elapsed_ms;
 
 mod queue;
@@ -256,7 +256,7 @@ impl VirtioBlkDev {
 const IO_TIMEOUT_MS: u64 = 1_000;
 
 // Lock held when IO is in progress (interrupts enabled)
-static IO_IN_PROGRESS: SpinLock<()> = SpinLock::new(());
+static IO_IN_PROGRESS: Mutex<()> = Mutex::new(());
 
 pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
     let _guard = IO_IN_PROGRESS.lock();
