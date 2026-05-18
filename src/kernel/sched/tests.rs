@@ -665,6 +665,136 @@ fn mutex_holder_sleep_parks_contender() {
     );
 }
 
+/// Completion signal-then-wait: signal() fires before any wait(), so the
+/// pending flag is set. A subsequent wait() observes pending = true and
+/// returns immediately without parking. Validates the "fast path" of
+/// wait() — the case where the signal has already arrived.
+#[test_case]
+fn completion_signal_then_wait() {
+    static C: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+    static CHILD_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    CHILD_DONE.store(0, Ordering::Relaxed);
+
+    fn child() {
+        C.wait();
+        CHILD_DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    // Signal BEFORE the child runs — pending should be set.
+    C.signal();
+    let id = crate::kernel::sched::spawn(child, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id.is_some(), "spawn failed (no free slot?)");
+
+    // Give the child time to run. wait() should return immediately
+    // because pending is true; CHILD_DONE should be set quickly.
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        CHILD_DONE.load(Ordering::Relaxed),
+        1,
+        "child did not pass through wait() after pre-signal",
+    );
+}
+
+/// Completion wait-then-signal: a child calls wait() and parks; the parent
+/// later calls signal() to wake it. Exercises the parking path of wait() —
+/// the case where the waiter sleeps and is unparked by signal().
+#[test_case]
+fn completion_wait_then_signal() {
+    static C: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+    static CHILD_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+
+    CHILD_PROGRESS.store(0, Ordering::Relaxed);
+
+    fn child() {
+        CHILD_PROGRESS.store(1, Ordering::Relaxed);
+        C.wait();
+        CHILD_PROGRESS.store(2, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::spawn(child, PRIORITY_DEFAULT, StackClass::KB2, Qos::High);
+    assert!(id.is_some(), "spawn failed (no free slot?)");
+
+    // Give the child time to reach C.wait() and actually park.
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        CHILD_PROGRESS.load(Ordering::Relaxed),
+        1,
+        "child did not reach wait() (progress != 1)",
+    );
+
+    // Fire the signal — child should wake up and continue past wait().
+    C.signal();
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        CHILD_PROGRESS.load(Ordering::Relaxed),
+        2,
+        "child did not resume past wait() after signal (progress != 2)",
+    );
+}
+
+/// One-shot semantics: two signal() calls without an intervening wait()
+/// must NOT satisfy two future wait()s. Since pending is a boolean (not a
+/// counter), the second signal is idempotent. The first wait() consumes the
+/// pending flag; a second wait() must block, proving the completion's
+/// single-shot contract.
+#[test_case]
+fn completion_signal_twice_is_idempotent() {
+    static C: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+    static FIRST_DONE: AtomicUsize = AtomicUsize::new(0);
+    static SECOND_DONE: AtomicUsize = AtomicUsize::new(0);
+
+    FIRST_DONE.store(0, Ordering::Relaxed);
+    SECOND_DONE.store(0, Ordering::Relaxed);
+
+    fn child_two_waits() {
+        C.wait();
+        FIRST_DONE.store(1, Ordering::Relaxed);
+        C.wait();
+        SECOND_DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    // Two signals before any wait. Pending becomes true (then stays true).
+    C.signal();
+    C.signal();
+
+    let id = crate::kernel::sched::spawn(
+        child_two_waits,
+        PRIORITY_DEFAULT,
+        StackClass::KB2,
+        Qos::High,
+    );
+    assert!(id.is_some(), "spawn failed (no free slot?)");
+
+    // First wait should pass through immediately (pending was set).
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        FIRST_DONE.load(Ordering::Relaxed),
+        1,
+        "first wait did not consume the pending signal",
+    );
+
+    // Second wait must BLOCK — the boolean pending was consumed by the
+    // first wait, and the second signal didn't add a second slot.
+    assert_eq!(
+        SECOND_DONE.load(Ordering::Relaxed),
+        0,
+        "second wait wrongly satisfied — pending behaves like a counter, not a one-shot",
+    );
+
+    // Send one more signal to release the child and clean up.
+    C.signal();
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        SECOND_DONE.load(Ordering::Relaxed),
+        1,
+        "second wait did not complete after explicit signal",
+    );
+}
+
 /// Benchmark: average yield_now round-trip cycles. No assertion.
 /// Reports cpu (this thread only) and wall (includes partner thread).
 #[cfg(feature = "test-bench")]

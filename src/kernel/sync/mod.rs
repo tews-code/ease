@@ -6,6 +6,8 @@ use core::marker::PhantomData;
 #[cfg(target_os = "none")]
 use crate::arch::{disable_interrupts, restore_interrupts};
 
+#[cfg(target_os = "none")]
+mod completion;
 #[cfg(not(target_has_atomic = "64"))]
 mod counteru64;
 #[cfg(target_os = "none")]
@@ -14,6 +16,9 @@ mod spinlock;
 #[cfg(all(test, not(target_os = "none")))]
 pub mod tests;
 
+#[cfg(target_os = "none")]
+#[allow(unused_imports)]
+pub use completion::Completion;
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub use counteru64::CounterU64;
