@@ -633,9 +633,9 @@ impl Scheduler {
 
     /// Unpark a thread by TCB index
     pub fn unpark_by_index(&self, idx: usize) {
-        let threads = self.threads.lock();
+        let mut threads = self.threads.lock();
         if threads.control_blocks[idx].state == State::Blocked {
-            let _ = threads.control_blocks[idx].state == State::Ready;
+            threads.control_blocks[idx].state = State::Ready;
         }
     }
 
