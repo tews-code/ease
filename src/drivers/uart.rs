@@ -2,10 +2,9 @@
 //!
 //! Using QEMU virt board
 
-#![allow(dead_code)]
-
 use crate::arch::mmio;
-use crate::board::uart;
+use crate::board::{plic, uart};
+use crate::drivers::plic::with_plic;
 use crate::kernel::collection::SpscRingBuf;
 use crate::kernel::sync::IrqSpinLock;
 
@@ -129,4 +128,15 @@ pub fn handle_interrupt() {
 /// Enables UART RX interrupts
 pub fn enable_rx_interrupt() {
     mmio::write8(uart::BASE, IER, 1);
+}
+
+/// Initialise the UART
+pub fn init() {
+    // Plic setup
+    with_plic(|p| {
+        p.set_priority(plic::UART0_IRQ, 1);
+        p.enable(plic::UART0_IRQ);
+    });
+    // Uart enable
+    enable_rx_interrupt();
 }

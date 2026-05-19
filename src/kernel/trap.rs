@@ -12,7 +12,7 @@ extern "C" fn trap_handler() {
                 crate::kernel::sched::preempt();
             }
             EXTERNAL => {
-                let irq = crate::drivers::plic::claim();
+                let irq = crate::drivers::plic::with_plic(|p| p.claim());
                 match irq {
                     0 => {} // Spurious interrupt
                     crate::board::plic::UART0_IRQ => {
@@ -24,7 +24,7 @@ extern "C" fn trap_handler() {
                     _ => panic!("Unknown external interrupt: {}", irq),
                 }
                 if irq != 0 {
-                    crate::drivers::plic::complete(irq);
+                    crate::drivers::plic::with_plic(|p| p.complete(irq));
                 }
             }
             _ => crate::println!("Unknown interrupt {}", code),

@@ -76,16 +76,8 @@ fn secondary_init() {
 fn kernel_init() {
     kernel::timer::init();
     kernel::alloc::init_global_allocator();
-
-    // Configure PLIC
-    drivers::plic::set_threshold(0);
-    drivers::plic::set_priority(board::plic::UART0_IRQ, 1);
-    drivers::plic::enable(board::plic::UART0_IRQ);
-    drivers::plic::set_priority(board::plic::VIRTIO0_IRQ, 1);
-    drivers::plic::enable(board::plic::VIRTIO0_IRQ);
-    arch::csr::mie::enable_bits(arch::csr::mie::MEIE);
-
-    drivers::uart::enable_rx_interrupt();
+    drivers::plic::init();
+    drivers::uart::init();
 
     sched::bootstrap(0);
     arch::enable_interrupts();

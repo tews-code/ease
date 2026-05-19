@@ -8,7 +8,8 @@ use core::mem::{self, MaybeUninit};
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::arch::mmio;
-use crate::board::virtio_blk;
+use crate::board::{plic, virtio_blk};
+use crate::drivers::plic::with_plic;
 use crate::hal::BLOCK_SIZE;
 use crate::kernel::sync::{Completion, IrqSpinLock, Mutex, TimedOut};
 
@@ -296,6 +297,12 @@ static BLK_DEV: IrqSpinLock<Option<VirtioBlkDev>> = IrqSpinLock::new(None);
 
 /// Initialise the virtio block device. Must be called before any block I/O.
 pub fn virtio_blk_init() {
+    // Register Virtio interrupt with the Plic
+    with_plic(|p| {
+        p.set_priority(plic::VIRTIO0_IRQ, 1);
+        p.enable(plic::VIRTIO0_IRQ)
+    });
+    // Enable the block device
     *BLK_DEV.lock() = Some(VirtioBlkDev::new());
 }
 
