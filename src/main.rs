@@ -117,12 +117,9 @@ extern "C" fn main() -> ! {
     // 16 KiB heap stack. The test framework (format machinery, ~211 result
     // prints across test-all, FAT-format buffers, virtio sector reads on
     // stack) accumulates a surprisingly deep peak
-    let id = sched::spawn(
-        test_runner_thread,
-        sched::PRIORITY_DEFAULT,
-        sched::StackClass::KB16,
-        sched::Qos::High,
-    );
+    let id = sched::Builder::new()
+        .with_stack_class(sched::StackClass::KB16)
+        .spawn(test_runner_thread);
     assert!(id.is_some(), "could not spawn test runner thread");
 
     // Bootstrap converts into the idle thread
@@ -146,13 +143,10 @@ extern "C" fn main() -> ! {
     println!("Hello from EASE HART{}!", crate::arch::cpu_id());
 
     #[allow(clippy::diverging_sub_expression)]
-    let Some(_id) = sched::spawn(
-        shell_thread,
-        #[allow(unreachable_code)]
-        sched::PRIORITY_DEFAULT,
-        sched::StackClass::KB16,
-        sched::Qos::High,
-    ) else {
+    let Some(_id) = sched::Builder::new()
+        .with_stack_class(sched::StackClass::KB16)
+        .spawn(shell_thread)
+    else {
         panic!("failed to lanuch shell");
     };
 

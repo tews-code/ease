@@ -64,6 +64,7 @@ impl ThreadControlBlock {
             pass: 0,
             last_started_cycles: 0,
             next_waiter: None,
+            affinity: None,
         }
     }
 
@@ -230,12 +231,14 @@ impl ThreadsInner {
     )> {
         // Find current index
         let curr_idx = self.this_hart().running_thread;
+        let this_hart = crate::arch::cpu_id() as u8;
         // Find next index
         let next_idx = self
             .control_blocks
             .iter()
             .enumerate()
             .filter(|(_, tcb)| tcb.state == State::Ready)
+            .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
             .min_by_key(|(_, tcb)| tcb.pass)
             .map(|(i, _)| i)?;
         if curr_idx == next_idx {
@@ -260,11 +263,13 @@ impl ThreadsInner {
     )> {
         // Find current index
         let curr_idx = self.this_hart().running_thread;
+        let this_hart = crate::arch::cpu_id() as u8;
         let next_idx = self
             .control_blocks
             .iter()
             .enumerate()
             .filter(|(idx, tcb)| tcb.state == State::Ready || *idx == curr_idx)
+            .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
             .min_by_key(|(_, tcb)| tcb.pass)
             .map(|(idx, _)| idx)?;
         if curr_idx == next_idx {
@@ -369,6 +374,7 @@ impl Scheduler {
         priority: u8,
         class: StackClass,
         qos: Qos,
+        affinity: Option<u8>,
     ) -> Option<ThreadHandle> {
         // First allocate before locking
         let base = HeapStack::allocate(class)?;
@@ -398,6 +404,7 @@ impl Scheduler {
             priority,
             stack: Some(Stack::Heap(class)),
             pass: baseline,
+            affinity,
             ..ThreadControlBlock::new()
         };
         // Local variables to drop threads

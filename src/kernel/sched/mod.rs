@@ -11,6 +11,65 @@ use stride::SCHEDULER;
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
 pub use types::{Qos, StackClass, ThreadHandle};
 
+use crate::board::HARTS_MAX;
+
+#[must_use = "Builder must be terminated with .spawn() to actually create a thread"]
+pub struct Builder {
+    stack_class: StackClass, // Must be from stack class
+    qos: Qos,                // Low priority for background
+    priority: u8,            // Lower number is higher priority
+    affinity: Option<u8>,    // Affinity to a particular HART
+}
+
+impl Builder {
+    pub const fn new() -> Self {
+        Self {
+            stack_class: StackClass::KB4,
+            qos: Qos::High,
+            priority: PRIORITY_DEFAULT,
+            affinity: None,
+        }
+    }
+
+    pub fn with_stack_class(mut self, stack_class: StackClass) -> Self {
+        self.stack_class = stack_class;
+        self
+    }
+
+    pub fn with_qos(mut self, qos: Qos) -> Self {
+        self.qos = qos;
+        self
+    }
+
+    pub fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    pub fn with_affinity(mut self, affinity: u8) -> Self {
+        if affinity < HARTS_MAX as u8 {
+            self.affinity = Some(affinity);
+        }
+        self
+    }
+
+    pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<ThreadHandle> {
+        SCHEDULER.spawn(
+            entry,
+            self.priority,
+            self.stack_class,
+            self.qos,
+            self.affinity,
+        )
+    }
+}
+
+impl Default for Builder {
+    fn default() -> Self {
+        Builder::new()
+    }
+}
+
 pub fn idle_thread() -> ! {
     loop {
         crate::arch::wait_for_interrupt();
@@ -18,13 +77,8 @@ pub fn idle_thread() -> ! {
 }
 
 /// Spawn a new thread
-pub fn spawn<F: FnOnce() + Send + 'static>(
-    entry: F,
-    priority: u8,
-    class: StackClass,
-    qos: Qos,
-) -> Option<ThreadHandle> {
-    SCHEDULER.spawn(entry, priority, class, qos)
+pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
+    Builder::new().spawn(entry)
 }
 
 /// Set up the boot thread
