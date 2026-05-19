@@ -59,6 +59,7 @@ pub mod mstatus {
 
 /// Machine interrupt enable register (mie) operations.
 pub mod mie {
+    pub const MSIE: usize = 1 << 3; // Machine software interrupts enable
     pub const MTIE: usize = 1 << 7; // Machine timer interrupt enable bit (bit 7).
     pub const MEIE: usize = 1 << 11; // External interrupt
 

@@ -70,6 +70,8 @@ fn shell_thread() {
 fn secondary_init() {
     kernel::timer::init();
     sched::bootstrap(1);
+    kernel::ipi::init();
+    // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
     arch::enable_interrupts();
 }
 
@@ -78,6 +80,7 @@ fn kernel_init() {
     kernel::alloc::init_global_allocator();
     drivers::plic::init();
     drivers::uart::init();
+    kernel::ipi::init();
 
     sched::bootstrap(0);
     arch::enable_interrupts();

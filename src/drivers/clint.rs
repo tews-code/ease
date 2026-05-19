@@ -6,10 +6,10 @@ use crate::kernel::sync::IrqSpinLock;
 
 pub struct SiFiveClint(()); // Private field to prevent other modules creating this struct
 
-// Useful for calling associated function mtime()
 pub type Clint = SiFiveClint;
 
 impl SiFiveClint {
+    const MSIP: usize = 0;
     const MTIME: usize = 0xBFF8;
     const MTIMECMP: usize = 0x4000;
 
@@ -55,6 +55,18 @@ impl SiFiveClint {
                 return ((hi as u64) << 32) | (lo as u64);
             }
         }
+    }
+
+    /// Set the Machine Software Interrupt Pending to trigger a software interrupt for the given HART id
+    pub fn set_msip(&mut self, hart_id: usize) {
+        // Safety: CLINT MSIP is valid for writes at BASE + MSIP
+        mmio::write32(clint::BASE, Self::MSIP + hart_id * 4, 1);
+    }
+
+    /// Clear the Machine Software Interrupt Pending for the current HART
+    pub fn clear_msip(&mut self) {
+        // Safety: CLINT MSIP is valid for writes at BASE + MSIP
+        mmio::write32(clint::BASE, Self::MSIP + cpu_id() * 4, 0);
     }
 }
 

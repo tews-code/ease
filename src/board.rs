@@ -14,7 +14,6 @@ pub mod virtio_blk {
 }
 
 // Platform Level Interrupt Controller
-#[allow(dead_code)]
 pub mod plic {
     pub const BASE: usize = 0x0C00_0000;
     pub const PRIORITY: usize = 0x0000_0000; // Priority for source N is at BASE + 4*N, where N is IRQ number
