@@ -1378,6 +1378,172 @@ fn completion_signal_twice_is_idempotent() {
     );
 }
 
+// =============================================================================
+// Hart affinity tests
+// =============================================================================
+//
+// These tests run after the IPI plumbing landed: a Builder with affinity
+// targets a hart, spawn fires an IPI when that hart isn't current, the
+// remote hart's trap handler clears MSIP and runs preempt(), and
+// preempt's pick_next_*_mut filters TCBs by affinity. The end-to-end
+// observable behaviour is: a thread spawned with `with_affinity(N)`
+// records `cpu_id() == N` when it runs.
+//
+// Tests run on HART0 (test runner). Spawning an affinity-1 thread from
+// here must wake HART1 (currently in idle_thread / wfi) via IPI for the
+// test to terminate within the timeout — so a passing affinity-1 test
+// transitively verifies the IPI delivery path.
+
+/// Affinity 0: a thread pinned to HART0 should be picked by HART0's
+/// scheduler and `cpu_id()` from inside it should return 0. Sanity
+/// check for the affinity-filter path on the local hart (no IPI
+/// involved here).
+#[test_case]
+fn affinity_hart0_runs_on_hart0() {
+    static CPU_OBSERVED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    CPU_OBSERVED.store(usize::MAX, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+
+    fn pinned_hart0() {
+        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::Builder::new()
+        .with_stack_class(StackClass::KB2)
+        .with_affinity(0)
+        .spawn(pinned_hart0);
+    assert!(id.is_some(), "spawn failed");
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(10);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 500 {
+            panic!("affinity-0 thread did not complete within 500 ms");
+        }
+    }
+
+    let observed = CPU_OBSERVED.load(Ordering::Relaxed);
+    assert_eq!(
+        observed, 0,
+        "affinity-0 thread ran on hart {}, expected hart 0",
+        observed
+    );
+}
+
+/// Affinity 1: spawn from HART0 with affinity for HART1. Verifies the
+/// full cross-hart wake-up chain: spawn fires an IPI; HART1 (in wfi)
+/// takes a software-interrupt trap; trap handler clears MSIP and runs
+/// preempt; affinity filter accepts the new thread on HART1; switch
+/// happens. Inside the thread `cpu_id() == 1` proves it landed on the
+/// right hart. If the thread never completes, the IPI delivery or
+/// trap-handler arm is broken.
+#[test_case]
+fn affinity_hart1_runs_on_hart1() {
+    static CPU_OBSERVED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    CPU_OBSERVED.store(usize::MAX, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+
+    fn pinned_hart1() {
+        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::Builder::new()
+        .with_stack_class(StackClass::KB2)
+        .with_affinity(1)
+        .spawn(pinned_hart1);
+    assert!(id.is_some(), "spawn failed");
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(10);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 500 {
+            panic!(
+                "affinity-1 thread did not complete within 500 ms — \
+                 likely IPI delivery (set_msip / SOFTWARE arm / clear_msip) is broken"
+            );
+        }
+    }
+
+    let observed = CPU_OBSERVED.load(Ordering::Relaxed);
+    assert_eq!(
+        observed, 1,
+        "affinity-1 thread ran on hart {}, expected hart 1",
+        observed
+    );
+}
+
+/// Cross-hart unpark via IPI: an affinity-1 thread parks on a
+/// Completion. From HART0 we signal the completion, which calls
+/// `unpark`, which (because the woken thread's affinity is 1) fires
+/// an IPI to HART1. HART1's preempt then picks the now-Ready thread.
+///
+/// This exercises a different code path than `affinity_hart1_runs_on_hart1`
+/// (which sends the IPI from `spawn`). Failure mode: the thread never
+/// completes because unpark didn't IPI HART1.
+#[test_case]
+fn affinity_unpark_wakes_via_ipi() {
+    use crate::kernel::sync::Completion;
+    static C: Completion = Completion::new();
+    static CPU_OBSERVED: AtomicUsize = AtomicUsize::new(usize::MAX);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+
+    // Safe: this test owns the completion, no parked waiter yet.
+    unsafe { C.reset() };
+    CPU_OBSERVED.store(usize::MAX, Ordering::Relaxed);
+    DONE.store(0, Ordering::Relaxed);
+
+    fn waiter_on_hart1() {
+        C.wait();
+        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        DONE.store(1, Ordering::Relaxed);
+    }
+
+    ensure_partner_spawned();
+    let id = crate::kernel::sched::Builder::new()
+        .with_stack_class(StackClass::KB2)
+        .with_affinity(1)
+        .spawn(waiter_on_hart1);
+    assert!(id.is_some(), "spawn failed");
+
+    // Give the waiter time to actually park before we signal. (If we
+    // signal before it parks, the Completion's pending flag is set and
+    // the wait returns without parking — IPI path not exercised.)
+    crate::kernel::sched::sleep(50);
+    assert_eq!(
+        DONE.load(Ordering::Relaxed),
+        0,
+        "waiter completed before signal — did it actually park?"
+    );
+
+    C.signal();
+
+    let wait_start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(10);
+        if crate::kernel::timer::elapsed_ms() - wait_start > 500 {
+            panic!(
+                "affinity-1 waiter did not wake within 500 ms after signal — \
+                 likely unpark didn't fire an IPI to HART1"
+            );
+        }
+    }
+
+    let observed = CPU_OBSERVED.load(Ordering::Relaxed);
+    assert_eq!(
+        observed, 1,
+        "affinity-1 waiter ran on hart {} after wake, expected hart 1",
+        observed
+    );
+}
+
 /// Benchmark: average yield_now round-trip cycles. No assertion.
 /// Reports cpu (this thread only) and wall (includes partner thread).
 #[cfg(feature = "test-bench")]

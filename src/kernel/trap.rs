@@ -3,28 +3,36 @@ use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::mepc;
+use crate::board;
+use crate::drivers::{plic, uart, virtio};
+use crate::kernel::ipi;
+use crate::kernel::sched;
 
 #[unsafe(no_mangle)]
 extern "C" fn trap_handler() {
     match mcause::read() {
         Trap::Interrupt(code) => match code {
             TIMER => {
-                crate::kernel::sched::preempt();
+                sched::preempt();
+            }
+            SOFTWARE => {
+                ipi::clear_self(); // Prevent this interrupt from re-firing
+                sched::preempt();
             }
             EXTERNAL => {
-                let irq = crate::drivers::plic::with_plic(|p| p.claim());
+                let irq = plic::with_plic(|p| p.claim());
                 match irq {
                     0 => {} // Spurious interrupt
-                    crate::board::plic::UART0_IRQ => {
-                        crate::drivers::uart::handle_interrupt();
+                    board::plic::UART0_IRQ => {
+                        uart::handle_interrupt();
                     }
-                    crate::board::plic::VIRTIO0_IRQ => {
-                        crate::drivers::virtio::handle_virtio_interrupt();
+                    board::plic::VIRTIO0_IRQ => {
+                        virtio::handle_virtio_interrupt();
                     }
                     _ => panic!("Unknown external interrupt: {}", irq),
                 }
                 if irq != 0 {
-                    crate::drivers::plic::with_plic(|p| p.complete(irq));
+                    plic::with_plic(|p| p.complete(irq));
                 }
             }
             _ => crate::println!("Unknown interrupt {}", code),

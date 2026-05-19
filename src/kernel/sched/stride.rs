@@ -413,6 +413,13 @@ impl Scheduler {
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
+        // If the spawned thread has affinity for the other hart, send an IPI
+        drop(threads);
+        if let Some(h) = affinity
+            && h as usize != crate::arch::cpu_id()
+        {
+            crate::kernel::ipi::send(h as usize);
+        }
         Some(handle)
     }
 
@@ -600,13 +607,23 @@ impl Scheduler {
     // Unpark the thread at index
     pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
-        if matches!(
+        let affinity = if matches!(
             threads.control_blocks[handle.idx].state,
             State::Blocked | State::BlockedUntil(_)
         ) && threads.control_blocks[handle.idx].id == handle.id
         {
             // Note - does not deal with lost wakeup yet
             threads.control_blocks[handle.idx].state = State::Ready;
+            threads.control_blocks[handle.idx].affinity
+        } else {
+            None
+        };
+        drop(threads);
+        // If the unparked thread has affinity for the other hart, send an IPI
+        if let Some(h) = affinity
+            && h as usize != crate::arch::cpu_id()
+        {
+            crate::kernel::ipi::send(h as usize);
         }
     }
 
