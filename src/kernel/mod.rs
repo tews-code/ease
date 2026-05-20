@@ -9,6 +9,7 @@ pub mod alloc;
 pub mod collection;
 pub mod ipi;
 pub mod panic;
+pub mod percpu;
 pub mod sched;
 pub mod sync;
 pub mod timer;

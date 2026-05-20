@@ -1,6 +1,8 @@
 //! Panic handler
 
+use crate::arch::STACK_CANARY;
 use crate::hal::wait_for_interrupt;
+use crate::kernel::percpu;
 #[cfg(test)]
 use crate::qemu;
 
@@ -95,20 +97,36 @@ impl core::fmt::Write for DirectConsoleWriter {
 fn panic(info: &core::panic::PanicInfo) -> ! {
     #[cfg(not(test))]
     {
+        // Check that the stack canary has been set up
+        let stack_base = percpu::current_stack_base();
+        let stack_ok = if stack_base.is_null() {
+            None
+        } else {
+            // Safety: current_stack_base is aligned and valid for reading
+            Some(unsafe { core::ptr::read_volatile(stack_base as *const usize) } == STACK_CANARY)
+        };
         use crate::io::DirectWriter;
         use core::fmt::Write;
         let _ = writeln!(DirectWriter, "PANIC: {info}");
         let _ = writeln!(
             DirectWriter,
-            "Stack canary corrupted: {}",
-            crate::kernel::sched::StackClass::canary_intact_at_current_sp()
+            "Stack canary in place: {}",
+            match stack_ok {
+                None => "unavailable",
+                Some(true) => "intact",
+                Some(false) => "corrupted",
+            }
         );
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
         let _ = writeln!(
             console,
-            "Stack canary corrupted: {}",
-            crate::kernel::sched::StackClass::canary_intact_at_current_sp()
+            "Stack canary in place: {}",
+            match stack_ok {
+                None => "unavailable",
+                Some(true) => "intact",
+                Some(false) => "corrupted",
+            }
         );
     }
     #[cfg(test)]

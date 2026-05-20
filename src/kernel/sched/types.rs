@@ -3,10 +3,9 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
+use crate::arch::STACK_CANARY;
 use crate::arch::context::Context;
 use crate::arch::trap::TrapFrame;
-use crate::arch::{STACK_CANARY, cpu_id};
-use crate::board::HARTS_MAX;
 
 pub(super) const THREADS_MAX: usize = 32;
 
@@ -40,7 +39,7 @@ impl StackClass {
     const _MIN_CLASS_SIZE_CHECK: () =
         assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
 
-    const fn size(self) -> usize {
+    pub(super) const fn size(self) -> usize {
         1usize << self.0
     }
 
@@ -57,33 +56,6 @@ impl StackClass {
             Ok(layout) => layout,
             Err(_) => panic!("invalid layout"),
         }
-    }
-
-    /// Check that this thread's stack canary is intact, without locking
-    /// the scheduler. Safe to call from panic.
-    ///
-    /// We don't know the current thread's stack class from inside a panic
-    /// handler (the scheduler is potentially in an inconsistent state, and
-    /// taking its lock would deadlock if we panicked while holding it).
-    /// Instead, try each plausible class. A stack region of size S is
-    /// S-aligned, so `sp & !(S - 1)` recovers its base — but only for the
-    /// correct S. We try each `StackClass`; if any of them reads the canary
-    /// value at its computed base, the canary is intact.
-    ///
-    /// Why this is safe: `STACK_CANARY = 0xDEADBEEF` is a chosen-magic value.
-    /// The probability of a "wrong" mask happening to point at memory that
-    /// coincidentally contains `0xDEADBEEF` is ~5 / 2^32 ≈ 1e-9 — negligible.
-    pub fn canary_intact_at_current_sp() -> bool {
-        let sp = crate::arch::csr::regs::sp();
-        for class in Self::ALL {
-            let base = (sp & !class.mask()) as *const usize;
-            // SAFETY: same justification as before — read_volatile of a
-            // usize anywhere in our flat memory model is safe.
-            if unsafe { core::ptr::read_volatile(base) } == STACK_CANARY {
-                return true;
-            }
-        }
-        false
     }
 }
 
@@ -130,8 +102,7 @@ impl HeapStack {
     // Safety: sp must point inside a stack region that was set up
     // by init_for_entry and has not been deallocated.
     // The caller transfers ownership of the sp; further use is UB.
-    pub unsafe fn deallocate(class: StackClass, sp: *mut u8) {
-        let base = sp.with_addr(sp.addr() & !class.mask());
+    pub unsafe fn deallocate(class: StackClass, base: *mut u8) {
         unsafe { alloc::alloc::dealloc(base, class.layout()) };
     }
 }
@@ -162,21 +133,6 @@ pub(super) enum State {
     Sleeping(Deadline),
 }
 
-pub(super) enum Stack {
-    Heap(StackClass), // Needs dealloc on thread exit
-    Fixed,            // Set by linker script
-}
-
-impl Stack {
-    // Returns the stack class based on the current Stack
-    pub(super) const fn class(&self) -> StackClass {
-        match self {
-            Stack::Heap(c) => *c,
-            Stack::Fixed => StackClass::KB4,
-        }
-    }
-}
-
 pub enum Qos {
     High,
     Low,
@@ -186,7 +142,8 @@ pub(super) struct ThreadControlBlock {
     pub(super) id: u32,
     pub(super) state: State,
     pub(super) sp: *mut u8,
-    pub(super) stack: Option<Stack>,
+    pub(super) stack: Option<StackClass>,
+    pub(super) stack_base: *mut u8,
     pub(super) qos: Qos,
     pub(super) priority: u8,             // Lower number is higher priority
     pub(super) pass: u64,                // The next ready thread with lowest pass wins
@@ -195,25 +152,8 @@ pub(super) struct ThreadControlBlock {
     pub(super) affinity: Option<u8>,              // Affinity to a particular HART
 }
 
-pub(super) struct HartState {
-    pub(super) running_thread: usize,
-    pub(super) switching_thread: Option<usize>,
-}
-
 pub(super) struct ThreadsInner {
     pub(super) control_blocks: [ThreadControlBlock; THREADS_MAX],
-    pub(super) hart_state: [HartState; HARTS_MAX],
-}
-
-impl ThreadsInner {
-    // Returns the hart_state for this thread
-    pub(super) fn this_hart(&self) -> &HartState {
-        &self.hart_state[cpu_id()]
-    }
-
-    pub(super) fn this_hart_mut(&mut self) -> &mut HartState {
-        &mut self.hart_state[cpu_id()]
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -6,12 +6,12 @@ use crate::arch::STACK_CANARY;
 use crate::arch::context::switch_to;
 use crate::board::HARTS_MAX;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
-use crate::kernel::timer;
+use crate::kernel::{percpu, timer};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::types::{
-    Deadline, HartState, HeapStack, PostSwitch, Qos, Stack, StackClass, State, THREADS_MAX,
-    ThreadControlBlock, ThreadHandle, ThreadsInner,
+    Deadline, HeapStack, PostSwitch, Qos, StackClass, State, THREADS_MAX, ThreadControlBlock,
+    ThreadHandle, ThreadsInner,
 };
 
 // Helper function to determine the HART boot threads in the threads array
@@ -59,6 +59,7 @@ impl ThreadControlBlock {
             state: State::Avail,
             sp: core::ptr::null_mut(),
             stack: None,
+            stack_base: core::ptr::null_mut(),
             qos: Qos::Low,
             priority: PRIORITY_MIN,
             pass: 0,
@@ -88,13 +89,9 @@ impl ThreadControlBlock {
 
     // Deallocate the stack if heap-based
     fn release_stack(&mut self) {
-        let stack = self
-            .stack
-            .take()
-            .expect("should not be calling release_stack on uninitialised TCB");
-        if let Stack::Heap(class) = stack {
+        if let Some(class) = self.stack.take() {
             unsafe {
-                HeapStack::deallocate(class, self.sp);
+                HeapStack::deallocate(class, self.stack_base);
             }
         }
         self.sp = core::ptr::null_mut();
@@ -149,7 +146,7 @@ impl ThreadsInner {
     // Returns a count of the ready threads
     fn wake_sleeping_threads(&mut self) -> usize {
         let now = timer::elapsed();
-        let running_idx = self.this_hart().running_thread;
+        let running_idx = percpu::current_thread_idx();
         let mut ready_count: usize = 0;
         for (idx, tcb) in self.control_blocks.iter_mut().enumerate() {
             if idx == running_idx {
@@ -230,7 +227,7 @@ impl ThreadsInner {
         usize,
     )> {
         // Find current index
-        let curr_idx = self.this_hart().running_thread;
+        let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
         // Find next index
         let next_idx = self
@@ -262,7 +259,7 @@ impl ThreadsInner {
         usize,
     )> {
         // Find current index
-        let curr_idx = self.this_hart().running_thread;
+        let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
         let next_idx = self
             .control_blocks
@@ -284,21 +281,25 @@ impl ThreadsInner {
     }
 
     fn check_curr_canary(&self) {
-        let curr = &self.control_blocks[self.this_hart().running_thread];
-        if let Some(stack) = &curr.stack {
-            let class = stack.class();
-            let base_addr = curr.sp.addr() & !class.mask();
-            let val = unsafe { core::ptr::read(base_addr as *const usize) };
-            assert!(
-                val == STACK_CANARY,
-                "stack canary corrupted in thread {}: sp={:p}, base={:#x}, read={:#x}, expected={:#x}",
-                curr.id,
-                curr.sp,
-                base_addr,
-                val,
-                STACK_CANARY,
-            );
-        }
+        let curr = &self.control_blocks[percpu::current_thread_idx()];
+        let base_addr = curr.stack_base;
+        let val = unsafe { core::ptr::read(base_addr as *const usize) };
+        assert!(
+            val == STACK_CANARY,
+            "stack canary corrupted in thread {}: sp={:p}, base={:p}, read={:#x}, expected={:#x}",
+            curr.id,
+            curr.sp,
+            base_addr,
+            val,
+            STACK_CANARY,
+        );
+    }
+
+    // Set the PerCpu info for the next running thread on this HART
+    fn set_percpu_threads(&mut self, next_idx: usize, switching_thread_idx: Option<usize>) {
+        percpu::set_current_thread_idx(next_idx);
+        percpu::set_current_stack_base(self.control_blocks[next_idx].stack_base);
+        percpu::set_switching_thread_idx(switching_thread_idx);
     }
 }
 
@@ -310,17 +311,16 @@ pub(super) struct Scheduler {
     run_cycles: [CounterU64; THREADS_MAX], // Outside of threads for lock-free read
 }
 
+unsafe extern "C" {
+    static __hart0_stack_start: u8;
+    static __hart1_stack_start: u8;
+}
+
 impl Scheduler {
     const fn new() -> Self {
         Self {
             threads: IrqSpinLock::new(ThreadsInner {
                 control_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
-                hart_state: [const {
-                    HartState {
-                        running_thread: 0,
-                        switching_thread: None,
-                    }
-                }; HARTS_MAX],
             }),
             run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
@@ -334,21 +334,23 @@ impl Scheduler {
             id,
             state: State::Running,
             sp: crate::arch::csr::regs::sp() as *mut u8,
-            stack: Some(Stack::Fixed),
+            stack: None, // Fixed stack is set by linker script
+            stack_base: match hartid {
+                0 => &raw const __hart0_stack_start as *mut u8,
+                1 => &raw const __hart1_stack_start as *mut u8,
+                _ => unreachable!("only running two harts"),
+            },
             last_started_cycles: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
-        threads.this_hart_mut().running_thread = slot_for_boot(hartid)
+        threads.set_percpu_threads(slot_for_boot(hartid), None);
     }
 
     /// Helper function to clean up post switch threads
     pub(super) fn post_switch_cleanup(&self) {
         // After switch_to returns (on this thread's eventual resume),
         let mut threads = self.threads.lock();
-        let switched_idx = threads
-            .this_hart_mut()
-            .switching_thread
-            .take()
+        let switched_idx = percpu::take_switching_thread_idx()
             .expect("should have a Switching thread to set back to Ready");
         let new_state = {
             match threads.control_blocks[switched_idx].state {
@@ -391,7 +393,7 @@ impl Scheduler {
         let Some((idx, tcb)) = threads.free_slot() else {
             drop(threads);
             unsafe {
-                HeapStack::deallocate(class, sp);
+                HeapStack::deallocate(class, base.as_ptr());
             }
             return None;
         };
@@ -402,7 +404,8 @@ impl Scheduler {
             state: State::Ready,
             qos,
             priority,
-            stack: Some(Stack::Heap(class)),
+            stack: Some(class),
+            stack_base: base.as_ptr(),
             pass: baseline,
             affinity,
             ..ThreadControlBlock::new()
@@ -440,7 +443,7 @@ impl Scheduler {
             threads.check_curr_canary();
             // First check if current state matches pre-condition
             if let Some(state) = current_state {
-                let idx = threads.this_hart().running_thread;
+                let idx = percpu::current_thread_idx();
                 if threads.control_blocks[idx].state != state {
                     return;
                 }
@@ -470,10 +473,7 @@ impl Scheduler {
             let prev_sp_ptr = &raw mut curr.sp;
             let next_sp_ptr = &raw mut next.sp;
 
-            *threads.this_hart_mut() = HartState {
-                running_thread: next_idx,
-                switching_thread: Some(curr_idx),
-            };
+            threads.set_percpu_threads(next_idx, Some(curr_idx));
             let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
             threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
@@ -500,7 +500,7 @@ impl Scheduler {
         // thread keeps appearing to have its old (low) pass and
         // never loses a comparison.
         let now_cycles = timer::elapsed();
-        let curr_idx = threads.this_hart().running_thread;
+        let curr_idx = percpu::current_thread_idx();
         {
             let curr = &mut threads.control_blocks[curr_idx];
             let ran = now_cycles - curr.last_started_cycles;
@@ -522,10 +522,7 @@ impl Scheduler {
         // Create local variables before dropping the lock
         let prev_sp_ptr = &raw mut curr.sp;
         let next_sp_ptr = &raw mut next.sp;
-        *threads.this_hart_mut() = HartState {
-            running_thread: next_idx,
-            switching_thread: Some(curr_idx),
-        };
+        threads.set_percpu_threads(next_idx, Some(curr_idx));
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
         drop(threads);
@@ -630,7 +627,7 @@ impl Scheduler {
     /// Get the current thread handle
     pub fn current_thread(&self) -> ThreadHandle {
         let threads = self.threads.lock();
-        let idx = threads.this_hart().running_thread;
+        let idx = percpu::current_thread_idx();
         ThreadHandle {
             id: threads.control_blocks[idx].id,
             idx,

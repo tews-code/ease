@@ -5,11 +5,10 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *
  * We are modeling an AdaFruit Metro RP2350 with 8MB PSRAM.
  * This board contians a RP2350 microcontroller with 520KB SRAM and 8MB PSRAM,
- * some of which is assigned to a framebuffer. QEMU is configured to provide
- * 32MB of physical RAM starting at 0x80000000.
- * We declare only 520KiB as our working SRAM region. PSRAM is placed
+ * QEMU is configured to provide 32MB of physical RAM starting at 0x80000000, but
+ * we declare only 520KiB as our working SRAM region. PSRAM is placed
  * at a separate address (0x81000000) to model a separate PSRAM region,
- * similar to real hardware
+ * similar to real hardware.
  * Flash memory is used to replicate XIP.
  *
  * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
@@ -17,16 +16,20 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             | .rodata / .srodata |
  *             | .data / .sdata     |   LMA for .data
  * 0x2100_0000 +--------------------+
- * 0x8000_0000 +--------------------+   Represents RP2350 520KiB SRAM
+ *
+ * 0x8000_0000 +--------------------+   Represents RP2350 256KiB SRAM0-3 - Power Domain 0
+ *             | heap -->           |
+ *             |                    |
+ * 0x8004_0000 +--------------------+   Represents RP2350 256KiB SRAM4-7 - Power Domain 1
  *             | .data / .sdata     |   VMA for .data
  *             | .bss / .sbss       |
  *             | heap -->           |  Grows up (bounded by __heap_end)
  *             |                    |
  *             |                    |
- * 0x80080000  +--------------------+
- *             | SRAM4 - HART0 stack|
- * 0x80081000  +--------------------+
- *             | SRAM5 - HART1 stack|
+ * 0x8008_0000 +--------------------+   Also in Power Domain 1
+ *             | SRAM8 - HART0 stack|
+ * 0x80081000  +--------------------+   Also in Power Domain 1
+ *             | SRAM9 - HART1 stack|
  * 0x80082000  +--------------------+  End of declared SRAM (520KiB)
  *             :   (unused gap)     :
  * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
