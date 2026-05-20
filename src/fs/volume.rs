@@ -125,7 +125,7 @@ impl Volume {
         if entry.file_size == 0 {
             return Ok(Vec::new());
         }
-        let mut content = Vec::<u8>::new();
+        let mut content = Vec::<u8>::with_capacity(entry.file_size as usize);
         let mut current_cluster = entry.first_cluster;
         let mut buf = [0u8; 512];
         loop {

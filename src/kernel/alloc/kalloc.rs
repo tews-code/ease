@@ -3,7 +3,7 @@
 use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
 
-use crate::kernel::alloc::buddy::Buddy;
+use crate::kernel::alloc::buddy::BuddyPd1;
 use crate::kernel::alloc::slab::Slab;
 
 const BASE_SIZE: usize = 4096;
@@ -13,7 +13,7 @@ pub struct KAlloc {
     pool_64: Slab<64>,
     pool_128: Slab<128>,
     pool_256: Slab<256>,
-    buddy: Buddy,
+    buddy: BuddyPd1,
 }
 
 impl KAlloc {
@@ -23,7 +23,7 @@ impl KAlloc {
             pool_64: Slab::new(),
             pool_128: Slab::new(),
             pool_256: Slab::new(),
-            buddy: Buddy::new(),
+            buddy: BuddyPd1::new(),
         }
     }
 
