@@ -85,13 +85,8 @@ fn kernel_init() {
     sched::bootstrap(0);
     arch::enable_interrupts();
 
-    // Large-allocation init — skipped when the slab is the sole allocator,
-    // because the slab cannot serve the virtq and FAT buffers these need.
-    #[cfg(not(feature = "alloc-slab"))]
-    {
-        drivers::virtio::virtio_blk_init();
-        fs::volume::fat16_init();
-    }
+    drivers::virtio::virtio_blk_init();
+    fs::volume::fat16_init();
 
     let fb = drivers::ramfb::FrameBuffer::init();
     *FB_HANDOFF.lock() = Some(fb);

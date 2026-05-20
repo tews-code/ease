@@ -1,10 +1,10 @@
 //! Allocators
 
-// Each allocator compiles unconditionally in host builds so its
-// `host_tests` module runs under every `cargo test --lib` and Miri
-// invocation regardless of which allocator is active in the kernel
-// binary. In kernel binary builds each is gated behind its own feature,
-// so only one provides the `#[global_allocator]` static in main.rs.
+// Each allocator module compiles unconditionally so its `host_tests`
+// module runs under `cargo test --lib` and Miri. The kernel binary
+// uses KAlloc (slab + buddy tier) as its sole `#[global_allocator]`.
+// `bump` and `freelist` are retained for their host_tests as reference
+// algorithms — they're not wired into the kernel.
 mod buddy;
 mod bump;
 mod freelist;
@@ -23,13 +23,13 @@ mod bare_metal_alloc {
     // Heap and Global Allocator
     // =============================================================================
     //
-    // The global allocator instance lives here in the binary crate so that the `#[global_allocator]` attribute and
-    // the linker-symbol references stay confined to code that is only ever
-    // compiled for the kernel target. This keeps the FreeBlockList type itself
-    // host-testable without polluting the lib crate.
+    // The `#[global_allocator]` static and the linker-symbol references
+    // live inside this `#[cfg(target_os = "none")]` mod so they only
+    // compile for the kernel target. The allocator algorithm types stay
+    // host-testable in their own modules.
 
     // Safety: Symbols are created in the linker script with valid addresses
-    // and are FreeBlock-aligned (16-byte ALIGN in the .heap section).
+    // and are aligned per each region's ALIGN() in the linker script.
     unsafe extern "C" {
         static __heap_pd0_start: u8;
         static __heap_pd0_end: u8;
@@ -99,31 +99,21 @@ pub fn kalloc_psram(layout: Layout) -> *mut u8 {
 #[cfg(all(test, feature = "test-alloc", feature = "test-bench"))]
 pub(crate) use bare_metal_alloc::heap_start_addr;
 #[cfg(target_os = "none")]
-#[allow(unused_imports)]
+#[allow(unused_imports)] // main.rs consumes this but isn't part of the lib check
 pub use bare_metal_alloc::init_global_allocator;
 
-// Allocator-agnostic QEMU benchmark suite. Compiles only when one of the
-// global allocators is active and both test-alloc and test-bench are on.
-// test-bench is opt-in (not part of test-all) so regression benches can
-// be run separately from functional tests.
+// QEMU benchmark suite for KAlloc. test-bench is opt-in (not part of
+// test-all) so regression benches can be run separately from functional
+// tests.
 #[cfg(all(
     test,
     target_os = "none",
     feature = "test-alloc",
     feature = "test-bench",
-    any(
-        feature = "alloc-slab",
-        feature = "alloc-freelist",
-        feature = "alloc-bump",
-        feature = "alloc-buddy",
-        feature = "alloc-kalloc"
-    )
 ))]
 mod bench;
 
-// Note: the allocator is initialised from
-// main.rs via `init_global_allocator()`, since the global static and
-// linker symbols live in the binary crate.
+// `init_global_allocator()` is called from main.rs during early boot.
 
 #[allow(dead_code)]
 fn align_up(addr: usize, align: usize) -> usize {
