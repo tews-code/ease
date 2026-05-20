@@ -61,10 +61,6 @@ __fb_size   = 640 * 480 * 4;   /* 640  x 480 x 4 bytes = 1.2MiB */
 __fb_addr   = 0x81800000 - __fb_size;
 
 SECTIONS {
-
-    PROVIDE(__heap_start = __heap_pd1_start);
-    PROVIDE(__heap_end = __heap_pd1_end);
-
     .text : { *(.text.init) *(.text .text.*) } > FLASH
 
     .rodata : {
