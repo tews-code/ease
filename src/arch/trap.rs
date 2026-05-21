@@ -54,7 +54,7 @@ const _: () = assert!(
 
 global_asm!(
     r#"
-    .section .text
+    .section .sram8_text, "ax"
     .global _trap_vector
     .align 4
     _trap_vector:

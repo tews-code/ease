@@ -108,6 +108,8 @@ SECTIONS {
         4KB starting at 0x8008_0000 */
     .sram8_text 0x80080000 : ALIGN(4) {
         __sram8_text_start = .;
+        *(.sram8_text .sram8_text.*)
+        . = ALIGN(4);
         __sram8_text_end = .;
     } > SRAM_PD1 AT > FLASH
     __sram8_text_lma = LOADADDR(.sram8_text);

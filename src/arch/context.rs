@@ -65,7 +65,7 @@ unsafe extern "C" fn thread_first_run(
 
 global_asm!(
     r#"
-    .section .text
+    .section .sram8_text, "ax"
     .global switch_to
     .align 4
     switch_to:
