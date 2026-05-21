@@ -218,6 +218,7 @@ impl ThreadsInner {
     // Get disjoint mutable TCBs for current and next
     // Given there is always an idle thread in Ready
     // Panics if there is no idle thread, or idle calls reschedule
+    #[inline(never)]
     fn pick_next_ready_mut(
         &mut self,
     ) -> Option<(
@@ -250,6 +251,7 @@ impl ThreadsInner {
     }
 
     // Get disjoint mutable TCBs for current and next
+    #[inline(never)]
     fn pick_next_if_fairer_mut(
         &mut self,
     ) -> Option<(
@@ -280,6 +282,7 @@ impl ThreadsInner {
         }
     }
 
+    #[inline(never)]
     fn check_curr_canary(&self) {
         let curr = &self.control_blocks[percpu::current_thread_idx()];
         let base_addr = curr.stack_base;

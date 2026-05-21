@@ -114,7 +114,7 @@ SECTIONS {
     } > SRAM_PD1 AT > FLASH
     __sram8_text_lma = LOADADDR(.sram8_text);
 
-    .sram8_irq_stack (NOLOAD) : ALIGN(4) {
+    .sram8_irq_stack 0x80080400 (NOLOAD) : ALIGN(4) {
         __hart0_irq_stack_start = .;
         . = . + 1K;
         __hart0_irq_stack_top = .;
