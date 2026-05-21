@@ -29,9 +29,9 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             |                    |
  *             |                    |
  * 0x8008_0000 +--------------------+   Also in Power Domain 1
- *             |SRAM8: HART0 scratch|
+ *             |SRAM8: HART0 scratch|   Split into text, IRQ stack, PerCpu data and boot stack
  * 0x80081000  +--------------------+   Also in Power Domain 1
- *             |SRAM9: HART1 scratch|
+ *             |SRAM9: HART1 scratch|   Split into text, IRQ stack, PerCpu data and boot stack
  * 0x80082000  +--------------------+  End of declared SRAM (520KiB)
  *             :   (unused gap)     :
  * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
@@ -104,17 +104,53 @@ SECTIONS {
         __heap_psram_end = .;
     } > PSRAM
 
-    /* Add dedicated SRAM8 for HART0 scratch ram */
-    .scratch_hart0 0x80080000 (NOLOAD) : {
+    /* SRAM8 is the dedicated HART0 scratch RAM
+        4KB starting at 0x8008_0000 */
+    .sram8_text 0x80080000 : ALIGN(4) {
+        __sram8_text_start = .;
+        __sram8_text_end = .;
+    } > SRAM_PD1 AT > FLASH
+    __sram8_text_lma = LOADADDR(.sram8_text);
+
+    .sram8_irq_stack (NOLOAD) : ALIGN(4) {
+        __hart0_irq_stack_start = .;
+        . = . + 1K;
+        __hart0_irq_stack_top = .;
+    } > SRAM_PD1
+
+    .sram8_percpu : ALIGN(8) {
+        __hart0_percpu_start = .;
+        *(.sram8_percpu .sram8_percpu.*)
+        . = __hart0_percpu_start + 256;
+        __hart0_percpu_end = .;
+    } > SRAM_PD1 AT > FLASH
+    __hart0_percpu_lma = LOADADDR(.sram8_percpu);
+
+    .sram8_task_stack (NOLOAD) : {
         __hart0_stack_start = .;
-        . = . + 4K;
+        . = 0x80081000;
         __hart0_stack_top = .;
     } > SRAM_PD1
 
-    /* Add dedicated SRAM9 for HART1 scratch ram */
-    .scratch_hart1 0x80081000 (NOLOAD) : {
+    /* SRAM9 is the dedicated HART1 scratch RAM
+        4KB starting at 0x8008_1000 */
+    .sram9_irq_stack 0x80081000 (NOLOAD) : ALIGN(4) {
+        __hart1_irq_stack_start = .;
+        . = . + 1K;
+        __hart1_irq_stack_top = .;
+    } > SRAM_PD1
+
+    .sram9_percpu : ALIGN(8) {
+        __hart1_percpu_start = .;
+        *(.sram9_percpu .sram9_percpu.*)
+        . = __hart1_percpu_start + 256;
+        __hart1_percpu_end = .;
+    } > SRAM_PD1 AT > FLASH
+    __hart1_percpu_lma = LOADADDR(.sram9_percpu);
+
+    .sram9_task_stack (NOLOAD) : {
         __hart1_stack_start = .;
-        . = . + 4K;
+        . = 0x80082000;
         __hart1_stack_top = .;
     } > SRAM_PD1
 
@@ -123,4 +159,12 @@ SECTIONS {
 
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")
-ASSERT(__heap_pd1_end <= __hart0_stack_start, "PD1 heap overflows scratch RAM")
+ASSERT(__heap_pd1_end <= __sram8_text_start, "PD1 heap overflows scratch SRAM8")
+ASSERT(__sram8_text_end <= __hart0_irq_stack_start, "SRAM8 text spills into irq stack")
+ASSERT(__hart0_irq_stack_top <= __hart0_percpu_start, "SRAM8 irq stack overflows into percpu")
+ASSERT(__hart0_percpu_end <= __hart0_stack_start, "SRAM8 percpu spills into stack")
+ASSERT(__hart0_stack_top <= 0x80081000, "SRAM8 stack top outside of region")
+ASSERT(__hart0_stack_top <= __hart1_irq_stack_start, "SRAM8 stack overflows into SRAM9")
+ASSERT(__hart1_irq_stack_top <= __hart1_percpu_start, "SRAM9 irq stack overflows into percpu")
+ASSERT(__hart1_percpu_end <= __hart1_stack_start, "SRAM9 percpu spills into stack")
+ASSERT(__hart1_stack_top <= 0x80082000, "SRAM9 stack top outside of region")

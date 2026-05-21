@@ -22,7 +22,9 @@ impl PerCpu {
     }
 }
 
+#[unsafe(link_section = ".sram8_percpu")]
 static PERCPU_HART0: PerCpu = PerCpu::new();
+#[unsafe(link_section = ".sram9_percpu")]
 static PERCPU_HART1: PerCpu = PerCpu::new();
 
 fn this_cpu() -> &'static PerCpu {

@@ -10,15 +10,23 @@ use crate::arch::STACK_CANARY;
 // # Safety
 // Symbols are defined in the linker script and mark aligned addresses
 unsafe extern "C" {
-    static __hart0_stack_start: u8;
-    static __hart0_stack_top: u8;
-    static __hart1_stack_start: u8;
-    static __hart1_stack_top: u8;
     static __bss_start: u8;
     static __bss_end: u8;
     static __data_start: u8;
     static __data_end: u8;
     static __data_lma: u8;
+
+    static __hart0_stack_start: u8;
+    static __hart0_stack_top: u8;
+    static __hart0_percpu_start: u8;
+    static __hart0_percpu_end: u8;
+    static __hart0_percpu_lma: u8;
+
+    static __hart1_stack_start: u8;
+    static __hart1_stack_top: u8;
+    static __hart1_percpu_start: u8;
+    static __hart1_percpu_end: u8;
+    static __hart1_percpu_lma: u8;
 }
 
 #[unsafe(link_section = ".text.init")]
@@ -49,15 +57,41 @@ extern "C" fn _start() -> ! {
         "j 1b",
         "2:",
 
+        // Copy PerCpu from LMA to VMA - HART0
+        "la t0, {hart0_percpu_lma}",
+        "la t1, {hart0_percpu_start}",
+        "la t2, {hart0_percpu_end}",
+        "3:",
+        "bge t1, t2, 4f",
+        "lw t3, 0(t0)",
+        "sw t3, 0(t1)",
+        "addi t0, t0, 4",
+        "addi t1, t1, 4",
+        "j 3b",
+        "4:",
+
+        // Copy PerCpu from LMA to VMA - HART1
+        "la t0, {hart1_percpu_lma}",
+        "la t1, {hart1_percpu_start}",
+        "la t2, {hart1_percpu_end}",
+        "5:",
+        "bge t1, t2, 6f",
+        "lw t3, 0(t0)",
+        "sw t3, 0(t1)",
+        "addi t0, t0, 4",
+        "addi t1, t1, 4",
+        "j 5b",
+        "6:",
+
         // Zero BSS segment
         "la t0, {bss_start}",
         "la t1, {bss_end}",
-        "3:",
-        "bge t0, t1, 4f",
+        "7:",
+        "bge t0, t1, 8f",
         "sw zero, 0(t0)",
         "addi t0, t0, 4",       // A word is 4 bytes
-        "j 3b",                 // "b" means jump backward
-        "4:",
+        "j 7b",                 // "b" means jump backward
+        "8:",
 
         // Set trap vector for HART0
         "la t0, _trap_vector",
@@ -86,6 +120,12 @@ extern "C" fn _start() -> ! {
         data_start = sym __data_start,
         data_end = sym __data_end,
         data_lma = sym __data_lma,
+        hart0_percpu_start = sym __hart0_percpu_start,
+        hart0_percpu_end = sym __hart0_percpu_end,
+        hart0_percpu_lma = sym __hart0_percpu_lma,
+        hart1_percpu_start = sym __hart1_percpu_start,
+        hart1_percpu_end = sym __hart1_percpu_end,
+        hart1_percpu_lma = sym __hart1_percpu_lma,
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
         canary = const STACK_CANARY,

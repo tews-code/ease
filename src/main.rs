@@ -1,24 +1,7 @@
 //! EASE - OS for RP2350
 //!
-//! A hobby OS for Raspberry Pi Pico 2 in RISC-V mode.
+//! A hobby OS for Adafruit Metro RP2350 with 8MB PSRAM in RISC-V mode.
 //!
-//! # Boot Process (QEMU virt)
-//!
-//! 1. QEMU loads the kernel binary at `0x80000000` (RAM base, set in `memory-qemu.x`)
-//! 2. CPU begins execution at the `ENTRY` symbol: [`_start`]
-//!
-//! # Memory Layout
-//!
-//! Defined in `memory-qemu.x` for QEMU's `virt` machine:
-//!
-//! | Section   | Location | Contents                    |
-//! |-----------|----------|-----------------------------|
-//! | `.text`   | RAM      | Executable code             |
-//! | `.rodata` | RAM      | Read-only data (strings)    |
-//! | `.data`   | RAM      | Initialized mutable data    |
-//! | `.bss`    | RAM      | Zero-initialized data       |
-//!
-//! RAM spans `0x80000000` to `0x81800000` (32 MB on QEMU virt).
 
 #![no_std]
 #![no_main]
@@ -32,8 +15,8 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::ramfb::FrameBuffer;
-use crate::kernel::sched;
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sched::{self, spawn};
+use crate::kernel::sync::{Completion, IrqSpinLock};
 
 extern crate alloc;
 
@@ -49,6 +32,7 @@ mod qemu;
 mod shell;
 
 static FB_HANDOFF: IrqSpinLock<Option<FrameBuffer>> = IrqSpinLock::new(None);
+static FB_READY: Completion = Completion::new();
 static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
@@ -57,7 +41,11 @@ static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 #[allow(dead_code)]
 fn shell_thread() {
-    let fb = FB_HANDOFF.lock().take().expect("FB already handed off");
+    FB_READY.wait();
+    let fb = FB_HANDOFF
+        .lock()
+        .take()
+        .expect("Framebuffer should be present after FB_READY signal");
     let console = shell::console::Console::new(fb);
     let mut shell = shell::Shell::new(console);
     shell.run();
@@ -75,7 +63,8 @@ fn secondary_init() {
     arch::enable_interrupts();
 }
 
-fn kernel_init() {
+fn minimal_init() {
+    // Initialise just the basics to keep stack use light
     kernel::timer::init();
     kernel::alloc::init_global_allocator();
     drivers::plic::init();
@@ -84,15 +73,21 @@ fn kernel_init() {
 
     sched::bootstrap(0);
     arch::enable_interrupts();
-
-    drivers::virtio::virtio_blk_init();
-    fs::volume::fat16_init();
-
-    let fb = drivers::ramfb::FrameBuffer::init();
-    *FB_HANDOFF.lock() = Some(fb);
-
-    // Set the flag
+    // Set the flag to allow HART1 to progress
     INIT_COMPLETE.store(true, Ordering::Release);
+}
+
+fn kernel_init() {
+    minimal_init();
+    // Spawn a thread with a deeper stack to complete initialisation
+    spawn(|| {
+        drivers::virtio::virtio_blk_init();
+        fs::volume::fat16_init();
+
+        let fb = drivers::ramfb::FrameBuffer::init();
+        *FB_HANDOFF.lock() = Some(fb);
+        FB_READY.signal();
+    });
 }
 
 #[unsafe(no_mangle)]
