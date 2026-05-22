@@ -1,12 +1,14 @@
 //! Per HART struct
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C, align(8))]
 struct PerCpu {
     current_thread_idx: UnsafeCell<usize>,
     current_stack_base: UnsafeCell<*mut u8>,
     switching_thread_idx: UnsafeCell<Option<usize>>,
+    needs_reschedule: AtomicBool,
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -18,6 +20,7 @@ impl PerCpu {
             current_thread_idx: UnsafeCell::new(usize::MAX),
             current_stack_base: UnsafeCell::new(core::ptr::null_mut()),
             switching_thread_idx: UnsafeCell::new(None),
+            needs_reschedule: AtomicBool::new(false),
         }
     }
 }
@@ -87,4 +90,23 @@ pub fn take_switching_thread_idx() -> Option<usize> {
         *hart.switching_thread_idx.get() = None;
     }
     thread_idx
+}
+
+/// Check the needs_reschedule state of this thread
+pub fn needs_reschedule() -> bool {
+    let hart = this_cpu();
+    hart.needs_reschedule.load(Ordering::Acquire)
+}
+
+/// Check if this thread needs to be rescheduled
+/// Sets the reschedule flag to false on read
+pub fn take_needs_reschedule() -> bool {
+    let hart = this_cpu();
+    hart.needs_reschedule.swap(false, Ordering::Acquire)
+}
+
+/// Set the reschedule request flag
+pub fn set_needs_reschedule() {
+    let hart = this_cpu();
+    hart.needs_reschedule.store(true, Ordering::Release);
 }

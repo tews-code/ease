@@ -438,6 +438,8 @@ impl Scheduler {
         // It's a non-local control transfer wearing the disguise of a function call.
         // It works correctly because the closure frame is preserved on the suspended thread's stack
         with_interrupts_disabled(|_cs| {
+            // Clear any reschedule flag as we are rescheduling
+            let _ = percpu::take_needs_reschedule();
             // We manually take and release the lock before the
             // context switch — it's held in this
             // thread's stack frame, so switch_to would otherwise carry the lock
@@ -487,13 +489,10 @@ impl Scheduler {
         });
     }
 
-    /// Preempts from current thread to next thread
-    ///
-    /// Note: if only one thread is runnable returns early.
-    pub(super) fn preempt(&self) {
+    /// Perform switch accounting and set reschedule flag
+    pub(super) fn mark_for_preempt(&self) {
         let mut threads = self.threads.lock();
         threads.check_curr_canary();
-        // let sched = threads.wake_threads();
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
 
@@ -512,28 +511,43 @@ impl Scheduler {
             curr.stride(ran);
         }
 
-        let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_if_fairer_mut() else {
+        let Some((_curr, _curr_idx, _next, _next_idx)) = threads.pick_next_if_fairer_mut() else {
             // Same thread is running uncontended, increase slice deadline
             threads.set_next_timer(earliest_deadline, ready_count);
             return;
         };
-        // Perform switch
-        curr.state = State::Switching(PostSwitch::Ready);
-        next.state = State::Running;
-        next.last_started_cycles = now_cycles;
 
-        // Create local variables before dropping the lock
-        let prev_sp_ptr = &raw mut curr.sp;
-        let next_sp_ptr = &raw mut next.sp;
-        threads.set_percpu_threads(next_idx, Some(curr_idx));
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
-        drop(threads);
+        percpu::set_needs_reschedule();
+    }
 
-        unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+    pub(super) fn schedule(&self) {
+        if percpu::take_needs_reschedule() {
+            with_interrupts_disabled(|_cs| {
+                let mut threads = self.threads.lock();
+                threads.check_curr_canary();
+                let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_if_fairer_mut()
+                else {
+                    return;
+                };
+                // Perform switch
+                curr.state = State::Switching(PostSwitch::Ready);
+                next.state = State::Running;
+                let now_cycles = timer::elapsed();
+                next.last_started_cycles = now_cycles;
+                // Create local variables before dropping the lock
+                let prev_sp_ptr = &raw mut curr.sp;
+                let next_sp_ptr = &raw mut next.sp;
+                threads.set_percpu_threads(next_idx, Some(curr_idx));
+                drop(threads);
 
-        // After switch_to returns (on this thread's eventual resume),
-        self.post_switch_cleanup();
+                unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+
+                // After switch_to returns (on this thread's eventual resume),
+                self.post_switch_cleanup();
+            });
+        }
     }
 
     /// Yields current thread
@@ -607,11 +621,13 @@ impl Scheduler {
     // Unpark the thread at index
     pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
+        let mut did_unpark: bool = false;
         let affinity = if matches!(
             threads.control_blocks[handle.idx].state,
             State::Blocked | State::BlockedUntil(_)
         ) && threads.control_blocks[handle.idx].id == handle.id
         {
+            did_unpark = true;
             // Note - does not deal with lost wakeup yet
             threads.control_blocks[handle.idx].state = State::Ready;
             threads.control_blocks[handle.idx].affinity
@@ -619,11 +635,16 @@ impl Scheduler {
             None
         };
         drop(threads);
-        // If the unparked thread has affinity for the other hart, send an IPI
-        if let Some(h) = affinity
-            && h as usize != crate::arch::cpu_id()
-        {
-            crate::kernel::ipi::send(h as usize);
+        if did_unpark {
+            // If the unparked thread has affinity for the other hart, send an IPI
+            if let Some(h) = affinity
+                && h as usize != crate::arch::cpu_id()
+            {
+                crate::kernel::ipi::send(h as usize);
+            } else {
+                // In order to avoid waiting a time slice, set the preempt flag
+                percpu::set_needs_reschedule();
+            }
         }
     }
 
@@ -660,6 +681,8 @@ impl Scheduler {
         let mut threads = self.threads.lock();
         if threads.control_blocks[idx].state == State::Blocked {
             threads.control_blocks[idx].state = State::Ready;
+            // Ask for immediate reschedule to avoid waiting for a time slice
+            percpu::set_needs_reschedule();
         }
     }
 

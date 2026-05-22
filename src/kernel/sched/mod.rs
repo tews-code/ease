@@ -11,7 +11,10 @@ use stride::SCHEDULER;
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
 pub use types::{Qos, StackClass, ThreadHandle};
 
-use crate::board::HARTS_MAX;
+use crate::{
+    board::HARTS_MAX,
+    kernel::{percpu, sync::with_interrupts_disabled},
+};
 
 #[must_use = "Builder must be terminated with .spawn() to actually create a thread"]
 pub struct Builder {
@@ -72,7 +75,12 @@ impl Default for Builder {
 
 pub fn idle_thread() -> ! {
     loop {
-        crate::arch::wait_for_interrupt();
+        with_interrupts_disabled(|_cs| {
+            if !percpu::needs_reschedule() {
+                crate::arch::wait_for_interrupt();
+            }
+        });
+        schedule();
     }
 }
 
@@ -108,11 +116,6 @@ pub fn sleep(deadline_ms: u64) {
 #[allow(dead_code)]
 pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
     SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
-}
-
-/// Preempts thread
-pub fn preempt() {
-    SCHEDULER.preempt();
 }
 
 /// Get cycles of running thread
@@ -181,4 +184,13 @@ pub fn set_self_blocked_until(deadline_ms: u64) {
 /// Park this thread in blocked state with wakeup deadline
 pub fn park_if_blocked_until(deadline_ms: u64) {
     SCHEDULER.park_if_blocked_until(deadline_ms);
+}
+
+/// Flat this thread as ready to be preemptively rescheduled
+pub fn mark_for_preempt() {
+    SCHEDULER.mark_for_preempt();
+}
+/// Schedule the next thread
+pub fn schedule() {
+    SCHEDULER.schedule();
 }

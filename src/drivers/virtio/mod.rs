@@ -285,6 +285,14 @@ fn wait_for_completion() -> Result<(), BlkError> {
         Ok(_) => Ok(()),
         Err(TimedOut) => {
             // Timed out - reset the device
+            {
+                use crate::io::DirectWriter;
+                use core::fmt::Write;
+                let _ = writeln!(
+                    DirectWriter,
+                    "wait_for_completion: Virtio reset needed after timeout"
+                );
+            }
             with_blk_dev(|blk| {
                 blk.vq = VirtioBlkDev::reset();
             });
@@ -323,7 +331,6 @@ pub fn handle_virtio_interrupt() {
     let status = mmio::read32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_STATUS);
     mmio::write32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_ACK, status);
     VIRTIO_COMPLETE.signal();
-    crate::kernel::sched::preempt();
 }
 
 #[cfg(all(test, feature = "test-virtio"))]

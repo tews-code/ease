@@ -13,10 +13,10 @@ use crate::kernel::sched;
 #[unsafe(link_section = ".sram8_text")]
 extern "C" fn trap_handler() {
     match mcause::read() {
-        Trap::Interrupt(TIMER) => sched::preempt(),
+        Trap::Interrupt(TIMER) => sched::mark_for_preempt(),
         Trap::Interrupt(SOFTWARE) => {
             ipi::clear_self();
-            sched::preempt();
+            sched::mark_for_preempt();
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),
