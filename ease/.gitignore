@@ -3,4 +3,5 @@ Cargo.lock
 *.kate-swp
 disk.img
 disk/RP-008373-DS-2-rp2350-datasheet.pdf
+docs/*.pdf
 .rust-analyzer.json

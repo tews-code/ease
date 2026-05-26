@@ -1,0 +1,401 @@
+Things:
+1. Get the heap to be Two separate buddy regions. Initialize one buddy with 256 KiB and a
+  second with 128 KiB. Allocator multiplexes between them.
+2. Get dual core - will require per-hart structs that cover a number of areass, e.g. currently running thread.
+3. Sort out how I check for stack canary across the piste
+4. Clean up the main.rs unused code warnings
+5. Why can't I deallocate a thread? Why are threads -> !
+5. Add a name to a thread: make spawn take an extra field which is the name,
+    struct Name {
+        bytes: [u8; 15],
+        len: u8,
+    }
+    impl Name {
+        fn as_str(&self) -> &str { /* from_utf8_unchecked of &bytes[..len] */
+    }
+    }
+
+    This is a 16-byte struct (15 + 1), no null terminator, no C-string
+    footguns. The length is explicit; truncation is unambiguous; iteration is
+    &self.bytes[..self.len as usize].
+6. Move slice_deadline to native cycles
+7. Change disable interrupts - enable interupts to return a guard for RAII
+
+    Yes — the idiomatic Rust answer is an RAII guard: convert "I must remember to restore
+    interrupts" from a manual responsibility into a typestate that does it automatically
+    when dropped.
+
+    The pattern: introduce a small IrqGuard struct in arch. Make disable_interrupts()
+    return one. The guard stores the previous interrupt state and its Drop impl calls
+    restore_interrupts(prev). You already use this pattern — your IrqSpinLock returns a
+    lock guard whose Drop releases the lock. Same idea, applied to interrupts directly.
+
+    Why this solves your refactor: once interrupt restoration is handled by Drop, neither
+    function has to think about it from inside the shared body. reschedule constructs the
+    guard at its top; preempt doesn't. The shared inner helper can early-return freely —
+    Rust's drop semantics ensure the guard runs only in the function that built it, on
+    every path out (early return, normal return, even panic).
+
+    So the refactor becomes:
+    - Extract the lock/wake/get-pair/bookkeeping/switch_to/post-switch-cleanup body into a
+    shared private helper on Scheduler (e.g. do_switch(new_state: PostSwitch)).
+    - The helper has the early return on curr==next with no cleanup — exactly what you
+    want.
+    - reschedule becomes: build IrqGuard, call helper. Done.
+    - preempt becomes: call helper. Done.
+
+    One subtlety to think through before you commit: today, reschedule calls
+    restore_interrupts(prev) after switch_to returns and post-switch-cleanup runs. With a
+    guard, the drop happens at function exit — same place, so behavior is preserved. The
+    trampoline comment ("mret has restored MIE") suggests the explicit restore is partly
+    belt-and-suspenders; the guard approach keeps that safety net while removing the
+    duplication. Worth tracing one resume path mentally to confirm you're happy with the
+    ordering.
+
+    Files to touch: src/arch/ (wherever disable_interrupts/restore_interrupts live — add
+    the guard type next to them), then src/kernel/sched/roundrobin.rs for the extraction.
+
+    One thing the guard does NOT solve: the body still ends with a switch_to call followed
+    by post-switch logic. If a future variant needs different post-switch behavior, you'd
+    want either a closure parameter or a small enum return — but for two callers that share
+     the post-switch step exactly, the helper-with-guard pattern is the cleanest answer.
+
+  8. Cold review of roundrobin - look at docs/
+
+  9. Do I really want to experiment with different schedulers? If not, get rid of the feature flags
+  10. Do I want to get rid of the feature flags in alloc? I'm not planning to revisit
+  11. Move spinlocks to the hardware address
+12. roundrobin preempt and reschedule are 90% the same code - refactor
+13. Get some more hardware into QEMU
+
+14. Two pieces: declare the region in your linker script, then tag the static.
+
+**`memory.x`** — add the region and a section into it:
+
+```
+MEMORY {
+    /* ... your existing regions ... */
+    SRAM5 : ORIGIN = 0x20081000, LENGTH = 4K  /* adjust to your map */
+}
+
+SECTIONS {
+    .sram5 (NOLOAD) : ALIGN(8) {
+        *(.sram5 .sram5.*)
+    } > SRAM5
+} INSERT AFTER .bss;
+```
+
+`NOLOAD` means no bytes are stored in the flash image and the startup code won't try to copy or zero it. Perfect for audio buffers since you overwrite them anyway.
+
+**Rust side** — pin the buffer with `#[link_section]` and use `MaybeUninit` so you don't owe anyone an initial value:
+
+```rust
+use core::cell::UnsafeCell;
+use core::mem::MaybeUninit;
+
+#[link_section = ".sram5"]
+static AUDIO_BUF: UnsafeCell<MaybeUninit<[i16; 1024]>> =
+    UnsafeCell::new(MaybeUninit::uninit());
+```
+
+That's it — 2KB stereo i16 buffer living in SRAM5, zero flash footprint, no startup cost.
+
+**A couple of practical notes:**
+
+- For ping-pong DMA, just declare two: `AUDIO_A` and `AUDIO_B`, both in `.sram5`. They'll pack into the region in declaration order.
+- If you ever want an *initialized* table there (e.g. a sine LUT for a synth), drop the `NOLOAD`, write `} > SRAM5 AT > FLASH`, and your `cortex-m-rt`-style startup needs a `.sram5` copy loop. For buffers, stay with `NOLOAD` — simpler and cheaper.
+- Use `addr_of_mut!(*AUDIO_BUF.get())` to hand a pointer to the DMA engine; avoid taking `&mut` references that could alias with the DMA's writes.
+- Double-check your SRAM5 base address in the RP2350 datasheet against your linker map — the "4KB direct-mapped per-core" banks have specific addresses and getting them wrong silently puts the buffer in striped RAM with no warning.
+
+15. Buddy is aligned to its size at 256kb - wasting huge RAM:
+
+  ┌──────────────┬──────────┐
+  │    Region    │   Size   │
+  ├──────────────┼──────────┤
+  │ .data + .bss │ ~12 KiB  │
+  ├──────────────┼──────────┤
+  │ padding      │ ~244 KiB │
+  ├──────────────┼──────────┤
+  │ heap         │ 256 KiB  │
+  ├──────────────┼──────────┤
+  │ hart 0 stack │ 4 KiB    │
+  ├──────────────┼──────────┤
+  │ hart 1 stack │ 4 KiB    │
+  └──────────────┴──────────┘
+
+  This means revisiting a _lot_ from linker script to StackClass.
+
+  16. VIRTIO - need to move to the heap for the 64kb mem requirements
+
+  17. Scheduler - move the QoS away from the sleep function, into a separate set of QoS functions
+
+  18. Scheduler - 1000 lines of code! What?? How can this be sensibly split up?
+
+  19. Add a ticket spinlock
+
+  20. A more flexible pattern is caller-provided buffer (read_into):
+
+  pub fn read_file_into(&self, entry: &DirEntry, buf: &mut [u8]) -> Result<usize, FsError>;
+
+  The caller allocates where it makes sense, then asks fs to fill it. This matches POSIX read() and fits EASE's natural use cases:
+
+  - Loading a WAD into PSRAM: loader allocates a 4 MB NAPOT region via kalloc_psram_napot(10), hands it to read_file_into. The
+  read writes straight into the user-app's region — no copy through a kernel buffer.
+  - Editor opening a text file: editor has its own PD0 buffer (atomics-capable, retained across saves), passes it. Same call.
+  - Code-segment loading: loader allocates the code NAPOT region, passes it. Same call.
+
+  No global buffer, no contention, each caller picks the right destination for their data.
+
+  My suggestion:
+
+  Refactor read_file to read_file_into(buf) as the primitive. If you want a convenience for ad-hoc shell-level reads where the
+  caller doesn't care, layer a "default fs buffer" on top — a static PSRAM region wrapped in a Mutex, with read_file() allocating
+  from it as a thin wrapper that calls read_file_into. That way the static buffer is just one consumer, not the only path.
+
+  The static-buffer-in-PSRAM is workable for short-term unblock, but I'd bake the caller-provided shape into the API now while
+  you're touching this code anyway — the kalloc-per-region work you're heading toward will pay back the abstraction immediately.
+
+
+ 21. This whole time my ci.sh has not been benchmarking console printing! So I have no idea how far this has regressed since the early optimisations. Also, when I add emojis, or colour, I need to know the impact.
+
+ 22. IPI-based halt (proper): in the panic handler, send a "halt" IPI to all other HARTs. Each HART's IPI handler
+  disables interrupts and enters wfi forever. Other HARTs are genuinely halted, not just spinning quietly. More work
+  but a real solution.
+
+ 23. The "proper" way to reclaim is the pivot pattern:
+
+  1. Allocate a small dedicated idle stack from heap (say 512 B).
+  2. From main(), switch sp to that new stack via asm.
+  3. Call idle_thread() on the new stack.
+  4. Mark the original boot stack region as available to the heap allocator.
+
+  That requires:
+  - A few lines of asm to pivot sp safely
+  - Updating the bootstrap TCB's stack_base and stack region after the pivot
+  - Telling your allocator about the newly-freed region
+
+  It's ~50 lines of work and is what Linux/seL4/L4 do under the hood. The savings on your hardware are ~3 KiB of SRAM
+  and ~2 KiB of PSRAM per HART.
+
+  Honest take: for a hobby OS, not worth it. The complexity vastly exceeds the gain. 1.5 KiB allocated for boot stack
+  on a system with 520 KiB SRAM + 8 MiB PSRAM is 0.02% of memory. The pivot pattern is a fun thing to implement someday
+   for the educational value, but as a memory-conservation strategy it's diminishing returns.
+
+   24. Filling the gap between .data + .bss and the buddy allocator at 128KB -
+   Secondary allocator for the gap, without NAPOT requirement.
+
+  The buddy needs NAPOT alignment because it's PMP-protected. A kernel-internal allocator doesn't need PMP (kernel
+  always has access). So you can have:
+
+  - Main buddy at 128 K aligned: protected, for user-accessible allocations
+  - Secondary allocator in the gap: not NAPOT-aligned, kernel-only, no PMP entry
+
+  The gap allocator can be much simpler — a freelist or even just bump. Most real OSes use slab-style or freelist for
+  kernel objects, separate from the page/buddy allocator.
+
+  25.
+
+  The shape of the wrapper:
+
+  A PowerAware<Plic> wrapper holds three things:
+  1. The inner PLIC driver (the existing Plic struct, untouched)
+  2. A state field: enum PowerState { Active, Suspended }
+  3. A saved-state struct containing everything needed to reconstruct PLIC hardware after wake — array of priorities
+  for each interrupt source, array of enable bits per context, threshold per context. For your setup that's maybe 96
+  bytes of static save area.
+
+  The state machine:
+
+  - Active: normal operations pass through to the inner PLIC
+  - Suspended: hardware registers may be lost (PLIC is in a powered-down domain); operations either panic, queue, or
+  return error depending on your policy
+
+  Suspend method:
+
+  Called before entering the sleep state that powers PLIC down. Steps:
+  1. Read every per-source priority register into the save struct
+  2. Read every per-context enable register into the save struct
+  3. Read each context's threshold into the save struct
+  4. Flip state to Suspended
+
+  Resume method:
+
+  Called after wake, before re-enabling interrupts globally. Steps:
+  1. Walk save struct and write all priorities back
+  2. Write enable registers back
+  3. Write thresholds back
+  4. Flip state to Active
+
+  How operations interact with state:
+
+  Two valid policies, pick one:
+  - Strict: any enable_irq()/set_priority() call while Suspended panics. Forces correct kernel sequencing (suspend
+  last, resume first among drivers that depend on IRQs).
+  - Lazy: operations write to the save struct directly while Suspended, are flushed to hardware on resume. More
+  forgiving but adds complexity.
+
+  For PLIC specifically, strict is cleaner — IRQs are foundational, you'd never want a subsystem fiddling with them
+  while the controller is dormant.
+
+  Generalizing to a trait:
+
+  Define a PowerManaged trait with suspend(&mut self) and resume(&mut self) methods. Each driver implements it. A
+  central power manager holds a list of &mut dyn PowerManaged references and calls suspend() on each (in dependency
+  order) before sleeping, then resume() in reverse order on wake. Order matters: PLIC suspends last (so other drivers
+  can still acknowledge pending IRQs while shutting down) and resumes first (so other drivers' resume code can re-arm
+  interrupts).
+
+  Memory cost for PLIC wrapper specifically: ~96 bytes save area + a few bytes of state = trivial. For the full driver
+  set: maybe 2-4 KB of save state plus the suspend/resume vtable.
+
+  The hard part isn't the wrapper — it's the ordering and dependency graph. UART driver depends on PLIC for IRQs.
+  Scheduler depends on timer. Display driver depends on framebuffer being in retained PSRAM. Getting suspend/resume
+  order right is where bugs hide. That's the design work; the per-driver wrapper is mostly mechanical.
+
+
+
+  1. Per-driver typestate (easy, useful): Each driver has Plic<Active> and Plic<Suspended> zero-cost markers. Methods
+  only exist on appropriate states. Plic::suspend(self) -> Plic<Suspended>, Plic::resume(self) -> Plic<Active>.
+  Prevents you from calling set_priority() on a suspended PLIC at compile time. This works well and is worth doing.
+
+
+  Realistic recommendation for EASE:
+
+  - Use typestate per driver (cheap, idiomatic, catches real bugs). E.g. Plic<S: PowerState>.
+  - Use capability tokens for the 1-2 most critical dependencies (PLIC → everything-that-uses-IRQs). Accept the
+  lifetime ceremony there because it pays off.
+  - For the general N-driver suspend order, use a runtime priority field with documented ordering, and assert
+  correctness at startup. A bad order panics on first boot, never reaches production.
+
+  The type-system approach has diminishing returns. Pairwise dependencies (X needs Y) are easy and worth enforcing. A
+  10-driver topological suspend chain is theoretically expressible but practically a maintenance burden — you'll spend
+  more time appeasing the compiler than the bug-prevention is worth.
+
+  One pragmatic middle ground: Define a #[derive(PowerOrder)] proc-macro (you already have ease-macros) that emits a
+  const ORDER: u32 from an attribute. Then your runtime suspend loop sorts by ORDER and you get compile-time-visible
+  declarations without the lifetime tax.
+
+ 26.
+
+ What Doom outputs:
+  - Sound effects: 8 simultaneous channels, originally 11 kHz / 8-bit mono per channel, mixed to stereo with positional
+   panning
+  - Music: MIDI/MUS format synthesized live (OPL2/3 emulation) or wavetable
+  - Output: typically resampled to 22 or 44.1 kHz 16-bit stereo for the DAC
+
+  Kernel-side audio subsystem memory:
+
+  - DMA mix buffer: 44.1 kHz × 16-bit × 2 ch × 20 ms double-buffered = ~7 KB, round to 16 KB
+  - Per-channel mixer state (8 channels × ~64 bytes): ~512 B
+  - OPL emulator state (if you do OPL3): ~4-8 KB
+  - Resampling scratch: ~2 KB
+
+  Kernel subtotal: ~24-32 KB
+
+
+  2. Put audio buffers in a dedicated .audio_buf linker section, sized 32 KB, sitting in the gap between .bss and
+    .heap_pd1. Static allocation, no heap pressure. This is the cleanest answer.
+
+
+
+ 27.  The TLS Version
+
+  Step 1: Declare per-CPU variables once
+
+  #[thread_local]
+  static CURRENT_TASK: Cell<*mut Task> = Cell::new(null_mut());
+
+  #[thread_local]
+  static IRQ_NEST: Cell<u32> = Cell::new(0);
+
+  The compiler puts these into .tdata/.tbss. The source code says nothing about hart0 or hart1.
+
+  Step 2: One template in the linker script
+
+  /* Single TLS template, lives in flash */
+  .tdata : {
+      __tdata_start = .;
+      *(.tdata .tdata.*)
+      __tdata_end = .;
+  } > FLASH
+
+  .tbss (NOLOAD) : {
+      __tbss_start = .;
+      *(.tbss .tbss.*)
+      __tbss_end = .;
+  }
+
+  __tls_template_size = __tbss_end - __tdata_start;
+
+  Step 3: One slot per hart in scratch RAM
+
+  .sram8_tls (NOLOAD) : ALIGN(8) {
+      __hart0_tls = .;
+      . = . + __tls_template_size;
+  } > SRAM8
+
+  .sram9_tls (NOLOAD) : ALIGN(8) {
+      __hart1_tls = .;
+      . = . + __tls_template_size;
+  } > SRAM9
+
+  Step 4: Boot code initializes each hart's slot
+
+  For each hart, in early boot:
+
+  // Copy the .tdata template (initial non-zero values) from flash
+  core::ptr::copy_nonoverlapping(
+      &__tdata_start as *const u8,
+      my_tls_base as *mut u8,
+      tdata_size,
+  );
+  // Zero the .tbss portion
+  core::ptr::write_bytes(
+      (my_tls_base + tdata_size) as *mut u8,
+      0,
+      tbss_size,
+  );
+  // Point this hart's tp at its slot
+  asm!("mv tp, {}", in(reg) my_tls_base);
+
+  Now CURRENT_TASK.get() automatically resolves to this hart's copy via tp. No per-hart linker sections, no per-hart Rust statics.
+
+  Step 5: Adding a third hart
+
+  SRAM10 : ORIGIN = 0x80082000, LENGTH = 0x1000
+
+  .sram10_tls (NOLOAD) : ALIGN(8) {
+      __hart2_tls = .;
+      . = . + __tls_template_size;
+  } > SRAM10
+
+  That's it. No new variables, no source changes, no new .sramN_percpu sections.
+
+  Concrete Comparison
+
+  ┌───────────────────────────────────┬───────────────────────────────────┬──────────────────────────────┐
+  │              Aspect               │       Your current approach       │         TLS approach         │
+  ├───────────────────────────────────┼───────────────────────────────────┼──────────────────────────────┤
+  │ Linker sections per hart          │ 1 per hart (.sramN_percpu)        │ 1 template + 1 slot per hart │
+  ├───────────────────────────────────┼───────────────────────────────────┼──────────────────────────────┤
+  │ Rust statics per logical variable │ N (one per hart)                  │ 1 (#[thread_local])          │
+  ├───────────────────────────────────┼───────────────────────────────────┼──────────────────────────────┤
+  │ Adding a hart                     │ Edit linker + duplicate every var │ Add one slot in linker       │
+  ├───────────────────────────────────┼───────────────────────────────────┼──────────────────────────────┤
+  │ Accessing my data                 │ if hartid==0 { HART0_X } else …   │ Just read the variable       │
+  ├───────────────────────────────────┼───────────────────────────────────┼──────────────────────────────┤
+  │ Access cost                       │ Hartid branch + global load       │ One lw rd, off(tp)           │
+  └───────────────────────────────────┴───────────────────────────────────┴──────────────────────────────┘
+
+  Caveats for Beginners
+
+  1. #[thread_local] in Rust is nightly-only. In stable kernels people often use tp-relative access via small inline-asm helpers, or use a crate like riscv that abstracts it. The
+  linker layout doesn't change.
+  2. You still need to set tp once per hart, early. This is the same kind of one-time-per-hart work you already do for setting up the stack pointer.
+  3. TLS has a "model" (local-exec, initial-exec, etc.). For a static kernel binary you always want local-exec — flip the appropriate compiler flag (-C relocation-model=static
+  and/or -Z tls-model=local-exec). For a beginner: just know that the wrong model produces relocations the kernel can't resolve.
+  4. tdata/tbss sizes must be known at link time. That's fine — they always are.
+  5. TLS variables can't be referenced before tp is set up. So the very-early boot code can't use them; it has to fall back to mhartid reads. Trivial constraint in practice.
+
+
+
