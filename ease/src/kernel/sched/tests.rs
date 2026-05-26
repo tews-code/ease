@@ -1569,6 +1569,164 @@ fn affinity_unpark_wakes_via_ipi() {
     );
 }
 
+// =============================================================================
+// Forced preemption (mepc-rewrite trampoline)
+// =============================================================================
+//
+// These two exercise the preempt trampoline specifically: the path where a
+// thread that NEVER reaches a voluntary preemption point (no yield/sleep/
+// cond_resched) is still forced off the CPU by the timer ISR rewriting its
+// saved mepc to the trampoline. Without the trampoline, a tight CPU loop
+// monopolises its hart indefinitely.
+//
+// Note on failure modes: a *totally* broken trampoline (e.g. forced
+// preemption never fires) tends to show up as a HANG here rather than a
+// clean assertion failure — the main test thread's sleep() can never wake
+// because the hog never yields the CPU back. So a CI timeout on one of
+// these is itself the signal. The assertions catch the subtler bugs:
+// preemption firing but resume corrupting state, or one contender starving.
+
+/// A non-cooperative CPU hog (never yields) must not prevent a sleeping,
+/// higher-priority thread from waking on time. The main test thread sleeps
+/// 100 ms while a `Qos::Low` hog spins; the timer ISR must rewrite the hog's
+/// mepc to the trampoline so the woken sleeper can reclaim the hart. Pre-
+/// trampoline this hangs (the hog never hits a preemption point).
+///
+/// Upper bound is deliberately loose per the QEMU timer-jitter note at the
+/// top of this file — we're catching "the sleeper never reclaims the CPU,"
+/// not measuring wake precision.
+#[test_case]
+fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
+    static HOG_ITERS: AtomicUsize = AtomicUsize::new(0);
+    static SPAWNED: AtomicUsize = AtomicUsize::new(0);
+    // Cleared at the end so the hog exits and doesn't disturb later tests.
+    static ACTIVE: AtomicUsize = AtomicUsize::new(1);
+
+    fn hog() {
+        while ACTIVE.load(Ordering::Relaxed) != 0 {
+            // Pure CPU work — no scheduler interaction. The ACTIVE load is a
+            // plain atomic read, not a preemption point.
+            for _ in 0..10_000 {
+                HOG_ITERS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        crate::kernel::sched::exit()
+    }
+
+    if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+        crate::kernel::sched::Builder::new()
+            .with_stack_class(StackClass::KB2)
+            .with_qos(Qos::Low)
+            .spawn(hog);
+    }
+    // Let the hog get scheduled and start spinning before we sleep.
+    crate::kernel::sched::sleep(20);
+
+    let hog_before = HOG_ITERS.load(Ordering::Relaxed);
+    let start = crate::kernel::timer::elapsed_ms();
+    crate::kernel::sched::sleep(100);
+    let elapsed = crate::kernel::timer::elapsed_ms() - start;
+    let hog_after = HOG_ITERS.load(Ordering::Relaxed);
+
+    // Stop the hog before asserting, so a failure still leaves it parked.
+    ACTIVE.store(0, Ordering::Relaxed);
+
+    assert!(
+        hog_after > hog_before,
+        "hog made no progress — it never got scheduled?"
+    );
+    assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
+    assert!(
+        elapsed <= 160,
+        "sleeper failed to reclaim the CPU from the hog within bound \
+         (forced preemption not firing?): {} ms",
+        elapsed
+    );
+}
+
+/// A non-cooperative thread that is repeatedly force-preempted mid-
+/// computation must resume with its registers, mepc, and mstatus intact.
+/// This is the direct regression guard for the trampoline's save/restore
+/// path — a bug there (e.g. swapped mepc/mstatus slots, an unsaved
+/// caller-saved register) corrupts the in-flight computation or faults.
+///
+/// A `compute` thread sums 0..COUNT into a register-resident accumulator
+/// with no scheduler calls; a `peer` thread spins concurrently so the
+/// scheduler must force-preempt `compute` to share the hart. The
+/// `black_box` keeps the loop from being closed-formed away, so it really
+/// runs long enough to span many scheduling slices. If resume corrupted
+/// any loop-carried register, the final sum would differ from the
+/// closed-form expectation.
+#[test_case]
+fn forced_preempt_preserves_computation() {
+    // Large enough to outlast several ~8-10 ms scheduling slices under
+    // contention, so `compute` is preempted many times mid-loop.
+    const COUNT: u32 = 2_000_000;
+    static RESULT: AtomicUsize = AtomicUsize::new(0);
+    static DONE: AtomicUsize = AtomicUsize::new(0);
+    static PEER_ITERS: AtomicUsize = AtomicUsize::new(0);
+    static SPAWNED: AtomicUsize = AtomicUsize::new(0);
+
+    fn compute() {
+        let mut acc: u32 = 0;
+        for i in 0..COUNT {
+            acc = core::hint::black_box(acc.wrapping_add(i));
+        }
+        RESULT.store(acc as usize, Ordering::Relaxed);
+        DONE.store(1, Ordering::Relaxed);
+        crate::kernel::sched::exit()
+    }
+
+    fn peer() {
+        // Spin until compute finishes, forcing contention so compute gets
+        // preempted. Exits once compute is done.
+        while DONE.load(Ordering::Relaxed) == 0 {
+            for _ in 0..10_000 {
+                PEER_ITERS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        crate::kernel::sched::exit()
+    }
+
+    if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
+        crate::kernel::sched::Builder::new()
+            .with_stack_class(StackClass::KB2)
+            .with_qos(Qos::Low)
+            .spawn(peer);
+        crate::kernel::sched::Builder::new()
+            .with_stack_class(StackClass::KB2)
+            .with_qos(Qos::Low)
+            .spawn(compute);
+    }
+
+    // Wait for compute to finish, with a generous timeout. A hang here
+    // means forced preemption deadlocked (one contender never ran).
+    let start = crate::kernel::timer::elapsed_ms();
+    while DONE.load(Ordering::Relaxed) == 0 {
+        crate::kernel::sched::sleep(20);
+        if crate::kernel::timer::elapsed_ms() - start > 5000 {
+            panic!("compute thread never finished — forced preemption stalled?");
+        }
+    }
+
+    // Both must have run: peer progress proves real contention (so compute
+    // was actually preempted), not compute running uninterrupted.
+    assert!(
+        PEER_ITERS.load(Ordering::Relaxed) > 0,
+        "peer never ran — no contention, forced preemption not exercised"
+    );
+
+    // wrapping sum of 0..COUNT == (COUNT*(COUNT-1)/2) mod 2^32. The `as u32`
+    // truncation is exactly that modulo.
+    let expected = ((COUNT as u64) * ((COUNT as u64) - 1) / 2) as u32 as usize;
+    assert_eq!(
+        RESULT.load(Ordering::Relaxed),
+        expected,
+        "computation corrupted across forced preemption — \
+         trampoline save/restore bug?"
+    );
+}
+
 /// Benchmark: average yield_now round-trip cycles. No assertion.
 /// Reports cpu (this thread only) and wall (includes partner thread).
 #[cfg(feature = "test-bench")]

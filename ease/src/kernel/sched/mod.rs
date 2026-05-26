@@ -6,6 +6,7 @@ mod tests;
 mod types;
 
 use stride::SCHEDULER;
+pub use types::THREADS_MAX;
 
 #[allow(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};

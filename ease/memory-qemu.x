@@ -166,12 +166,11 @@ SECTIONS {
         __hart0_irq_stack_top = .;
     } > SRAM8
 
-    .sram8_percpu : ALIGN(8) {
+    .sram8_percpu (NOLOAD) : ALIGN(8) {
         __hart0_percpu_start = .;
         *(.sram8_percpu .sram8_percpu.*)
         __hart0_percpu_end = .;
-    } > SRAM8 AT > FLASH
-    __hart0_percpu_lma = LOADADDR(.sram8_percpu);
+    } > SRAM8
 
     /* SRAM9 */
 
@@ -190,12 +189,11 @@ SECTIONS {
         __hart1_irq_stack_top = .;
     } > SRAM9
 
-    .sram9_percpu : ALIGN(8) {
+    .sram9_percpu (NOLOAD) : ALIGN(8) {
         __hart1_percpu_start = .;
         *(.sram9_percpu .sram9_percpu.*)
         __hart1_percpu_end = .;
-    } > SRAM9 AT > FLASH
-    __hart1_percpu_lma = LOADADDR(.sram9_percpu);
+    } > SRAM9
 
     /* PSRAM */
 

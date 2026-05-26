@@ -2,7 +2,7 @@
 //!
 //! Saves context and calls handler, returns with `mret`.
 
-use core::arch::global_asm;
+use core::arch::{global_asm, naked_asm};
 
 #[repr(C, align(16))]
 pub struct TrapFrame {
@@ -97,6 +97,7 @@ global_asm!(
         csrr t0, mstatus
         sw t0,  4 * 31(sp)
 
+        mv a0, sp
         call trap_handler
 
         lw t0,  4 * 30(sp)
@@ -142,3 +143,70 @@ global_asm!(
         mret
 "#
 );
+
+#[unsafe(no_mangle)]
+#[unsafe(naked)]
+unsafe extern "C" fn preempt_trampoline() {
+    naked_asm!(
+        "addi sp, sp, -4 * 20",  // 20 x 4 = 80 to keep 16 byte aligned even though we only store caller-saved registers
+        "sw ra,  4 *  0(sp)",
+        "sw gp,  4 *  1(sp)",
+        "sw tp,  4 *  2(sp)",
+        "sw t0,  4 *  3(sp)",
+        "sw t1,  4 *  4(sp)",
+        "sw t2,  4 *  5(sp)",
+        "sw t3,  4 *  6(sp)",
+        "sw t4,  4 *  7(sp)",
+        "sw t5,  4 *  8(sp)",
+        "sw t6,  4 *  9(sp)",
+        "sw a0,  4 * 10(sp)",
+        "sw a1,  4 * 11(sp)",
+        "sw a2,  4 * 12(sp)",
+        "sw a3,  4 * 13(sp)",
+        "sw a4,  4 * 14(sp)",
+        "sw a5,  4 * 15(sp)",
+        "sw a6,  4 * 16(sp)",
+        "sw a7,  4 * 17(sp)",
+
+        // Get stored mepc and mstatus and stash
+        "call {preempt_mepc}",
+        "sw a0,  4 * 18(sp)",
+        "call {preempt_mstatus}",
+        "sw a0,  4 * 19(sp)",
+
+        // Call the scheduler
+        "call {schedule}",
+
+        // Return
+        "lw a0,  4 * 19(sp)",
+        "csrw mstatus, a0",
+        "lw a0,  4 * 18(sp)",
+        "csrw mepc, a0",
+
+        "lw ra,  4 *  0(sp)",
+        "lw gp,  4 *  1(sp)",
+        "lw tp,  4 *  2(sp)",
+        "lw t0,  4 *  3(sp)",
+        "lw t1,  4 *  4(sp)",
+        "lw t2,  4 *  5(sp)",
+        "lw t3,  4 *  6(sp)",
+        "lw t4,  4 *  7(sp)",
+        "lw t5,  4 *  8(sp)",
+        "lw t6,  4 *  9(sp)",
+        "lw a0,  4 * 10(sp)",
+        "lw a1,  4 * 11(sp)",
+        "lw a2,  4 * 12(sp)",
+        "lw a3,  4 * 13(sp)",
+        "lw a4,  4 * 14(sp)",
+        "lw a5,  4 * 15(sp)",
+        "lw a6,  4 * 16(sp)",
+        "lw a7,  4 * 17(sp)",
+
+        "addi sp, sp, +4 * 20",
+
+        "mret",
+        preempt_mepc = sym crate::kernel::percpu::preempt_mepc,
+        preempt_mstatus = sym crate::kernel::percpu::preempt_mstatus,
+        schedule = sym crate::kernel::sched::schedule,
+    )
+}

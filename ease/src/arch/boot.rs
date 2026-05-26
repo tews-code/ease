@@ -26,7 +26,6 @@ unsafe extern "C" {
     static __hart0_idle_stack_top: u8;
     static __hart0_percpu_start: u8;
     static __hart0_percpu_end: u8;
-    static __hart0_percpu_lma: u8;
 
     static __hart1_irq_stack_base: u8;
     static __hart1_irq_stack_top: u8;
@@ -34,7 +33,6 @@ unsafe extern "C" {
     static __hart1_idle_stack_top: u8;
     static __hart1_percpu_start: u8;
     static __hart1_percpu_end: u8;
-    static __hart1_percpu_lma: u8;
 }
 
 global_asm!(
@@ -117,17 +115,19 @@ extern "C" fn _start() -> ! {
         "la a2, {sram8_text_end}",
         "jal _copy_section",
 
-        // Copy PerCpu from LMA to VMA - HART0
-        "la a0, {hart0_percpu_lma}",
-        "la a1, {hart0_percpu_start}",
-        "la a2, {hart0_percpu_end}",
-        "jal _copy_section",
+        // Zero PerCpu for HART0
+        "li a0, 0",
+        "li a1, 0",
+        "la a2, {hart0_percpu_start}",
+        "la a3, {hart0_percpu_end}",
+        "jal _paint_section",
 
-        // Copy PerCpu from LMA to VMA - HART1
-        "la a0, {hart1_percpu_lma}",
-        "la a1, {hart1_percpu_start}",
-        "la a2, {hart1_percpu_end}",
-        "jal _copy_section",
+        // Zero PerCpu for HART1
+        "li a0, 0",
+        "li a1, 0",
+        "la a2, {hart1_percpu_start}",
+        "la a3, {hart1_percpu_end}",
+        "jal _paint_section",
 
         // Zero BSS segment
         "li a0, 0",
@@ -186,7 +186,6 @@ extern "C" fn _start() -> ! {
         hart0_stack_top = sym __hart0_idle_stack_top,
         hart0_percpu_start = sym __hart0_percpu_start,
         hart0_percpu_end = sym __hart0_percpu_end,
-        hart0_percpu_lma = sym __hart0_percpu_lma,
 
         hart1_irq_stack_start = sym __hart1_irq_stack_base,
         hart1_irq_stack_top = sym __hart1_irq_stack_top,
@@ -194,7 +193,6 @@ extern "C" fn _start() -> ! {
         hart1_stack_top = sym __hart1_idle_stack_top,
         hart1_percpu_start = sym __hart1_percpu_start,
         hart1_percpu_end = sym __hart1_percpu_end,
-        hart1_percpu_lma = sym __hart1_percpu_lma,
 
         data_start = sym __data_start,
         data_end = sym __data_end,

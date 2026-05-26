@@ -6,7 +6,7 @@ use core::ptr::NonNull;
 use crate::arch::context::Context;
 use crate::arch::stack::STACK_CANARY;
 
-pub(super) const THREADS_MAX: usize = 32;
+pub const THREADS_MAX: usize = 32;
 
 // Stack sizes must be power-of-two and aligned to their own size
 // This means that the stack base address is `size` aligned and can be found using a bitmask

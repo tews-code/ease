@@ -2,25 +2,27 @@
 use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
+use crate::arch::csr::mstatus::MPIE;
 use crate::arch::csr::{mepc, mtval};
 use crate::arch::stack::STACK_CANARY;
+use crate::arch::trap::TrapFrame;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
-use crate::kernel::ipi;
-use crate::kernel::sched;
+use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
 unsafe extern "C" {
     static __hart0_irq_stack_base: u8;
+    fn preempt_trampoline();
 }
 
 // trap_handler is kept as small as possible to fit into SRAM8 .text
 #[unsafe(no_mangle)]
 // #[unsafe(link_section = ".sram8_text")]
 #[cfg_attr(feature = "profile", profile)]
-extern "C" fn trap_handler() {
+extern "C" fn trap_handler(frame: &mut TrapFrame) {
     // let _g = crate::kernel::profile::ProfileGuard::new("trap_handler");
     // Check if IRQ stack canary is in place
     // Safety: Address is safe to read and aligned from linker script
@@ -38,6 +40,13 @@ extern "C" fn trap_handler() {
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),
         Trap::Exception(code) => handle_exception(code),
+    }
+    if percpu::needs_reschedule() {
+        percpu::set_preempt_mepc(frame.mepc);
+        percpu::set_preempt_mstatus(frame.mstatus);
+        // Set up frame for trampoline
+        frame.mepc = preempt_trampoline as *const () as usize;
+        frame.mstatus &= !MPIE; // Ensure trampoline executes with interrupts disabled
     }
 }
 
