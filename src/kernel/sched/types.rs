@@ -3,9 +3,8 @@
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-use crate::arch::STACK_CANARY;
 use crate::arch::context::Context;
-use crate::arch::trap::TrapFrame;
+use crate::arch::stack::STACK_CANARY;
 
 pub(super) const THREADS_MAX: usize = 32;
 
@@ -16,6 +15,7 @@ pub struct StackClass(u8);
 
 #[allow(dead_code)]
 impl StackClass {
+    pub const B512: Self = Self(9);
     pub const KB1: Self = Self(10);
     pub const KB2: Self = Self(11);
     pub const KB4: Self = Self(12);
@@ -25,7 +25,8 @@ impl StackClass {
     pub const KB64: Self = Self(16);
     pub const KB128: Self = Self(17);
 
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
+        Self::B512,
         Self::KB1,
         Self::KB2,
         Self::KB4,
@@ -36,15 +37,8 @@ impl StackClass {
         Self::KB128,
     ];
 
-    const _MIN_CLASS_SIZE_CHECK: () =
-        assert!(StackClass::KB1.size() >= core::mem::size_of::<TrapFrame>());
-
     pub(super) const fn size(self) -> usize {
         1usize << self.0
-    }
-
-    pub(super) const fn mask(self) -> usize {
-        self.size() - 1
     }
 
     const fn align(self) -> usize {
@@ -95,6 +89,7 @@ impl HeapStack {
             core::ptr::write_bytes(context_ptr, 0, 1); // writes 0 across one Context's worth of bytes
             *context_ptr = Context::for_entry(trampoline_ptr, closure_ptr);
         }
+
         context_ptr as *mut u8
     }
 
@@ -162,6 +157,7 @@ pub struct ThreadHandle {
     pub(super) idx: usize,
 }
 
+#[allow(dead_code)]
 impl ThreadHandle {
     pub fn id(&self) -> u32 {
         self.id

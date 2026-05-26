@@ -17,9 +17,36 @@ impl core::fmt::Write for DirectWriter {
     }
 }
 
+/// Print to UART only without lockkng
+///
+/// Prints formatted string to UART .
+/// Printing may be interleaved
+#[macro_export]
+macro_rules! dprint {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        use $crate::io::DirectWriter;
+        let _ = write!(DirectWriter, $($arg)*);
+    }}
+}
+
+/// Print with newline to UART only without lockkng
+///
+/// Prints formatted string to UART .
+/// Printing may be interleaved
+#[macro_export]
+macro_rules! dprintln {
+    () => { {
+        $crate::dprint!("\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::dprint!("{}\n", format_args!($($arg)*));
+    }}
+}
+
 /// Print to UART only
 ///
-/// Prints formatted string to UART without locking.
+/// Prints formatted string to UART.
 /// In test mode, output is also captured for verification.
 #[macro_export]
 macro_rules! print {

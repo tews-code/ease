@@ -71,6 +71,7 @@ mod bare_metal_alloc {
 
 /// Allocate to SRAM0-3 in Power Domain 0 with NAPOT - intended for user allocation
 #[cfg(target_os = "none")]
+#[allow(dead_code)]
 pub fn kalloc_pd0_napot(order: u8) -> *mut u8 {
     let size = 1usize << order;
     let layout = Layout::from_size_align(size, size).expect("for NAPOT must align to own size");
@@ -81,6 +82,7 @@ pub fn kalloc_pd0_napot(order: u8) -> *mut u8 {
 /// Allocate to PSRAM with NAPOT - intended for user allocation
 /// PSRAM's MIN_BLOCK_SIZE is 4096, so meaningful order starts at 12 — smaller orders get rounded up to 4 KB by the buddy.
 #[cfg(target_os = "none")]
+#[allow(dead_code)]
 pub fn kalloc_psram_napot(order: u8) -> *mut u8 {
     let size = 1usize << order;
     let layout = Layout::from_size_align(size, size).expect("for NAPOT must align to own size");
@@ -90,6 +92,7 @@ pub fn kalloc_psram_napot(order: u8) -> *mut u8 {
 
 /// Allocate to PSRAM without NAPOT - intended for kernel alloc of arbitrary regions
 #[cfg(target_os = "none")]
+#[allow(dead_code)]
 pub fn kalloc_psram(layout: Layout) -> *mut u8 {
     // Safety: BUDDY_PSRAM init has been called
     unsafe { bare_metal_alloc::BUDDY_PSRAM.alloc(layout) }

@@ -1,11 +1,15 @@
 //! PLIC driver
 
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
 use crate::arch::csr::mie;
 use crate::arch::mmio;
 use crate::board::plic;
 use crate::kernel::sync::IrqSpinLock;
 
 pub struct SiFivePlic(());
+#[allow(dead_code)]
 pub type Plic = SiFivePlic;
 
 impl SiFivePlic {
@@ -40,6 +44,7 @@ impl SiFivePlic {
 static PLIC: IrqSpinLock<SiFivePlic> = IrqSpinLock::new(SiFivePlic(())); // Private - only access with `with_plic`
 
 /// Runs a closure with exclusive access to the PLIC driver.
+#[cfg_attr(feature = "profile", profile)]
 pub fn with_plic<F, R>(f: F) -> R
 where
     F: FnOnce(&mut SiFivePlic) -> R,

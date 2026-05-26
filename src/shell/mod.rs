@@ -104,7 +104,13 @@ impl Shell {
                     }
                 } else {
                     // Sleep until next tick
-                    crate::hal::wait_for_interrupt();
+                    // If a reschedule was requested (e.g. a higher-pri thread woke),
+                    // honor it; otherwise sleep until input arrives.
+                    if crate::kernel::percpu::needs_reschedule() {
+                        crate::kernel::sched::yield_now();
+                    } else {
+                        crate::hal::wait_for_interrupt();
+                    }
                 }
             }
         }

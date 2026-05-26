@@ -64,6 +64,28 @@ mod arch {
     }
     #[inline]
     pub fn restore_interrupts(_prev: usize) {}
+
+    // Stubs for `kernel::profile` so the lib crate can compile profiled
+    // functions in shared modules (e.g. `kernel::collection::spsc`). The
+    // profile module itself is never exercised from host tests; these
+    // stubs just satisfy the type checker.
+    #[inline]
+    pub fn cpu_id() -> usize {
+        0
+    }
+
+    pub mod csr {
+        #[inline]
+        pub fn rdcycles() -> u64 {
+            0
+        }
+        pub mod regs {
+            #[inline]
+            pub fn sp() -> usize {
+                0
+            }
+        }
+    }
 }
 
 // `fs/mod.rs` and `fs/volume.rs` reference `crate::drivers::virtio`
@@ -116,9 +138,19 @@ mod drivers {
 mod kernel {
     pub mod alloc;
     pub mod collection;
+    pub mod profile;
     pub mod sync;
     pub mod timer {
+        // Stub for `kernel::profile`. Real value lives in the binary
+        // crate's timer module; this satisfies the type checker for the
+        // lib build.
+        pub const CYCLES_PER_US: u64 = 1;
+
         pub fn elapsed_ms() -> u64 {
+            panic!("timer stub: must not be called from the lib crate")
+        }
+
+        pub fn elapsed() -> u64 {
             panic!("timer stub: must not be called from the lib crate")
         }
     }

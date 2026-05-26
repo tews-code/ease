@@ -24,6 +24,7 @@ pub struct Builder {
     affinity: Option<u8>,    // Affinity to a particular HART
 }
 
+#[allow(dead_code)]
 impl Builder {
     pub const fn new() -> Self {
         Self {
@@ -138,6 +139,7 @@ pub fn exit() -> ! {
 /// Park the current thread
 ///
 /// Note this can race. For race-free use `park_if_blocked`
+#[allow(dead_code)]
 pub fn park() {
     SCHEDULER.park();
 }
@@ -168,6 +170,7 @@ pub fn get_next_waiter(handle: &ThreadHandle) -> Option<ThreadHandle> {
 }
 
 /// Unpark using TCB index instead of thread handle
+#[allow(dead_code)]
 pub fn unpark_by_index(idx: usize) {
     SCHEDULER.unpark_by_index(idx);
 }

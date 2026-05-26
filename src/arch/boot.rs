@@ -4,30 +4,34 @@
 
 use core::arch::{global_asm, naked_asm};
 
-use crate::arch::STACK_CANARY;
+use crate::arch::stack::{STACK_CANARY, STACK_PAINT_PATTERN};
 
 // The extern block and _start function go here
 // # Safety
 // Symbols are defined in the linker script and mark aligned addresses
 unsafe extern "C" {
-    static __bss_start: u8;
-    static __bss_end: u8;
     static __data_start: u8;
     static __data_end: u8;
     static __data_lma: u8;
+    static __bss_start: u8;
+    static __bss_end: u8;
 
     static __sram8_text_start: u8;
     static __sram8_text_end: u8;
     static __sram8_text_lma: u8;
 
-    static __hart0_stack_start: u8;
-    static __hart0_stack_top: u8;
+    static __hart0_irq_stack_base: u8;
+    static __hart0_irq_stack_top: u8;
+    static __hart0_idle_stack_base: u8;
+    static __hart0_idle_stack_top: u8;
     static __hart0_percpu_start: u8;
     static __hart0_percpu_end: u8;
     static __hart0_percpu_lma: u8;
 
-    static __hart1_stack_start: u8;
-    static __hart1_stack_top: u8;
+    static __hart1_irq_stack_base: u8;
+    static __hart1_irq_stack_top: u8;
+    static __hart1_idle_stack_base: u8;
+    static __hart1_idle_stack_top: u8;
     static __hart1_percpu_start: u8;
     static __hart1_percpu_end: u8;
     static __hart1_percpu_lma: u8;
@@ -54,6 +58,28 @@ global_asm!(
         "#
 );
 
+global_asm!(
+    r#"
+    .section .text
+    .global _paint_section
+    .align 4
+    _paint_section:
+        # Paint section with canary at base and pattern
+        # a0 = canary, a1 = pattern, a2 = section start, a3 = section end
+        # Clobbers a2
+        bge a2, a3, 2f
+        sw a0, 0(a2)
+        addi a2, a2, 4
+        1:
+        bge a2, a3, 2f
+        sw a1, 0(a2)
+        addi a2, a2, 4
+        j 1b
+        2:
+        ret
+        "#
+);
+
 #[unsafe(link_section = ".text.init")]
 #[unsafe(naked)]
 #[unsafe(no_mangle)]
@@ -63,11 +89,21 @@ extern "C" fn _start() -> ! {
         "bnez t0, hart1",               // Set up other HARTS
 
         // HART0 setup
-        // Set the stack and canary into SRAM4
+        // Set the boot stack into SRAM8
         "la sp, {hart0_stack_top}",
-        "la t0, {hart0_stack_start}",
+        // Paint the boot stack
         "li a0, {canary}",
-        "sw a0, 0(t0)",
+        "li a1, {pattern}",
+        "la a2, {hart0_stack_start}",
+        "la a3, {hart0_stack_top}",
+        "jal _paint_section",
+
+        // Paint the IRQ stack
+        "li a0, {canary}",
+        "li a1, {pattern}",
+        "la a2, {hart0_irq_stack_start}",
+        "la a3, {hart0_irq_stack_top}",
+        "jal _paint_section",
 
         // Copy .data from LMA to VMA
         "la a0, {data_lma}",
@@ -94,53 +130,80 @@ extern "C" fn _start() -> ! {
         "jal _copy_section",
 
         // Zero BSS segment
-        "la t0, {bss_start}",
-        "la t1, {bss_end}",
-        "7:",
-        "bge t0, t1, 8f",
-        "sw zero, 0(t0)",
-        "addi t0, t0, 4",       // A word is 4 bytes
-        "j 7b",                 // "b" means jump backward
-        "8:",
+        "li a0, 0",
+        "li a1, 0",
+        "la a2, {bss_start}",
+        "la a3, {bss_end}",
+        "jal _paint_section",
 
         // Set trap vector for HART0
         "la t0, _trap_vector",
         "csrw mtvec, t0",
 
+        // Store the IRQ stack top in mscratch
+        "la t0, {hart0_irq_stack_top}",
+        "csrw mscratch, t0",
+
         "j main",
 
         // Set up HART1
         "hart1:",
-        // Set up stack and canary
+        // Set boot stack in SRAM9
         "la sp, {hart1_stack_top}",
-        "la t0, {hart1_stack_start}",
+
+        // Paint the boot stack
         "li a0, {canary}",
-        "sw a0, 0(t0)",
+        "li a1, {pattern}",
+        "la a2, {hart1_stack_start}",
+        "la a3, {hart1_stack_top}",
+        "jal _paint_section",
+
+        // Paint the IRQ stack
+        "li a0, {canary}",
+        "li a1, {pattern}",
+        "la a2, {hart1_irq_stack_start}",
+        "la a3, {hart1_irq_stack_top}",
+        "jal _paint_section",
 
         // Set trap vector for HART1
         "la t0, _trap_vector",
         "csrw mtvec, t0",
+
+        // Store the IRQ stack top in mscratch
+        "la t0, {hart1_irq_stack_top}",
+        "csrw mscratch, t0",
+
         "j secondary_main",
 
         "unimp",
         sram8_text_lma = sym __sram8_text_lma,
         sram8_text_start = sym __sram8_text_start,
         sram8_text_end = sym __sram8_text_end,
-        hart0_stack_start = sym __hart0_stack_start,
-        hart0_stack_top = sym __hart0_stack_top,
-        hart1_stack_start = sym __hart1_stack_start,
-        hart1_stack_top = sym __hart1_stack_top,
-        data_start = sym __data_start,
-        data_end = sym __data_end,
-        data_lma = sym __data_lma,
+
+        hart0_irq_stack_start = sym __hart0_irq_stack_base,
+        hart0_irq_stack_top = sym __hart0_irq_stack_top,
+        hart0_stack_start = sym __hart0_idle_stack_base,
+        hart0_stack_top = sym __hart0_idle_stack_top,
         hart0_percpu_start = sym __hart0_percpu_start,
         hart0_percpu_end = sym __hart0_percpu_end,
         hart0_percpu_lma = sym __hart0_percpu_lma,
+
+        hart1_irq_stack_start = sym __hart1_irq_stack_base,
+        hart1_irq_stack_top = sym __hart1_irq_stack_top,
+        hart1_stack_start = sym __hart1_idle_stack_base,
+        hart1_stack_top = sym __hart1_idle_stack_top,
         hart1_percpu_start = sym __hart1_percpu_start,
         hart1_percpu_end = sym __hart1_percpu_end,
         hart1_percpu_lma = sym __hart1_percpu_lma,
+
+        data_start = sym __data_start,
+        data_end = sym __data_end,
+        data_lma = sym __data_lma,
+
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
+
         canary = const STACK_CANARY,
+        pattern = const STACK_PAINT_PATTERN,
     );
 }

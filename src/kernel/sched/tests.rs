@@ -39,7 +39,6 @@
 // rebuilt. Real RP2350 hardware will have prompt interrupt delivery
 // and the bounds can be tightened then.
 
-use super::stride::PRIORITY_DEFAULT;
 use crate::kernel::sched::{Qos, StackClass};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -133,7 +132,6 @@ fn sleep_blocks_for_duration() {
 /// per-test name print (~6ms at 115200 baud) plus general overhead.
 #[test_case]
 fn sleep_below_quantum_wakes_at_deadline() {
-    use core::fmt::Write;
     ensure_partner_spawned();
     let start = crate::kernel::timer::elapsed_ms();
     crate::kernel::sched::sleep_with_leeway(5, 0);
@@ -1402,26 +1400,53 @@ fn completion_signal_twice_is_idempotent() {
 fn affinity_hart0_runs_on_hart0() {
     static CPU_OBSERVED: AtomicUsize = AtomicUsize::new(usize::MAX);
     static DONE: AtomicUsize = AtomicUsize::new(0);
+    static START_MS: AtomicUsize = AtomicUsize::new(usize::MAX);
 
     CPU_OBSERVED.store(usize::MAX, Ordering::Relaxed);
     DONE.store(0, Ordering::Relaxed);
+    START_MS.store(usize::MAX, Ordering::Relaxed);
 
     fn pinned_hart0() {
+        START_MS.store(
+            crate::kernel::timer::elapsed_ms() as usize,
+            Ordering::Relaxed,
+        );
         CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
     }
 
     ensure_partner_spawned();
+    let test_runner_hart_before = crate::arch::cpu_id();
+    let spawn_ms = crate::kernel::timer::elapsed_ms();
     let id = crate::kernel::sched::Builder::new()
         .with_stack_class(StackClass::KB2)
         .with_affinity(0)
         .spawn(pinned_hart0);
     assert!(id.is_some(), "spawn failed");
+    let test_runner_hart_after = crate::arch::cpu_id();
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
         crate::kernel::sched::sleep(10);
         if crate::kernel::timer::elapsed_ms() - wait_start > 500 {
+            use crate::io::DirectWriter;
+            use core::fmt::Write;
+            let _ = writeln!(
+                DirectWriter,
+                "\n[affinity-0 timeout] spawn_ms={} wait_start_ms={} now_ms={} \
+                 test_runner_hart_before_spawn={} test_runner_hart_after_spawn={} \
+                 test_runner_hart_now={} pinned_start_ms={} \
+                 pinned_cpu_observed={} DONE={}",
+                spawn_ms,
+                wait_start,
+                crate::kernel::timer::elapsed_ms(),
+                test_runner_hart_before,
+                test_runner_hart_after,
+                crate::arch::cpu_id(),
+                START_MS.load(Ordering::Relaxed),
+                CPU_OBSERVED.load(Ordering::Relaxed),
+                DONE.load(Ordering::Relaxed),
+            );
             panic!("affinity-0 thread did not complete within 500 ms");
         }
     }

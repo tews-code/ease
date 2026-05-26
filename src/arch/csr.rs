@@ -4,6 +4,7 @@ use core::arch::asm;
 
 /// Machine cause register (mcause)
 pub mod mcause {
+    #[derive(Debug)]
     pub enum Trap {
         Exception(usize),
         Interrupt(usize),
@@ -56,6 +57,18 @@ pub mod mepc {
     }
 }
 
+/// Machine exception program counter (mepc)
+pub mod mtval {
+    /// Read the mepc CSR.
+    pub fn read() -> usize {
+        let mtval: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, mtval", out(reg) mtval);
+        }
+        mtval
+    }
+}
+
 /// Machine interrupt enable register (mie) operations.
 pub mod mie {
     pub const MSIE: usize = 1 << 3; // Machine software interrupts enable
@@ -91,6 +104,7 @@ pub mod mstatus {
 
 /// Main registers
 pub mod regs {
+    #[inline(always)]
     pub fn sp() -> usize {
         let sp: usize;
         unsafe {

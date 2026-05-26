@@ -7,6 +7,9 @@ use alloc::boxed::Box;
 use core::mem::{self, MaybeUninit};
 use core::ptr::{read_volatile, write_volatile};
 
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
 use crate::arch::mmio;
 use crate::board::{plic, virtio_blk};
 use crate::drivers::plic::with_plic;
@@ -284,15 +287,6 @@ fn wait_for_completion() -> Result<(), BlkError> {
     match VIRTIO_COMPLETE.wait_with_deadline(IO_TIMEOUT_MS) {
         Ok(_) => Ok(()),
         Err(TimedOut) => {
-            // Timed out - reset the device
-            {
-                use crate::io::DirectWriter;
-                use core::fmt::Write;
-                let _ = writeln!(
-                    DirectWriter,
-                    "wait_for_completion: Virtio reset needed after timeout"
-                );
-            }
             with_blk_dev(|blk| {
                 blk.vq = VirtioBlkDev::reset();
             });
@@ -327,6 +321,7 @@ where
 // static VIRTIO_COMPLETE: AtomicBool = AtomicBool::new(false);
 static VIRTIO_COMPLETE: Completion = Completion::new();
 
+#[cfg_attr(feature = "profile", profile)]
 pub fn handle_virtio_interrupt() {
     let status = mmio::read32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_STATUS);
     mmio::write32(virtio_blk::BASE, VIRTIO_REG_INTERRUPT_ACK, status);

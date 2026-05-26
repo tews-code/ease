@@ -2,8 +2,11 @@
 
 use alloc::boxed::Box;
 
-use crate::arch::STACK_CANARY;
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
 use crate::arch::context::switch_to;
+use crate::arch::stack::STACK_CANARY;
 use crate::board::HARTS_MAX;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
@@ -130,15 +133,15 @@ impl ThreadsInner {
     // spawned thread a pass of 0, letting it dominate pick_next until its
     // pass naturally catches up to the rest of the system.
     fn pass_baseline(&self) -> u64 {
-        self.control_blocks
-            .iter()
-            .filter(|tcb| {
-                (tcb.state == State::Ready || tcb.state == State::Running)
-                    && tcb.priority != PRIORITY_MIN
-            })
-            .map(|tcb| tcb.pass)
-            .min()
-            .unwrap_or(0)
+        let mut best: Option<u64> = None;
+        for tcb in &self.control_blocks {
+            let eligible = (tcb.state == State::Ready || tcb.state == State::Running)
+                && tcb.priority != PRIORITY_MIN;
+            if eligible {
+                best = Some(best.map_or(tcb.pass, |b| b.min(tcb.pass)));
+            }
+        }
+        best.unwrap_or(0)
     }
 
     // Wakes any threads past their deadlines
@@ -231,23 +234,40 @@ impl ThreadsInner {
         let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
         // Find next index
-        let next_idx = self
-            .control_blocks
-            .iter()
-            .enumerate()
-            .filter(|(_, tcb)| tcb.state == State::Ready)
-            .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
-            .min_by_key(|(_, tcb)| tcb.pass)
-            .map(|(i, _)| i)?;
-        if curr_idx == next_idx {
-            return None;
+        // let next_idx = self
+        //     .control_blocks
+        //     .iter()
+        //     .enumerate()
+        //     .filter(|(_, tcb)| tcb.state == State::Ready)
+        //     .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
+        //     .filter(|(_, tcb)| tcb.priority != PRIORITY_MIN)
+        //     .min_by_key(|(_, tcb)| tcb.pass)
+        //     .map_or(percpu::idle_thread_idx(), |(i, _)| i);
+        //
+        // if curr_idx == next_idx {
+        //     return None;
+        // }
+        let mut best_idx = None;
+        let mut best_pass = u64::MAX;
+        for (idx, tcb) in self.control_blocks.iter().enumerate() {
+            let candidate = tcb.state == State::Ready;
+            let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
+            let pri_ok = tcb.priority != PRIORITY_MIN;
+            if candidate && affinity_ok && pri_ok && tcb.pass < best_pass {
+                best_pass = tcb.pass;
+                best_idx = Some(idx);
+            }
         }
-        // Get disjoint TCBs
-        let [curr, next] = self
-            .control_blocks
-            .get_disjoint_mut([curr_idx, next_idx])
-            .expect("indices have been selected as disjoint");
-        Some((curr, curr_idx, next, next_idx))
+        let next_idx = best_idx.unwrap_or_else(percpu::idle_thread_idx);
+        if curr_idx == next_idx {
+            None
+        } else {
+            let [curr, next] = self
+                .control_blocks
+                .get_disjoint_mut([curr_idx, next_idx])
+                .expect("indices have been selected as disjoint");
+            Some((curr, curr_idx, next, next_idx))
+        }
     }
 
     // Get disjoint mutable TCBs for current and next
@@ -263,14 +283,37 @@ impl ThreadsInner {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
-        let next_idx = self
-            .control_blocks
-            .iter()
-            .enumerate()
-            .filter(|(idx, tcb)| tcb.state == State::Ready || *idx == curr_idx)
-            .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
-            .min_by_key(|(_, tcb)| tcb.pass)
-            .map(|(idx, _)| idx)?;
+        // let next_idx = self
+        //     .control_blocks
+        //     .iter()
+        //     .enumerate()
+        //     .filter(|(idx, tcb)| tcb.state == State::Ready || *idx == curr_idx)
+        //     .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
+        //     .filter(|(_, tcb)| tcb.priority != PRIORITY_MIN)
+        //     .min_by_key(|(_, tcb)| tcb.pass)
+        //     .map_or(percpu::idle_thread_idx(), |(idx, _)| idx);
+        //
+        // if curr_idx == next_idx {
+        //     None
+        // } else {
+        //     let [curr, next] = self
+        //         .control_blocks
+        //         .get_disjoint_mut([curr_idx, next_idx])
+        //         .expect("indices have been selected as disjoint");
+        //     Some((curr, curr_idx, next, next_idx))
+        // }
+        let mut best_idx = None;
+        let mut best_pass = u64::MAX;
+        for (idx, tcb) in self.control_blocks.iter().enumerate() {
+            let candidate = tcb.state == State::Ready || idx == curr_idx;
+            let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
+            let pri_ok = tcb.priority != PRIORITY_MIN;
+            if candidate && affinity_ok && pri_ok && tcb.pass < best_pass {
+                best_pass = tcb.pass;
+                best_idx = Some(idx);
+            }
+        }
+        let next_idx = best_idx.unwrap_or_else(percpu::idle_thread_idx);
         if curr_idx == next_idx {
             None
         } else {
@@ -283,6 +326,7 @@ impl ThreadsInner {
     }
 
     #[inline(never)]
+    #[cfg_attr(feature = "profile", profile)]
     fn check_curr_canary(&self) {
         let curr = &self.control_blocks[percpu::current_thread_idx()];
         let base_addr = curr.stack_base;
@@ -298,10 +342,14 @@ impl ThreadsInner {
         );
     }
 
-    // Set the PerCpu info for the next running thread on this HART
-    fn set_percpu_threads(&mut self, next_idx: usize, switching_thread_idx: Option<usize>) {
-        percpu::set_current_thread_idx(next_idx);
-        percpu::set_current_stack_base(self.control_blocks[next_idx].stack_base);
+    // Set the PerCpu info for a running thread on this HART
+    fn set_running_thread_percpu(
+        &mut self,
+        current_thread_idx: usize,
+        switching_thread_idx: Option<usize>,
+    ) {
+        percpu::set_current_thread_idx(current_thread_idx);
+        percpu::set_current_stack_base(self.control_blocks[current_thread_idx].stack_base);
         percpu::set_switching_thread_idx(switching_thread_idx);
     }
 }
@@ -315,8 +363,8 @@ pub(super) struct Scheduler {
 }
 
 unsafe extern "C" {
-    static __hart0_stack_start: u8;
-    static __hart1_stack_start: u8;
+    static __hart0_idle_stack_base: u8;
+    static __hart1_idle_stack_base: u8;
 }
 
 impl Scheduler {
@@ -332,24 +380,27 @@ impl Scheduler {
     // Set up the boot thread for each hart
     pub(super) fn bootstrap(&self, hartid: usize) {
         let id = next_thread_id();
+        let idx = slot_for_boot(hartid);
         let mut threads = self.threads.lock();
-        threads.control_blocks[slot_for_boot(hartid)] = ThreadControlBlock {
+        threads.control_blocks[idx] = ThreadControlBlock {
             id,
             state: State::Running,
             sp: crate::arch::csr::regs::sp() as *mut u8,
             stack: None, // Fixed stack is set by linker script
             stack_base: match hartid {
-                0 => &raw const __hart0_stack_start as *mut u8,
-                1 => &raw const __hart1_stack_start as *mut u8,
+                0 => &raw const __hart0_idle_stack_base as *mut u8,
+                1 => &raw const __hart1_idle_stack_base as *mut u8,
                 _ => unreachable!("only running two harts"),
             },
             last_started_cycles: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
-        threads.set_percpu_threads(slot_for_boot(hartid), None);
+        percpu::set_idle_thread_idx(idx);
+        threads.set_running_thread_percpu(idx, None);
     }
 
     /// Helper function to clean up post switch threads
+    #[cfg_attr(feature = "profile", profile)]
     pub(super) fn post_switch_cleanup(&self) {
         // After switch_to returns (on this thread's eventual resume),
         let mut threads = self.threads.lock();
@@ -425,6 +476,8 @@ impl Scheduler {
             && h as usize != crate::arch::cpu_id()
         {
             crate::kernel::ipi::send(h as usize);
+        } else {
+            percpu::set_needs_reschedule();
         }
         Some(handle)
     }
@@ -478,7 +531,7 @@ impl Scheduler {
             let prev_sp_ptr = &raw mut curr.sp;
             let next_sp_ptr = &raw mut next.sp;
 
-            threads.set_percpu_threads(next_idx, Some(curr_idx));
+            threads.set_running_thread_percpu(next_idx, Some(curr_idx));
             let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
             threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
@@ -490,6 +543,7 @@ impl Scheduler {
     }
 
     /// Perform switch accounting and set reschedule flag
+    // #[unsafe(link_section = ".sram8_text")]
     pub(super) fn mark_for_preempt(&self) {
         let mut threads = self.threads.lock();
         threads.check_curr_canary();
@@ -516,6 +570,8 @@ impl Scheduler {
             threads.set_next_timer(earliest_deadline, ready_count);
             return;
         };
+        threads.set_next_timer(earliest_deadline, ready_count);
+        percpu::set_needs_reschedule();
 
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
@@ -527,10 +583,11 @@ impl Scheduler {
             with_interrupts_disabled(|_cs| {
                 let mut threads = self.threads.lock();
                 threads.check_curr_canary();
-                let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_if_fairer_mut()
-                else {
+                let pick = threads.pick_next_if_fairer_mut();
+                let Some((curr, curr_idx, next, next_idx)) = pick else {
                     return;
                 };
+
                 // Perform switch
                 curr.state = State::Switching(PostSwitch::Ready);
                 next.state = State::Running;
@@ -539,7 +596,7 @@ impl Scheduler {
                 // Create local variables before dropping the lock
                 let prev_sp_ptr = &raw mut curr.sp;
                 let next_sp_ptr = &raw mut next.sp;
-                threads.set_percpu_threads(next_idx, Some(curr_idx));
+                threads.set_running_thread_percpu(next_idx, Some(curr_idx));
                 drop(threads);
 
                 unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
@@ -597,6 +654,7 @@ impl Scheduler {
     }
 
     // Park the current thread
+    #[allow(dead_code)]
     pub(super) fn park(&self) {
         self.reschedule(None, PostSwitch::Blocked);
     }
@@ -677,6 +735,7 @@ impl Scheduler {
     }
 
     /// Unpark a thread by TCB index
+    #[allow(dead_code)]
     pub fn unpark_by_index(&self, idx: usize) {
         let mut threads = self.threads.lock();
         if threads.control_blocks[idx].state == State::Blocked {

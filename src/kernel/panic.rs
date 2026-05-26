@@ -1,13 +1,14 @@
 //! Panic handler
 
-use crate::arch::STACK_CANARY;
+#[cfg(not(test))]
+use crate::arch::stack::STACK_CANARY;
 use crate::hal::wait_for_interrupt;
+#[cfg(not(test))]
 use crate::kernel::percpu;
 #[cfg(test)]
 use crate::qemu;
 
 mod fb_panic_writer {
-
     unsafe extern "C" {
         static __fb_addr: u8;
     }
@@ -117,6 +118,47 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 Some(false) => "corrupted",
             }
         );
+
+        {
+            unsafe extern "C" {
+                static __hart0_irq_stack_base: u8;
+                static __hart0_irq_stack_top: u8;
+            }
+            use crate::arch::stack::stack_high_watermark;
+            use crate::io::DirectWriter;
+            use core::fmt::Write;
+            let start_addr = &raw const __hart0_irq_stack_base as usize;
+            let end_addr = &raw const __hart0_irq_stack_top as usize;
+            let _ = writeln!(DirectWriter, "==== IRQ Stack High Watermark Check ====");
+            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
+                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
+                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
+                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
+            } else {
+                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
+            };
+            let _ = writeln!(DirectWriter, "==== IRQ Stack High Watermark Check ====");
+        }
+        {
+            unsafe extern "C" {
+                static __hart0_idle_stack_base: u8;
+                static __hart0_idle_stack_top: u8;
+            }
+            use crate::arch::stack::stack_high_watermark;
+            use crate::io::DirectWriter;
+            use core::fmt::Write;
+            let start_addr = &raw const __hart0_idle_stack_base as usize;
+            let end_addr = &raw const __hart0_idle_stack_top as usize;
+            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
+                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
+                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
+                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
+            } else {
+                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
+            };
+            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+        }
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
         let _ = writeln!(

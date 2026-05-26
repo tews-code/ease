@@ -2,6 +2,9 @@
 //!
 //! Using QEMU virt board
 
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
 use crate::arch::mmio;
 use crate::board::{plic, uart};
 use crate::drivers::plic::with_plic;
@@ -94,6 +97,7 @@ impl UartReader {
 //
 // Called by trap handler - interrupts are disabled
 // Reads IIR to determine interrupt type and clears the source.
+#[cfg_attr(feature = "profile", profile)]
 pub fn handle_interrupt() {
     let iir = mmio::read8(uart::BASE, IIR) & 0x0E;
     match iir {

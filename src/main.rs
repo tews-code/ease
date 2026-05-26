@@ -65,6 +65,8 @@ fn secondary_init() {
 
 fn minimal_init() {
     // Initialise just the basics to keep stack use light
+    #[cfg(feature = "profile")]
+    kernel::profile::init();
     kernel::timer::init();
     kernel::alloc::init_global_allocator();
     drivers::plic::init();
@@ -79,6 +81,17 @@ fn minimal_init() {
 
 fn kernel_init() {
     minimal_init();
+    #[cfg(feature = "profile")]
+    sched::Builder::new()
+        .with_stack_class(sched::StackClass::KB16)
+        .with_priority(sched::PRIORITY_DEFAULT)
+        .spawn(|| {
+            loop {
+                sched::sleep(1_000);
+                crate::kernel::profile::dump();
+            }
+        });
+
     // Spawn a thread with a deeper stack to complete initialisation
     spawn(|| {
         drivers::virtio::virtio_blk_init();
@@ -117,7 +130,6 @@ extern "C" fn main() -> ! {
 
     // Bootstrap converts into the idle thread
     sched::idle_thread();
-    unreachable!("Idle thread should never return");
 }
 
 /// Wrap `test_main` so it can be spawned as a thread entry.
@@ -133,14 +145,13 @@ fn test_runner_thread() {
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     kernel_init();
-    println!("Hello from EASE HART{}!", crate::arch::cpu_id());
 
     #[allow(clippy::diverging_sub_expression)]
     let Some(_id) = sched::Builder::new()
         .with_stack_class(sched::StackClass::KB16)
         .spawn(shell_thread)
     else {
-        panic!("failed to lanuch shell");
+        panic!("failed to launch shell");
     };
 
     // Main drops into idle_thread
@@ -178,6 +189,48 @@ fn test_runner(tests: &[&dyn Testable]) {
     }
     println!();
     println!("All tests passed!");
+
+    {
+        use crate::io::DirectWriter;
+        use core::fmt::Write;
+        {
+            unsafe extern "C" {
+                static __hart0_irq_stack_base: u8;
+                static __hart0_irq_stack_top: u8;
+            }
+
+            use crate::arch::stack::stack_high_watermark;
+            let start_addr = &raw const __hart0_irq_stack_base as usize;
+            let end_addr = &raw const __hart0_irq_stack_top as usize;
+            println!("==== IRQ Stack High Watermark Check ====");
+            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
+                println!("Start address: {start_addr:x}");
+                println!("High watermark address: {addr:x}");
+                println!("Top address: {end_addr:x}");
+            } else {
+                println!(" * STACK CORRUPT * ");
+            };
+            println!("==== IRQ Stack High Watermark Check ====");
+        }
+        {
+            unsafe extern "C" {
+                static __hart0_idle_stack_base: u8;
+                static __hart0_idle_stack_top: u8;
+            }
+            use crate::arch::stack::stack_high_watermark;
+            let start_addr = &raw const __hart0_idle_stack_base as usize;
+            let end_addr = &raw const __hart0_idle_stack_top as usize;
+            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
+                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
+                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
+                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
+            } else {
+                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
+            };
+            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+        }
+    }
     qemu::exit_success();
 }
 

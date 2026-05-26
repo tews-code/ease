@@ -1,6 +1,8 @@
 //! Virtio queue for QEMU board
 
 use alloc::boxed::Box;
+
+use core::mem::MaybeUninit;
 use core::ptr::{read_volatile, write_volatile};
 
 use crate::arch::mmio;
@@ -94,7 +96,10 @@ unsafe impl Send for VirtioVirtq {}
 
 pub(super) fn virtq_init(base: usize, index: usize) -> Box<VirtioVirtq> {
     // Allocate a region for the virtqueue.
-    let mut vq = Box::new(VirtioVirtq::zeroed());
+    let vq: Box<MaybeUninit<VirtioVirtq>> = Box::new_zeroed();
+    // Safety: zero is a valid bit pattern for VirtioVirtq (all integers/arrays)
+    let mut vq: Box<VirtioVirtq> = unsafe { vq.assume_init() };
+
     vq.queue_index = index as u16;
 
     // 1. Select the queue writing its index (first queue is 0) to QueueSel.

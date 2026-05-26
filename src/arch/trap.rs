@@ -58,6 +58,8 @@ global_asm!(
     .global _trap_vector
     .align 4
     _trap_vector:
+        # Swap sp with IRQ stack top in mscratch
+        csrrw sp, mscratch, sp
         # Save registers to stack
         addi sp, sp, -4 * 32
         sw ra,  4 *  0(sp)
@@ -133,6 +135,9 @@ global_asm!(
         lw s11, 4 * 29(sp)
 
         addi sp, sp, 4 * 32
+
+        # Swap sp back into in mscratch
+        csrrw sp, mscratch, sp
 
         mret
 "#

@@ -5,6 +5,10 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Lock-free single-producer single-consumer ring buffer
+///
+/// Needs generics for T (data type), and N (number of buffer entries).
+/// The data must be Copy.
+/// Attempts to push more than N items onto the buffer will error with Err(T)
 pub struct SpscRingBuf<T: Copy, const N: usize> {
     buf: [UnsafeCell<MaybeUninit<T>>; N],
     head: AtomicUsize,
@@ -41,6 +45,8 @@ impl<T: Copy, const N: usize> SpscRingBuf<T, N> {
     }
 
     /// Pop a T from the ring buffer
+    ///
+    /// Returns `None` if buffer is empty
     pub fn pop(&self) -> Option<T> {
         let head = self.head.load(Ordering::Acquire);
         let tail = self.tail.load(Ordering::Acquire);

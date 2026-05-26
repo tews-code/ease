@@ -6,11 +6,8 @@ pub mod boot;
 pub mod context;
 pub mod csr;
 pub mod mmio;
+pub mod stack;
 pub mod trap;
-
-/// Sentinel placed at the bottom word of each thread's stack.
-/// Checked by the scheduler / panic path to detect stack overflow.
-pub const STACK_CANARY: usize = 0xDEAD_BEEF;
 
 /// Get HART id that this thread is running on
 pub fn cpu_id() -> usize {
