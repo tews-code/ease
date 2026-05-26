@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
-use crate::arch::context::switch_to;
+use crate::arch::cpu_id;
 use crate::arch::stack::STACK_CANARY;
 use crate::board::HARTS_MAX;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
@@ -16,6 +16,14 @@ use super::types::{
     Deadline, HeapStack, PostSwitch, Qos, StackClass, State, THREADS_MAX, ThreadControlBlock,
     ThreadHandle, ThreadsInner,
 };
+
+unsafe extern "C" {
+    // Safety: caller must ensure prev points to a writable slot owned by the current
+    // thread; next points to a slot containing a saved sp produced by a prior swap_to call or
+    // by spawn's stack forging; calling with interrupts disabled is undefined;
+    pub(crate) fn switch_to_h0(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
+    pub(crate) fn switch_to_h1(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
+}
 
 // Helper function to determine the HART boot threads in the threads array
 // To match hardware - HART0 using SRAM4 and HART1 using SRAM5
@@ -536,7 +544,16 @@ impl Scheduler {
             threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
 
-            unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+            if cpu_id() == 0 {
+                unsafe {
+                    switch_to_h0(prev_sp_ptr, next_sp_ptr);
+                }
+            } else {
+                unsafe {
+                    switch_to_h1(prev_sp_ptr, next_sp_ptr);
+                }
+            }
+
             self.post_switch_cleanup();
             //mret has restored MIE via the thread trampoline
         });
@@ -599,7 +616,15 @@ impl Scheduler {
                 threads.set_running_thread_percpu(next_idx, Some(curr_idx));
                 drop(threads);
 
-                unsafe { switch_to(prev_sp_ptr, next_sp_ptr) };
+                if cpu_id() == 0 {
+                    unsafe {
+                        switch_to_h0(prev_sp_ptr, next_sp_ptr);
+                    }
+                } else {
+                    unsafe {
+                        switch_to_h1(prev_sp_ptr, next_sp_ptr);
+                    }
+                }
 
                 // After switch_to returns (on this thread's eventual resume),
                 self.post_switch_cleanup();

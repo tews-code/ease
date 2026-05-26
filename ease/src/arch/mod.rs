@@ -6,6 +6,7 @@ pub mod boot;
 pub mod context;
 pub mod csr;
 pub mod mmio;
+pub mod percore_text;
 pub mod stack;
 pub mod trap;
 

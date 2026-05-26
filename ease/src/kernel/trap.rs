@@ -1,4 +1,5 @@
 //! Trap handler for both interrupts and exceptions
+use crate::arch::cpu_id;
 use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
@@ -15,20 +16,34 @@ use ease_macros::profile;
 
 unsafe extern "C" {
     static __hart0_irq_stack_base: u8;
-    fn preempt_trampoline();
+    static __hart1_irq_stack_base: u8;
+    fn preempt_trampoline_h0();
+    fn preempt_trampoline_h1();
+}
+
+#[unsafe(link_section = ".sram8_text")]
+#[cfg_attr(feature = "profile", profile)]
+pub(crate) extern "C" fn trap_handler_h0(frame: &mut TrapFrame) {
+    trap_handler_impl(frame);
+}
+
+#[unsafe(link_section = ".sram9_text")]
+#[cfg_attr(feature = "profile", profile)]
+pub(crate) extern "C" fn trap_handler_h1(frame: &mut TrapFrame) {
+    trap_handler_impl(frame);
 }
 
 // trap_handler is kept as small as possible to fit into SRAM8 .text
-#[unsafe(no_mangle)]
-// #[unsafe(link_section = ".sram8_text")]
-#[cfg_attr(feature = "profile", profile)]
-extern "C" fn trap_handler(frame: &mut TrapFrame) {
-    // let _g = crate::kernel::profile::ProfileGuard::new("trap_handler");
+#[inline(always)]
+fn trap_handler_impl(frame: &mut TrapFrame) {
     // Check if IRQ stack canary is in place
     // Safety: Address is safe to read and aligned from linker script
-    let canary =
-        unsafe { core::ptr::read_volatile(&raw const __hart0_irq_stack_base as *const usize) };
-    if canary != STACK_CANARY {
+    let irq_stack_base = if cpu_id() == 0 {
+        &raw const __hart0_irq_stack_base as *const usize
+    } else {
+        &raw const __hart1_irq_stack_base as *const usize
+    };
+    if unsafe { core::ptr::read_volatile(irq_stack_base) } != STACK_CANARY {
         irq_panic();
     }
     match mcause::read() {
@@ -45,7 +60,11 @@ extern "C" fn trap_handler(frame: &mut TrapFrame) {
         percpu::set_preempt_mepc(frame.mepc);
         percpu::set_preempt_mstatus(frame.mstatus);
         // Set up frame for trampoline
-        frame.mepc = preempt_trampoline as *const () as usize;
+        frame.mepc = if cpu_id() == 0 {
+            preempt_trampoline_h0 as *const () as usize
+        } else {
+            preempt_trampoline_h1 as *const () as usize
+        };
         frame.mstatus &= !MPIE; // Ensure trampoline executes with interrupts disabled
     }
 }

@@ -27,6 +27,10 @@ unsafe extern "C" {
     static __hart0_percpu_start: u8;
     static __hart0_percpu_end: u8;
 
+    static __sram9_text_start: u8;
+    static __sram9_text_end: u8;
+    static __sram9_text_lma: u8;
+
     static __hart1_irq_stack_base: u8;
     static __hart1_irq_stack_top: u8;
     static __hart1_idle_stack_base: u8;
@@ -59,10 +63,29 @@ global_asm!(
 global_asm!(
     r#"
     .section .text
-    .global _paint_section
+    .global _fill_section
     .align 4
-    _paint_section:
-        # Paint section with canary at base and pattern
+    _fill_section:
+        # Fill a section with the same word
+        # a0 = word, a1 = start, a2 = end
+        # Clobbers a1
+        1:
+        bge a1, a2, 2f
+        sw a0, 0(a1)
+        addi a1, a1, 4
+        j 1b
+        2:
+        ret
+        "#
+);
+
+global_asm!(
+    r#"
+    .section .text
+    .global _paint_stack
+    .align 4
+    _paint_stack:
+        # Paint a stack section with canary at base and pattern
         # a0 = canary, a1 = pattern, a2 = section start, a3 = section end
         # Clobbers a2
         bge a2, a3, 2f
@@ -87,27 +110,33 @@ extern "C" fn _start() -> ! {
         "bnez t0, hart1",               // Set up other HARTS
 
         // HART0 setup
-        // Set the boot stack into SRAM8
-        "la sp, {hart0_stack_top}",
-        // Paint the boot stack
+        // Set the idle stack into SRAM8
+        "la sp, {hart0_idle_stack_top}",
+        // Paint the idle stack
         "li a0, {canary}",
         "li a1, {pattern}",
-        "la a2, {hart0_stack_start}",
-        "la a3, {hart0_stack_top}",
-        "jal _paint_section",
+        "la a2, {hart0_idle_stack_base}",
+        "la a3, {hart0_idle_stack_top}",
+        "jal _paint_stack",
 
         // Paint the IRQ stack
         "li a0, {canary}",
         "li a1, {pattern}",
-        "la a2, {hart0_irq_stack_start}",
+        "la a2, {hart0_irq_stack_base}",
         "la a3, {hart0_irq_stack_top}",
-        "jal _paint_section",
+        "jal _paint_stack",
 
         // Copy .data from LMA to VMA
         "la a0, {data_lma}",
         "la a1, {data_start}",
         "la a2, {data_end}",
         "jal _copy_section",
+
+        // Zero BSS segment
+        "li a0, 0",
+        "la a1, {bss_start}",
+        "la a2, {bss_end}",
+        "jal _fill_section",
 
         // Copy .sram8_text from LMA to VMA
         "la a0, {sram8_text_lma}",
@@ -117,27 +146,12 @@ extern "C" fn _start() -> ! {
 
         // Zero PerCpu for HART0
         "li a0, 0",
-        "li a1, 0",
-        "la a2, {hart0_percpu_start}",
-        "la a3, {hart0_percpu_end}",
-        "jal _paint_section",
-
-        // Zero PerCpu for HART1
-        "li a0, 0",
-        "li a1, 0",
-        "la a2, {hart1_percpu_start}",
-        "la a3, {hart1_percpu_end}",
-        "jal _paint_section",
-
-        // Zero BSS segment
-        "li a0, 0",
-        "li a1, 0",
-        "la a2, {bss_start}",
-        "la a3, {bss_end}",
-        "jal _paint_section",
+        "la a1, {hart0_percpu_start}",
+        "la a2, {hart0_percpu_end}",
+        "jal _fill_section",
 
         // Set trap vector for HART0
-        "la t0, _trap_vector",
+        "la t0, _trap_vector_h0",
         "csrw mtvec, t0",
 
         // Store the IRQ stack top in mscratch
@@ -148,25 +162,37 @@ extern "C" fn _start() -> ! {
 
         // Set up HART1
         "hart1:",
-        // Set boot stack in SRAM9
-        "la sp, {hart1_stack_top}",
+        // Set idle stack in SRAM9
+        "la sp, {hart1_idle_stack_top}",
 
-        // Paint the boot stack
+        // Paint the idle stack
         "li a0, {canary}",
         "li a1, {pattern}",
-        "la a2, {hart1_stack_start}",
-        "la a3, {hart1_stack_top}",
-        "jal _paint_section",
+        "la a2, {hart1_idle_stack_base}",
+        "la a3, {hart1_idle_stack_top}",
+        "jal _paint_stack",
 
         // Paint the IRQ stack
         "li a0, {canary}",
         "li a1, {pattern}",
-        "la a2, {hart1_irq_stack_start}",
+        "la a2, {hart1_irq_stack_base}",
         "la a3, {hart1_irq_stack_top}",
-        "jal _paint_section",
+        "jal _paint_stack",
+
+        // Copy .sram9_text from LMA to VMA
+        "la a0, {sram9_text_lma}",
+        "la a1, {sram9_text_start}",
+        "la a2, {sram9_text_end}",
+        "jal _copy_section",
+
+        // Zero PerCpu for HART1
+        "li a0, 0",
+        "la a1, {hart1_percpu_start}",
+        "la a2, {hart1_percpu_end}",
+        "jal _fill_section",
 
         // Set trap vector for HART1
-        "la t0, _trap_vector",
+        "la t0, _trap_vector_h1",
         "csrw mtvec, t0",
 
         // Store the IRQ stack top in mscratch
@@ -180,19 +206,23 @@ extern "C" fn _start() -> ! {
         sram8_text_start = sym __sram8_text_start,
         sram8_text_end = sym __sram8_text_end,
 
-        hart0_irq_stack_start = sym __hart0_irq_stack_base,
+        hart0_irq_stack_base = sym __hart0_irq_stack_base,
         hart0_irq_stack_top = sym __hart0_irq_stack_top,
-        hart0_stack_start = sym __hart0_idle_stack_base,
-        hart0_stack_top = sym __hart0_idle_stack_top,
+        hart0_idle_stack_base = sym __hart0_idle_stack_base,
+        hart0_idle_stack_top = sym __hart0_idle_stack_top,
         hart0_percpu_start = sym __hart0_percpu_start,
         hart0_percpu_end = sym __hart0_percpu_end,
 
-        hart1_irq_stack_start = sym __hart1_irq_stack_base,
+        hart1_irq_stack_base = sym __hart1_irq_stack_base,
         hart1_irq_stack_top = sym __hart1_irq_stack_top,
-        hart1_stack_start = sym __hart1_idle_stack_base,
-        hart1_stack_top = sym __hart1_idle_stack_top,
+        hart1_idle_stack_base = sym __hart1_idle_stack_base,
+        hart1_idle_stack_top = sym __hart1_idle_stack_top,
         hart1_percpu_start = sym __hart1_percpu_start,
         hart1_percpu_end = sym __hart1_percpu_end,
+
+        sram9_text_lma = sym __sram9_text_lma,
+        sram9_text_start = sym __sram9_text_start,
+        sram9_text_end = sym __sram9_text_end,
 
         data_start = sym __data_start,
         data_end = sym __data_end,
