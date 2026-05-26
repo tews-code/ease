@@ -1,0 +1,38 @@
+[package]
+name = "ease"
+version = "0.1.0"
+edition = "2024"
+description = "EASE - OS for RP2350"
+
+[lib]
+name = "ease"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ease"
+path = "src/main.rs"
+
+[features]
+default = ["test-all"]
+qemu = []  # For QEMU-specific code
+profile = []
+test-alloc = []
+test-bench = []
+test-bss = []
+test-clint = []
+test-collections = []
+test-data = []
+test-fs = []
+test-io = []
+test-sched = []
+test-shell = []
+test-stack-guard = []
+test-timer = []
+test-virtio = []
+test-all = ["test-alloc", "test-bss", "test-clint", "test-collections", "test-data", "test-fs", "test-io", "test-sched", "test-shell", "test-stack-guard", "test-timer", "test-virtio"]
+
+[dependencies]
+ease-macros = { path = "../ease-macros" }
+
+[package.metadata.docs.rs]
+targets = ["riscv32imac-unknown-none-elf"]
