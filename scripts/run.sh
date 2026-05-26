@@ -4,6 +4,10 @@ set -e
 #QEMU file path
 QEMU=qemu-system-riscv32
 
+# Anchor disk.img to the crate root (this script's parent dir), where
+# mkdisk.sh creates it, so QEMU finds it regardless of the runner's CWD.
+CRATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 ELF="$1"
 FLASH_BIN="$(dirname "$ELF")/flash.bin"
 
@@ -14,7 +18,7 @@ rust-objcopy -O binary \
 
 #Start QEMU
 $QEMU -machine virt -bios none -device ramfb -serial stdio \
-    -drive id=drive0,file=disk.img,format=raw,if=none \
+    -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
     -drive if=pflash,unit=0,format=raw,file="$FLASH_BIN",readonly=on \
     -m 32M \

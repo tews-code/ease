@@ -33,6 +33,11 @@ done
 FOCUSED=0
 [ "$TEST_SET" != "test-all" ] && FOCUSED=1
 
+# Anchor to the crate root (this script's parent dir) so CI can be invoked
+# from anywhere, e.g. the project root. Done after arg parsing so --help's
+# `sed … "$0"` still resolves against the original CWD.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 FEATURES="$TEST_SET"
 
 # The bump and freelist allocator modules are kept in-tree as reference
