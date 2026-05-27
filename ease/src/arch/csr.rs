@@ -76,17 +76,6 @@ pub mod mcause {
     }
 }
 
-/// Machine HART id
-pub mod mhartid {
-    pub fn read() -> usize {
-        let mhartid: usize;
-        unsafe {
-            core::arch::asm!("csrr {}, mhartid", out(reg) mhartid);
-        }
-        mhartid
-    }
-}
-
 /// Machine exception program counter (mepc)
 pub mod mepc {
     /// Read the mepc CSR.
@@ -99,9 +88,23 @@ pub mod mepc {
     }
 }
 
-/// Machine exception program counter (mepc)
+/// Machine HART id
+pub mod mhartid {
+    pub fn read() -> usize {
+        let mhartid: usize;
+        unsafe {
+            core::arch::asm!("csrr {}, mhartid", out(reg) mhartid);
+        }
+        mhartid
+    }
+}
+
+// Machine scratch register
+define_csr!(mscratch);
+
+/// Machine exception program counter (mtval)
 pub mod mtval {
-    /// Read the mepc CSR.
+    /// Read the mtval CSR.
     pub fn read() -> usize {
         let mtval: usize;
         unsafe {

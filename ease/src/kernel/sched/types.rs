@@ -140,11 +140,12 @@ pub(super) struct ThreadControlBlock {
     pub(super) stack: Option<StackClass>,
     pub(super) stack_base: *mut u8,
     pub(super) qos: Qos,
-    pub(super) priority: u8,             // Lower number is higher priority
-    pub(super) pass: u64,                // The next ready thread with lowest pass wins
-    pub(super) last_started_cycles: u64, // Cycle stamp from last switch
-    pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
-    pub(super) affinity: Option<u8>,              // Affinity to a particular HART
+    pub(super) priority: u8,                        // Lower number is higher priority
+    pub(super) pass: u64,                           // The next ready thread with lowest pass wins
+    pub(super) last_started_cycles: u64,            // Cycle stamp from last switch
+    pub(super) next_waiter: Option<ThreadHandle>,   // Handle of next thread waiting on blocked resource
+    pub(super) affinity: Option<u8>,                // Affinity to a particular HART
+    pub(super) user_stack_top: Option<usize>,       // If is Some then this TCB is supporting a user thread
 }
 
 pub(super) struct ThreadsInner {

@@ -5,7 +5,7 @@ use alloc::boxed::Box;
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
-use crate::arch::cpu_id;
+use crate::arch::{cpu_id, csr};
 use crate::arch::stack::STACK_CANARY;
 use crate::board::HARTS_MAX;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
@@ -23,6 +23,8 @@ unsafe extern "C" {
     // by spawn's stack forging; calling with interrupts disabled is undefined;
     pub(crate) fn switch_to_h0(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
     pub(crate) fn switch_to_h1(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
+    static __hart0_irq_stack_top: u8;
+    static __hart1_irq_stack_top: u8;
 }
 
 // Helper function to determine the HART boot threads in the threads array
@@ -77,6 +79,7 @@ impl ThreadControlBlock {
             last_started_cycles: 0,
             next_waiter: None,
             affinity: None,
+            user_stack_top: None,
         }
     }
 
@@ -351,6 +354,7 @@ impl ThreadsInner {
     }
 
     // Set the PerCpu info for a running thread on this HART
+    // and set mscratch to top IRQ stack for M-mode or kernel stack for U-mode
     fn set_running_thread_percpu(
         &mut self,
         current_thread_idx: usize,
@@ -359,6 +363,18 @@ impl ThreadsInner {
         percpu::set_current_thread_idx(current_thread_idx);
         percpu::set_current_stack_base(self.control_blocks[current_thread_idx].stack_base);
         percpu::set_switching_thread_idx(switching_thread_idx);
+        // Set mscratch
+        if self.control_blocks[current_thread_idx].user_stack_top.is_some() {
+            let class = self.control_blocks[current_thread_idx].stack.expect("should not be using idle thread for user thread");
+            unsafe { csr::mscratch::write(self.control_blocks[current_thread_idx].stack_base as usize + class.size()); }
+        } else {
+            if cpu_id() == 0 {
+                unsafe { csr::mscratch::write(&raw const __hart0_irq_stack_top as usize); }
+            } else {
+                unsafe { csr::mscratch::write(&raw const __hart1_irq_stack_top as usize); }
+            }
+
+        }
     }
 }
 
