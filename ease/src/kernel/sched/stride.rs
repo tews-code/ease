@@ -560,7 +560,6 @@ impl Scheduler {
     }
 
     /// Perform switch accounting and set reschedule flag
-    // #[unsafe(link_section = ".sram8_text")]
     pub(super) fn mark_for_preempt(&self) {
         let mut threads = self.threads.lock();
         threads.check_curr_canary();
