@@ -20,15 +20,15 @@ fn pmpaddr(base: usize, size: usize) -> usize {
 }
 
 unsafe extern "C" {
-    static __flash_start: u8;
-    static __flash_end: u8;
+    static __user_text_start: u8;
+    static __user_text_end: u8;
     static __heap_pd0_start: u8;
     static __heap_pd0_end: u8;
 }
 
 pub(crate) fn configure() {
-    let flash_start = &raw const __flash_start as usize;
-    let flash_size = &raw const __flash_end as usize - flash_start;
+    let flash_start = &raw const __user_text_start as usize;
+    let flash_size = &raw const __user_text_end as usize - flash_start;
     let flash_pmpaddr = pmpaddr(flash_start, flash_size);
     let heap_start = &raw const __heap_pd0_start as usize;
     let heap_size = &raw const __heap_pd0_end as usize - heap_start;

@@ -10,6 +10,7 @@ use crate::arch::stack::STACK_CANARY;
 use crate::arch::trap::TrapFrame;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
+use crate::kernel::percpu::ExitReason;
 use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
@@ -63,6 +64,9 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
             frame.mepc += 4;
             crate::dprint!("ecall from M");
         }
+        Trap::Exception(
+            code @ (INSTRUCTION_ACCESS_FAULT | LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT),
+        ) => handle_access_fault(frame, code),
         Trap::Exception(code) => handle_exception(code),
     }
     if percpu::needs_reschedule() {
@@ -83,17 +87,33 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
 fn handle_ecall(frame: &mut TrapFrame) {
     match frame.syscall() {
         crate::syscall::EXIT => {
-            // Set mstatus to return to M mode
-            frame.mstatus |= mstatus::MPP;
-            frame.mstatus |= mstatus::MPIE;
-            // Switch mepc to return to M-mode
-            frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
+            exit_from_user(frame, ExitReason::Exit);
         }
         _ => {
             // Advance mepc
             frame.mepc += 4;
             crate::dprint!("user ecall code {}", frame.syscall());
         }
+    }
+}
+
+fn exit_from_user(frame: &mut TrapFrame, reason: ExitReason) {
+    // Store the exit reason
+    percpu::set_user_exit_reason(reason);
+    // Set mstatus to reenable interrupts on return
+    frame.mstatus |= mstatus::MPP;
+    frame.mstatus |= mstatus::MPIE;
+    // Switch mepc to return to M-mode
+    frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
+}
+
+#[inline(never)]
+#[cold]
+fn handle_access_fault(frame: &mut TrapFrame, code: usize) {
+    if frame.is_from_user() {
+        exit_from_user(frame, ExitReason::Fault);
+    } else {
+        handle_exception(code);
     }
 }
 

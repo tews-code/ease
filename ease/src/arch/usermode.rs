@@ -10,7 +10,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-pub(crate) extern "C" fn user_entry() {
+pub(crate) extern "C" fn user_entry(entry: extern "C" fn() -> !) {
     naked_asm!(
         // Disable interrupts
         "li t0, {mstatus_MIE}",
@@ -30,11 +30,11 @@ pub(crate) extern "C" fn user_entry() {
         "sw s9,  4 * 10(sp)",
         "sw s10, 4 * 11(sp)",
         "sw s11, 4 * 12(sp)",
+        "mv s0, a0",    // Keep a copy of a0
         "mv a0, sp",
         "call {set_kernel_resume_sp}",
 
-        "la t0, {user_test}",
-        "csrw mepc, t0",
+        "csrw mepc, s0",
         "li t0, {mstatus_MPP}",
         "csrc mstatus, t0",
         "li t0, {mstatus_MPIE}",
@@ -43,7 +43,6 @@ pub(crate) extern "C" fn user_entry() {
         "mv sp, t0",
         "mret",
         mstatus_MIE = const mstatus::MIE,
-        user_test = sym crate::user::user_test,
         set_kernel_resume_sp = sym crate::kernel::percpu::set_kernel_resume_sp,
         mstatus_MPP = const mstatus::MPP,
         mstatus_MPIE = const mstatus::MPIE,
@@ -76,4 +75,31 @@ pub(crate) extern "C" fn resume_kernel() {
         "ret",
         kernel_resume_sp = sym crate::kernel::percpu::kernel_resume_sp,
     );
+}
+
+// `arch` is bin-only (stubbed out of the host lib crate), so these run on
+// the kernel target in QEMU (`cargo test --bin ease`) via `#[test_case]`.
+// Each drives a full U-mode excursion through `user_entry`/`resume_kernel`
+// and checks how the kernel regained control via the per-hart exit reason.
+#[cfg(all(test, feature = "test-user"))]
+mod test {
+    use super::user_entry;
+    use crate::kernel::percpu::{ExitReason, user_exit_reason};
+    use crate::user::{user_fault_test, user_test};
+
+    // A user thread that leaves via the `EXIT` syscall returns cleanly.
+    #[test_case]
+    fn clean_exit_reports_exit() {
+        user_entry(user_test);
+        // Read immediately, before any yield: the reason is per-hart state.
+        assert_eq!(user_exit_reason(), ExitReason::Exit);
+    }
+
+    // A user thread that reads kernel memory takes a PMP access fault, which
+    // the kernel recovers from (returns) rather than panicking.
+    #[test_case]
+    fn kernel_access_reports_fault() {
+        user_entry(user_fault_test);
+        assert_eq!(user_exit_reason(), ExitReason::Fault);
+    }
 }

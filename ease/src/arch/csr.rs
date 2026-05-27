@@ -48,7 +48,10 @@ pub mod mcause {
     }
 
     pub mod exception {
+        pub const INSTRUCTION_ACCESS_FAULT: usize = 1;
         pub const ILLEGAL_INSTRUCTION: usize = 2;
+        pub const LOAD_ACCESS_FAULT: usize = 5;
+        pub const STORE_ACCESS_FAULT: usize = 7;
         pub const ECALL_FROM_U: usize = 8;
         pub const ECALL_FROM_M: usize = 11;
     }

@@ -148,24 +148,6 @@ fn test_runner_thread() {
 extern "C" fn main() -> ! {
     kernel_init();
 
-    spawn(|| {
-        loop {
-            print!("A");
-            sched::sleep(100);
-        }
-    });
-    spawn(|| {
-        loop {
-            print!("B");
-            sched::sleep(100);
-        }
-    });
-    sched::sleep(1_000);
-    unsafe {
-        core::arch::asm!("ecall");
-    }
-    crate::arch::usermode::user_entry();
-
     #[allow(clippy::diverging_sub_expression)]
     let Some(_id) = sched::Builder::new()
         .with_stack_class(sched::StackClass::KB16)

@@ -42,6 +42,10 @@ impl TrapFrame {
     pub(crate) fn syscall(&self) -> usize {
         self.a7
     }
+
+    pub(crate) fn is_from_user(&self) -> bool {
+        (self.mstatus & crate::arch::csr::mstatus::MPP) == 0
+    }
 }
 
 const NUM_SLOTS: usize = 32;

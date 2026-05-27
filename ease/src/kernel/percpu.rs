@@ -5,6 +5,15 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sched::THREADS_MAX;
 
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ExitReason {
+    Exit,
+    Fault,
+}
+
+const _: () = assert!(ExitReason::Exit as u8 == 0);
+
 #[repr(C, align(8))]
 #[allow(dead_code)]
 struct PerCpu {
@@ -16,6 +25,7 @@ struct PerCpu {
     preempt_mstatus: UnsafeCell<usize>,
     preempt_mepc: UnsafeCell<usize>,
     kernel_resume_sp: UnsafeCell<usize>,
+    user_exit_reason: UnsafeCell<ExitReason>,
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -32,6 +42,7 @@ impl PerCpu {
             preempt_mstatus: UnsafeCell::new(0),
             preempt_mepc: UnsafeCell::new(0),
             kernel_resume_sp: UnsafeCell::new(0),
+            user_exit_reason: UnsafeCell::new(ExitReason::Exit),
         }
     }
 }
@@ -176,4 +187,17 @@ pub fn kernel_resume_sp() -> usize {
 pub fn set_kernel_resume_sp(sp: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().kernel_resume_sp.get() = sp }
+}
+
+/// Get the stack pointer to resume the kernel from user space
+#[allow(dead_code)]
+pub fn user_exit_reason() -> ExitReason {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().user_exit_reason.get() }
+}
+
+/// Set the stack pointer to resume the kernel from user space
+pub fn set_user_exit_reason(reason: ExitReason) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().user_exit_reason.get() = reason }
 }
