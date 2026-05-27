@@ -150,6 +150,9 @@ extern "C" fn _start() -> ! {
         "la a2, {hart0_percpu_end}",
         "jal _fill_section",
 
+        // Set up PMP
+        "call {pmp_configure}",
+
         // Set trap vector for HART0
         "la t0, _trap_vector_h0",
         "csrw mtvec, t0",
@@ -191,6 +194,9 @@ extern "C" fn _start() -> ! {
         "la a2, {hart1_percpu_end}",
         "jal _fill_section",
 
+        // Set up PMP
+        "call {pmp_configure}",
+
         // Set trap vector for HART1
         "la t0, _trap_vector_h1",
         "csrw mtvec, t0",
@@ -230,6 +236,8 @@ extern "C" fn _start() -> ! {
 
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
+
+        pmp_configure = sym crate::arch::pmp::configure,
 
         canary = const STACK_CANARY,
         pattern = const STACK_PAINT_PATTERN,

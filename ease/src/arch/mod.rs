@@ -7,8 +7,10 @@ pub mod context;
 pub mod csr;
 pub mod mmio;
 pub mod percore_text;
+pub mod pmp;
 pub mod stack;
 pub mod trap;
+pub mod usermode;
 
 /// Get HART id that this thread is running on
 pub fn cpu_id() -> usize {

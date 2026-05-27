@@ -30,6 +30,8 @@ mod io;
 mod kernel;
 mod qemu;
 mod shell;
+mod syscall;
+mod user;
 
 static FB_HANDOFF: IrqSpinLock<Option<FrameBuffer>> = IrqSpinLock::new(None);
 static FB_READY: Completion = Completion::new();
@@ -145,6 +147,24 @@ fn test_runner_thread() {
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     kernel_init();
+
+    spawn(|| {
+        loop {
+            print!("A");
+            sched::sleep(100);
+        }
+    });
+    spawn(|| {
+        loop {
+            print!("B");
+            sched::sleep(100);
+        }
+    });
+    sched::sleep(1_000);
+    unsafe {
+        core::arch::asm!("ecall");
+    }
+    crate::arch::usermode::user_entry();
 
     #[allow(clippy::diverging_sub_expression)]
     let Some(_id) = sched::Builder::new()

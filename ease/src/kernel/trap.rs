@@ -3,6 +3,7 @@ use crate::arch::cpu_id;
 use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
+use crate::arch::csr::mstatus;
 use crate::arch::csr::mstatus::MPIE;
 use crate::arch::csr::{mepc, mtval};
 use crate::arch::stack::STACK_CANARY;
@@ -54,6 +55,14 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),
+        Trap::Exception(ECALL_FROM_U) => {
+            handle_ecall(frame);
+        }
+        Trap::Exception(ECALL_FROM_M) => {
+            // Advance mepc
+            frame.mepc += 4;
+            crate::dprint!("ecall from M");
+        }
         Trap::Exception(code) => handle_exception(code),
     }
     if percpu::needs_reschedule() {
@@ -66,6 +75,25 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
             preempt_trampoline_h1 as *const () as usize
         };
         frame.mstatus &= !MPIE; // Ensure trampoline executes with interrupts disabled
+    }
+}
+
+#[inline(never)]
+#[cold]
+fn handle_ecall(frame: &mut TrapFrame) {
+    match frame.syscall() {
+        crate::syscall::EXIT => {
+            // Set mstatus to return to M mode
+            frame.mstatus |= mstatus::MPP;
+            frame.mstatus |= mstatus::MPIE;
+            // Switch mepc to return to M-mode
+            frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
+        }
+        _ => {
+            // Advance mepc
+            frame.mepc += 4;
+            crate::dprint!("user ecall code {}", frame.syscall());
+        }
     }
 }
 

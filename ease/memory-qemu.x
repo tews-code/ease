@@ -78,6 +78,8 @@ __user_heap_sram_size   = 256K;
 __user_heap_psram_size  = 4M;
 __fb_width = 640; __fb_height = 480; __fb_bpp = 4; /* 640  x 480 x 4 bytes = 1.2MiB */
 
+__flash_start   = ORIGIN(FLASH);
+__flash_end     = ORIGIN(FLASH) + LENGTH(FLASH);
 __sram_pd1_end  = ORIGIN(SRAM_PD1) + LENGTH(SRAM_PD1);
 __psram_end     = ORIGIN(PSRAM) + LENGTH(PSRAM);
 __fb_size       = __fb_width * __fb_height * __fb_bpp;

@@ -3,7 +3,7 @@
 //! Saves context and calls handler, returns with `mret`.
 
 #[repr(C, align(16))]
-pub struct TrapFrame {
+pub(crate) struct TrapFrame {
     ra: usize,
     gp: usize,
     tp: usize,
@@ -36,6 +36,12 @@ pub struct TrapFrame {
     s11: usize,
     pub mepc: usize,
     pub mstatus: usize,
+}
+
+impl TrapFrame {
+    pub(crate) fn syscall(&self) -> usize {
+        self.a7
+    }
 }
 
 const NUM_SLOTS: usize = 32;

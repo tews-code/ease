@@ -15,6 +15,7 @@ struct PerCpu {
     needs_reschedule: AtomicBool,
     preempt_mstatus: UnsafeCell<usize>,
     preempt_mepc: UnsafeCell<usize>,
+    kernel_resume_sp: UnsafeCell<usize>,
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -30,6 +31,7 @@ impl PerCpu {
             needs_reschedule: AtomicBool::new(false),
             preempt_mstatus: UnsafeCell::new(0),
             preempt_mepc: UnsafeCell::new(0),
+            kernel_resume_sp: UnsafeCell::new(0),
         }
     }
 }
@@ -162,4 +164,16 @@ pub fn preempt_mstatus() -> usize {
 pub fn set_preempt_mstatus(mstatus: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().preempt_mstatus.get() = mstatus }
+}
+
+/// Get the stack pointer to resume the kernel from user space
+pub fn kernel_resume_sp() -> usize {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().kernel_resume_sp.get() }
+}
+
+/// Set the stack pointer to resume the kernel from user space
+pub fn set_kernel_resume_sp(sp: usize) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().kernel_resume_sp.get() = sp }
 }

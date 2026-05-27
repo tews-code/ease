@@ -2,6 +2,43 @@
 
 use core::arch::asm;
 
+macro_rules! define_csr {
+    ($csr:ident) => {
+        pub mod $csr {
+            pub fn read() -> usize {
+                let $csr: usize;
+                // Safety: CSR is safe to read
+                unsafe {
+                    core::arch::asm!(concat!("csrr {}, ", stringify!($csr)), out(reg) $csr);
+                }
+                $csr
+            }
+
+            /// Write the PMP
+            ///
+            #[doc = concat!("Caller must ensure the `", stringify!($csr), "` value does not prevent valid region use")]
+            pub unsafe fn write($csr: usize) {
+                // Safety: CSR is safe to write and caller ensures valid region
+                unsafe {
+                    core::arch::asm!(concat!("csrw ", stringify!($csr), ", {}"), in(reg) $csr);
+                }
+            }
+        }
+    };
+}
+
+/// PMP
+pub mod pmp {
+    pub(crate) const R: usize = 1;
+    pub(crate) const W: usize = 1 << 1;
+    pub(crate) const X: usize = 1 << 2;
+    pub(crate) const NAPOT: usize = 0b11 << 3;
+
+    define_csr!(pmpcfg0);
+    define_csr!(pmpaddr0);
+    define_csr!(pmpaddr1);
+}
+
 /// Machine cause register (mcause)
 pub mod mcause {
     #[derive(Debug)]
@@ -12,6 +49,8 @@ pub mod mcause {
 
     pub mod exception {
         pub const ILLEGAL_INSTRUCTION: usize = 2;
+        pub const ECALL_FROM_U: usize = 8;
+        pub const ECALL_FROM_M: usize = 11;
     }
 
     pub mod interrupt {
