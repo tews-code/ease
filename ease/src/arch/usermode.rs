@@ -10,7 +10,7 @@ unsafe extern "C" {
 
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
-pub(crate) extern "C" fn user_entry(entry: extern "C" fn() -> !) {
+pub(crate) extern "C" fn user_entry(entry: extern "C" fn()) {
     naked_asm!(
         // Disable interrupts
         "li t0, {mstatus_MIE}",
@@ -41,12 +41,15 @@ pub(crate) extern "C" fn user_entry(entry: extern "C" fn() -> !) {
         "csrc mstatus, t0",
         "la t0, {user_heap}",
         "mv sp, t0",
+        "la t0, {user_exit}",
+        "mv ra, t0",
         "mret",
         mstatus_MIE = const mstatus::MIE,
         set_kernel_resume_sp = sym crate::kernel::percpu::set_kernel_resume_sp,
         mstatus_MPP = const mstatus::MPP,
         mstatus_MPIE = const mstatus::MPIE,
         user_heap = sym __heap_pd0_end,
+        user_exit = sym crate::user::user_exit,
     );
 }
 
@@ -85,13 +88,21 @@ pub(crate) extern "C" fn resume_kernel() {
 mod test {
     use super::user_entry;
     use crate::kernel::percpu::{ExitReason, user_exit_reason};
-    use crate::user::{user_fault_test, user_test};
+    use crate::user::{user_fault_test, user_return_test, user_test};
 
     // A user thread that leaves via the `EXIT` syscall returns cleanly.
     #[test_case]
     fn clean_exit_reports_exit() {
         user_entry(user_test);
         // Read immediately, before any yield: the reason is per-hart state.
+        assert_eq!(user_exit_reason(), ExitReason::Exit);
+    }
+
+    // A user thread that simply returns (no explicit `ecall`) exits cleanly
+    // via the `user_exit` shim that `user_entry` installs in `ra`.
+    #[test_case]
+    fn normal_return_reports_exit() {
+        user_entry(user_return_test);
         assert_eq!(user_exit_reason(), ExitReason::Exit);
     }
 
