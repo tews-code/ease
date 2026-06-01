@@ -12,7 +12,6 @@ ELF="$1"
 FLASH_BIN="$(dirname "$ELF")/flash.bin"
 
 rust-objcopy -O binary \
-    --only-section=.user_text \
     --only-section=.text --only-section=.rodata \
     --pad-to=0x22000000 --gap-fill=0xff \
     "$ELF" "$FLASH_BIN"

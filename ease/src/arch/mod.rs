@@ -8,7 +8,6 @@ pub mod csr;
 pub mod mmio;
 pub mod percore_text;
 pub mod pmp;
-pub mod stack;
 pub mod trap;
 pub mod usermode;
 

@@ -32,3 +32,6 @@ pub mod uart {
 
 // HARTS
 pub const HARTS_MAX: usize = 2;
+
+// PMP
+pub const PMP_ADDR_COUNT: usize = 8;

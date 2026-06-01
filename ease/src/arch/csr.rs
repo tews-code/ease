@@ -29,14 +29,22 @@ macro_rules! define_csr {
 
 /// PMP
 pub mod pmp {
-    pub(crate) const R: usize = 1;
-    pub(crate) const W: usize = 1 << 1;
-    pub(crate) const X: usize = 1 << 2;
-    pub(crate) const NAPOT: usize = 0b11 << 3;
+    pub(crate) const R: u8 = 1;
+    pub(crate) const W: u8 = 1 << 1;
+    pub(crate) const X: u8 = 1 << 2;
+    pub(crate) const NAPOT: u8 = 0b11 << 3;
 
-    define_csr!(pmpcfg0);
     define_csr!(pmpaddr0);
     define_csr!(pmpaddr1);
+    define_csr!(pmpaddr2);
+    define_csr!(pmpaddr3);
+    define_csr!(pmpaddr4);
+    define_csr!(pmpaddr5);
+    define_csr!(pmpaddr6);
+    define_csr!(pmpaddr7);
+
+    define_csr!(pmpcfg0);
+    define_csr!(pmpcfg1);
 }
 
 /// Machine cause register (mcause)

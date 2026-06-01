@@ -1,12 +1,15 @@
-//! Context swap for co-operative scheduler
+//! Context switch for co-operative scheduling
 // On RP2350 the RISCV cores do not perform hardware caller register
 // so keep a lightweight yield function
 
 use core::arch::naked_asm;
 
-// The RISC-V psABI splits regs into callee-saved and caller-saved,
-// and the compiler has already preserved any caller-saved regs across
-// our extern "C" call
+use super::usermode::user_first_run;
+
+// The RISC-V psABI requires 16 byte alignment, and it splits regs
+// into callee-saved and caller-saved.
+// The compiler has already preserved any caller-saved regs across
+// our extern "C" call.
 #[repr(C, align(16))]
 #[derive(Default)]
 pub struct Context {
@@ -31,30 +34,41 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(Context, ra) == 0);
 
 impl Context {
-    pub fn for_entry(trampoline_ptr: extern "C" fn(*mut u8) -> !, closure_ptr: *mut u8) -> Self {
+    pub fn init_for_kernel_entry(
+        run_closure_thread: extern "C" fn(*mut u8) -> !,
+        closure_ptr: *mut u8,
+    ) -> Self {
         Self {
-            ra: thread_entry as *const () as usize,
-            s0: trampoline_ptr as usize,
+            ra: kernel_first_run_shim as *const () as usize,
+            s0: run_closure_thread as usize,
             s1: closure_ptr as usize,
+            ..Self::default()
+        }
+    }
+
+    pub fn init_for_user_entry() -> Self {
+        Self {
+            ra: user_first_run as *const () as usize, // switch_to's ret lands in user_first_run; the trap frame above it holds the U-mode state"
             ..Self::default()
         }
     }
 }
 
+/// ABI shim: `Context::init_for_kernel_entry.` placed `trampoline_ptr` in `s0`
+/// and `closure_ptr` in `s1` so they survived `switch_to`'s callee-saved
+/// restore. Move them to `a0`/`a1` and tail-call `kernel_thread_first_run`.
+// Safety: Reachable only via `switch_to` returning into a `Context` forged by `Context::init_for_kernel_entry.`
 #[unsafe(naked)]
-// Safety: Reached via switch_to returning into a Context forged by
-// spawn, with s0 = entry. Enables MIE then jumps to s0.
-unsafe extern "C" fn thread_entry() {
+unsafe extern "C" fn kernel_first_run_shim() {
     naked_asm!(
         "mv a0, s0",
         "mv a1, s1",
-        "tail {trampoline}",
-        trampoline = sym thread_first_run,
+        "tail {trampoline}",    // Does not set unwanted return address before call as we do not want to return to `kernel_first_run_shim`.
+        trampoline = sym kernel_thread_first_run,
     );
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn thread_first_run(
+unsafe extern "C" fn kernel_thread_first_run(
     trampoline_ptr: extern "C" fn(*mut u8) -> !,
     closure_ptr: *mut u8,
 ) -> ! {

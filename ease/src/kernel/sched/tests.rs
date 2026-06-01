@@ -39,7 +39,7 @@
 // rebuilt. Real RP2350 hardware will have prompt interrupt delivery
 // and the bounds can be tightened then.
 
-use crate::kernel::sched::{Qos, StackClass};
+use crate::kernel::sched::{Order, Qos};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Counter the partner thread bumps each iteration. We only assert it
@@ -58,7 +58,7 @@ fn partner_thread() {
 fn ensure_partner_spawned() {
     if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .spawn(partner_thread);
     }
 }
@@ -78,7 +78,7 @@ fn exit_runs_and_recycles_slot() {
     }
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .with_qos(Qos::Low)
         .spawn(marker_then_exit);
     assert!(id.is_some(), "spawn failed (no free slot?)");
@@ -168,7 +168,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     ensure_partner_spawned();
     if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(long_leeway_sleeper);
     }
@@ -209,7 +209,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     ensure_partner_spawned();
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(huge_leeway_sleeper);
     }
@@ -283,11 +283,11 @@ fn fair_stride_resists_wake_spammer() {
 
     if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(t3_spammer);
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(t3_hog);
     }
@@ -351,7 +351,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
     ensure_partner_spawned();
     if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(t4_low_neighbor);
     }
@@ -360,7 +360,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
     crate::kernel::sched::sleep(2);
 
     crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(t4_high_measurer);
 
     // Wait for the measurer to finish its 20 ms sleep and record.
@@ -422,7 +422,7 @@ fn park_blocks_until_unpark() {
     // Reset — the static persists across test runs.
     CHILD_PROGRESS.store(0, Ordering::Relaxed);
     let handle = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(child_thread)
         .expect("spawn failed (no free slot?)");
     // Give the child time to run and reach park().
@@ -493,7 +493,7 @@ fn mutex_contention_counter() {
     ensure_partner_spawned();
     for _ in 0..WORKERS {
         let id = crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .spawn(worker);
         assert!(id.is_some(), "spawn failed (no free slot?)");
     }
@@ -557,7 +557,7 @@ fn mutex_unit_serialises_critical_section() {
     ensure_partner_spawned();
     for _ in 0..WORKERS {
         let id = crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .spawn(worker);
         assert!(id.is_some(), "spawn failed (no free slot?)");
     }
@@ -607,7 +607,7 @@ fn mutex_high_contention_stress() {
     ensure_partner_spawned();
     for _ in 0..WORKERS {
         let id = crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(worker);
         assert!(id.is_some(), "spawn failed (no free slot?)");
@@ -720,7 +720,7 @@ fn mutex_holder_sleep_parks_contender() {
         Ordering::Relaxed,
     );
     let id1 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(holder);
     assert!(id1.is_some(), "holder spawn failed");
     // Brief delay so holder definitely grabs the lock first.
@@ -730,7 +730,7 @@ fn mutex_holder_sleep_parks_contender() {
         Ordering::Relaxed,
     );
     let id2 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(contender);
     assert!(id2.is_some(), "contender spawn failed");
     MAIN_AFTER_SPAWN_CONTENDER_AT.store(
@@ -822,7 +822,7 @@ fn sleep_precision_dedicated_thread() {
 
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(sleeper);
     assert!(id.is_some(), "sleeper spawn failed");
 
@@ -884,7 +884,7 @@ fn spawn_to_first_instruction_latency() {
     let spawn_at = crate::kernel::timer::elapsed_ms();
     SPAWN_TIME.store(spawn_at as usize, Ordering::Relaxed);
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(child);
     assert!(id.is_some(), "child spawn failed");
 
@@ -1004,7 +1004,7 @@ fn mutex_holder_parks_contender_with_completion() {
         Ordering::Relaxed,
     );
     let id1 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(holder);
     assert!(id1.is_some(), "holder spawn failed");
     // Wait until the holder confirms it has the lock and is about to
@@ -1015,7 +1015,7 @@ fn mutex_holder_parks_contender_with_completion() {
         Ordering::Relaxed,
     );
     let id2 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(contender);
     assert!(id2.is_some(), "contender spawn failed");
     MAIN_AFTER_SPAWN_AT.store(
@@ -1122,7 +1122,7 @@ fn sleep10_wakes_promptly_under_partner_load() {
 
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(sleeper);
     assert!(id.is_some(), "sleeper spawn failed");
 
@@ -1209,11 +1209,11 @@ fn completion_wait_wakes_promptly_under_partner_load() {
 
     ensure_partner_spawned();
     let id1 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(waiter);
     assert!(id1.is_some(), "waiter spawn failed");
     let id2 = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(signaler);
     assert!(id2.is_some(), "signaler spawn failed");
 
@@ -1265,7 +1265,7 @@ fn completion_signal_then_wait() {
     // Signal BEFORE the child runs — pending should be set.
     C.signal();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(child);
     assert!(id.is_some(), "spawn failed (no free slot?)");
 
@@ -1297,7 +1297,7 @@ fn completion_wait_then_signal() {
 
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(child);
     assert!(id.is_some(), "spawn failed (no free slot?)");
 
@@ -1346,7 +1346,7 @@ fn completion_signal_twice_is_idempotent() {
     C.signal();
 
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .spawn(child_two_waits);
     assert!(id.is_some(), "spawn failed (no free slot?)");
 
@@ -1419,7 +1419,7 @@ fn affinity_hart0_runs_on_hart0() {
     let test_runner_hart_before = crate::arch::cpu_id();
     let spawn_ms = crate::kernel::timer::elapsed_ms();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .with_affinity(0)
         .spawn(pinned_hart0);
     assert!(id.is_some(), "spawn failed");
@@ -1481,7 +1481,7 @@ fn affinity_hart1_runs_on_hart1() {
 
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .with_affinity(1)
         .spawn(pinned_hart1);
     assert!(id.is_some(), "spawn failed");
@@ -1533,7 +1533,7 @@ fn affinity_unpark_wakes_via_ipi() {
 
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
-        .with_stack_class(StackClass::KB2)
+        .with_stack_class(Order::KB2)
         .with_affinity(1)
         .spawn(waiter_on_hart1);
     assert!(id.is_some(), "spawn failed");
@@ -1615,7 +1615,7 @@ fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
 
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(hog);
     }
@@ -1690,11 +1690,11 @@ fn forced_preempt_preserves_computation() {
 
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(peer);
         crate::kernel::sched::Builder::new()
-            .with_stack_class(StackClass::KB2)
+            .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .spawn(compute);
     }

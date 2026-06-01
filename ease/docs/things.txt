@@ -398,4 +398,12 @@ That's it — 2KB stereo i16 buffer living in SRAM5, zero flash footprint, no st
   5. TLS variables can't be referenced before tp is set up. So the very-early boot code can't use them; it has to fall back to mhartid reads. Trivial constraint in practice.
 
 
+  28. For better memory protection:
+     - Split the user PD0 into three buddy allocoators of 64kB, 64kb, 128KB.
+     - Use one part for user .bss .data (1 NAPOT region - RW)
+     - Use the other for user thread stack (1 NAPOT region - RW)
+     - .text goes into the start of PSRAM (1 NAOPT region - RX)
+     - Common shared user heap taken from 128KB PD0 region (1 NAOPT region - RW)
+     - (If requested) - shared buffer is put in PD1 (lower memory) (1 NAPOT region -RW or R)
+    That's a total of 5 regions per user thread, easily fits in RP2350 PMP config
 

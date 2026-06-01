@@ -20,7 +20,7 @@ struct PerCpu {
     idle_thread_idx: UnsafeCell<u8>,
     current_thread_idx: UnsafeCell<u8>,
     current_stack_base: UnsafeCell<*mut u8>,
-    switching_thread_idx: UnsafeCell<Option<u8>>,
+    switching_from_thread_idx: UnsafeCell<Option<u8>>,
     needs_reschedule: AtomicBool,
     preempt_mstatus: UnsafeCell<usize>,
     preempt_mepc: UnsafeCell<usize>,
@@ -37,7 +37,7 @@ impl PerCpu {
             idle_thread_idx: UnsafeCell::new(0),
             current_thread_idx: UnsafeCell::new(0),
             current_stack_base: UnsafeCell::new(core::ptr::null_mut()),
-            switching_thread_idx: UnsafeCell::new(None),
+            switching_from_thread_idx: UnsafeCell::new(None),
             needs_reschedule: AtomicBool::new(false),
             preempt_mstatus: UnsafeCell::new(0),
             preempt_mepc: UnsafeCell::new(0),
@@ -106,14 +106,13 @@ pub fn set_current_stack_base(stack_base: *mut u8) {
 }
 
 /// Get the switching thread index
-#[allow(dead_code)]
-pub fn switching_thread_idx() -> Option<usize> {
+pub fn switching_from_thread_idx() -> Option<usize> {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().switching_thread_idx.get() }.map(|i| i as usize)
+    unsafe { *this_cpu().switching_from_thread_idx.get() }.map(|i| i as usize)
 }
 
 /// Set the switching thread index
-pub fn set_switching_thread_idx(thread_idx: Option<usize>) {
+pub fn set_switching_from_thread_idx(thread_idx: Option<usize>) {
     let idx = thread_idx.map(|i| {
         assert!(
             i < THREADS_MAX,
@@ -122,17 +121,17 @@ pub fn set_switching_thread_idx(thread_idx: Option<usize>) {
         i as u8
     });
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().switching_thread_idx.get() = idx };
+    unsafe { *this_cpu().switching_from_thread_idx.get() = idx };
 }
 
 /// Take the switching thread index
-pub fn take_switching_thread_idx() -> Option<usize> {
+pub fn take_switching_from_thread_idx() -> Option<usize> {
     let hart = this_cpu();
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     let thread_idx: Option<u8>;
     unsafe {
-        thread_idx = *hart.switching_thread_idx.get();
-        *hart.switching_thread_idx.get() = None;
+        thread_idx = *hart.switching_from_thread_idx.get();
+        *hart.switching_from_thread_idx.get() = None;
     }
     thread_idx.map(|i| i as usize)
 }

@@ -2,7 +2,7 @@
 
 use core::arch::naked_asm;
 
-use crate::arch::csr::mstatus;
+use crate::{arch::csr::mstatus, kernel::sched::post_switch_cleanup};
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -80,6 +80,64 @@ pub(crate) extern "C" fn resume_kernel() {
     );
 }
 
+// Sets up user thread for first run
+#[unsafe(naked)]
+pub extern "C" fn user_first_run() -> ! {
+    naked_asm!(
+        "call {post_switch_cleanup}",
+        // Set up mepc and mstatus
+        "lw t0,  4 * 30(sp)",
+        "csrw mepc, t0",
+        "lw t0,  4 * 31(sp)",
+        "csrw mstatus, t0",
+        // Set up mscratch to the user sp
+        "lw t0,  4 * 32(sp)",
+        "csrw mscratch, t0",
+
+        // Set up GP registers
+        "lw ra,  4 *  0(sp)",
+        "lw gp,  4 *  1(sp)",
+        "lw tp,  4 *  2(sp)",
+        "lw t0,  4 *  3(sp)",
+        "lw t1,  4 *  4(sp)",
+        "lw t2,  4 *  5(sp)",
+        "lw t3,  4 *  6(sp)",
+        "lw t4,  4 *  7(sp)",
+        "lw t5,  4 *  8(sp)",
+        "lw t6,  4 *  9(sp)",
+        "lw a0,  4 * 10(sp)",
+        "lw a1,  4 * 11(sp)",
+        "lw a2,  4 * 12(sp)",
+        "lw a3,  4 * 13(sp)",
+        "lw a4,  4 * 14(sp)",
+        "lw a5,  4 * 15(sp)",
+        "lw a6,  4 * 16(sp)",
+        "lw a7,  4 * 17(sp)",
+        "lw s0,  4 * 18(sp)",
+        "lw s1,  4 * 19(sp)",
+        "lw s2,  4 * 20(sp)",
+        "lw s3,  4 * 21(sp)",
+        "lw s4,  4 * 22(sp)",
+        "lw s5,  4 * 23(sp)",
+        "lw s6,  4 * 24(sp)",
+        "lw s7,  4 * 25(sp)",
+        "lw s8,  4 * 26(sp)",
+        "lw s9,  4 * 27(sp)",
+        "lw s10, 4 * 28(sp)",
+        "lw s11, 4 * 29(sp)",
+
+        // Set up stack pointer
+        "addi sp, sp, 4 * {num_slots}",
+
+        // Swap kernel sp with mscratch (user sp)
+        "csrrw sp, mscratch, sp",
+
+        "mret",
+        post_switch_cleanup = sym post_switch_cleanup,
+        num_slots = const crate::arch::trap::NUM_SLOTS,
+    );
+}
+
 // `arch` is bin-only (stubbed out of the host lib crate), so these run on
 // the kernel target in QEMU (`cargo test --bin ease`) via `#[test_case]`.
 // Each drives a full U-mode excursion through `user_entry`/`resume_kernel`
@@ -90,9 +148,44 @@ mod test {
     use crate::kernel::percpu::{ExitReason, user_exit_reason};
     use crate::user::{user_fault_test, user_return_test, user_test};
 
+    // These tests drive `user_entry` synchronously rather than going through
+    // the scheduler's `activate_thread`, so nothing installs a per-thread PMP
+    // map for them. Set one up by hand, mapping exactly two regions:
+    //   - `.user_text` execute-only (X, no R): user code can run but cannot
+    //     read itself as data. `kernel_access_reports_fault` depends on this —
+    //     its load of `__user_text_start` must fault.
+    //   - the PD0 heap R+W: `user_entry` parks the user `sp` at `__heap_pd0_end`.
+    // Nothing else is mapped, so any other U-mode access faults.
+    //
+    // NOTE: this maps `.user_text` X-only, but the scheduler's `Role::Text`
+    // (usermemmap.rs) currently grants `R | X` — see the message accompanying
+    // this change; the two should be reconciled when the user-thread memory
+    // model is designed properly.
+    fn setup_user_excursion_pmp() {
+        unsafe extern "C" {
+            static __user_text_start: u8;
+            static __user_text_end: u8;
+            static __heap_pd0_start: u8;
+            static __heap_pd0_end: u8;
+        }
+        use crate::arch::csr::pmp::{R, W, X};
+        use crate::arch::pmp::Pmp;
+
+        let text_base = &raw const __user_text_start as usize;
+        let text_size = &raw const __user_text_end as usize - text_base;
+        let heap_base = &raw const __heap_pd0_start as usize;
+        let heap_size = &raw const __heap_pd0_end as usize - heap_base;
+
+        let mut pmp = Pmp::new();
+        pmp.set_region(0, text_base, text_size, X);
+        pmp.set_region(1, heap_base, heap_size, R | W);
+        pmp.activate();
+    }
+
     // A user thread that leaves via the `EXIT` syscall returns cleanly.
     #[test_case]
     fn clean_exit_reports_exit() {
+        setup_user_excursion_pmp();
         user_entry(user_test);
         // Read immediately, before any yield: the reason is per-hart state.
         assert_eq!(user_exit_reason(), ExitReason::Exit);
@@ -102,6 +195,7 @@ mod test {
     // via the `user_exit` shim that `user_entry` installs in `ra`.
     #[test_case]
     fn normal_return_reports_exit() {
+        setup_user_excursion_pmp();
         user_entry(user_return_test);
         assert_eq!(user_exit_reason(), ExitReason::Exit);
     }
@@ -110,6 +204,7 @@ mod test {
     // the kernel recovers from (returns) rather than panicking.
     #[test_case]
     fn kernel_access_reports_fault() {
+        setup_user_excursion_pmp();
         user_entry(user_fault_test);
         assert_eq!(user_exit_reason(), ExitReason::Fault);
     }

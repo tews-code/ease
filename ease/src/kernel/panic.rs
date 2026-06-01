@@ -1,10 +1,10 @@
 //! Panic handler
 
-#[cfg(not(test))]
-use crate::arch::stack::STACK_CANARY;
 use crate::hal::wait_for_interrupt;
 #[cfg(not(test))]
 use crate::kernel::percpu;
+#[cfg(not(test))]
+use crate::kernel::sched::STACK_CANARY;
 #[cfg(test)]
 use crate::qemu;
 
@@ -124,8 +124,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 static __hart0_irq_stack_base: u8;
                 static __hart0_irq_stack_top: u8;
             }
-            use crate::arch::stack::stack_high_watermark;
             use crate::io::DirectWriter;
+            use crate::kernel::sched::stack::stack_high_watermark;
             use core::fmt::Write;
             let start_addr = &raw const __hart0_irq_stack_base as usize;
             let end_addr = &raw const __hart0_irq_stack_top as usize;
@@ -144,8 +144,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 static __hart0_idle_stack_base: u8;
                 static __hart0_idle_stack_top: u8;
             }
-            use crate::arch::stack::stack_high_watermark;
             use crate::io::DirectWriter;
+            use crate::kernel::sched::stack::stack_high_watermark;
             use core::fmt::Write;
             let start_addr = &raw const __hart0_idle_stack_base as usize;
             let end_addr = &raw const __hart0_idle_stack_top as usize;

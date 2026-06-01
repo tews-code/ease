@@ -11,8 +11,6 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  * Flash memory is used to replicate XIP.
  *
  * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
- *             | .user_text         |   Must be NAPOT for PMP
- *             +--------------------+
  *             | .text              |
  *             | .rodata / .srodata |
  *             | .data / .sdata     |   LMA for .data
@@ -44,11 +42,13 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             :   (unused gap)     :   Backed by QEMU RAM, but unused
  *             :                    :
  * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
- *             |  user heap ->      |
- *             |                    |
- *             |     -- 4MB --      |   End of user heap
+ *             |  PSRAM heap ->     |
+ *             |    (4MB)           |
+ *             +--------------------+   End of heap
+ *             | .user_text (4KB)   |   Must be NAPOT for PMP
+ *             +--------------------+
  *             |  buffers           |
- *             |                    |
+ *             +--------------------+
  * 0x816d4000  |  640x480x4 fb      |   Framebuffer configured via QEMU ramfb
  * 0x81800000  +--------------------+   End of declared PSRAM
  *
@@ -81,7 +81,6 @@ __user_heap_sram_size   = 256K;
 __user_heap_psram_size  = 4M;
 __fb_width = 640; __fb_height = 480; __fb_bpp = 4; /* 640  x 480 x 4 bytes = 1.2MiB */
 
-
 __sram_pd1_end  = ORIGIN(SRAM_PD1) + LENGTH(SRAM_PD1);
 __psram_end     = ORIGIN(PSRAM) + LENGTH(PSRAM);
 __fb_size       = __fb_width * __fb_height * __fb_bpp;
@@ -99,14 +98,6 @@ SECTIONS {
         *(.rodata .rodata.* .srodata .srodata.*)
         . = ALIGN(4);   /* Padding .rodata so that .data start from VMA copy is aligned */
     } > FLASH
-
-    .user_text : ALIGN(__user_text_size) {
-        __user_text_start = .;
-        *(.user_text .user_text.*)
-        . = __user_text_start + __user_text_size;
-        __user_text_end = .;
-    } > FLASH
-
 
     /* POWER DOMAIN 0 */
 
@@ -143,13 +134,13 @@ SECTIONS {
         __pd1_buf_end = .;
     } > SRAM_PD1
 
-    .hart0_idle_stack (NOLOAD) : ALIGN(16) {
+    .hart0_idle_stack (NOLOAD) : ALIGN(__idle_stack_size) {
         __hart0_idle_stack_base  = .;
         . = . + __idle_stack_size;
         __hart0_idle_stack_top = .;
     } > SRAM_PD1
 
-    .hart1_idle_stack (NOLOAD) : ALIGN(16) {
+    .hart1_idle_stack (NOLOAD) : ALIGN(__idle_stack_size) {
         __hart1_idle_stack_base = .;
         . = . + __idle_stack_size;
         __hart1_idle_stack_top = .;
@@ -215,6 +206,14 @@ SECTIONS {
         __heap_psram_start = .;
         . = . + __user_heap_psram_size;
         __heap_psram_end = .;
+    } > PSRAM
+
+    /* Temporarily put all user threads .text in 4KB window in PSRAM */
+    .user_text : ALIGN(4K) {
+        __user_text_start = .;
+        *(.user_text .user_text.*)
+        . = __user_text_start + __user_text_size;
+        __user_text_end = .;
     } > PSRAM
 
     /* Remaining PSRAM up to the frame buffer is a region for buffers etc. */

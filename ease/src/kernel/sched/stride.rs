@@ -2,20 +2,24 @@
 
 use alloc::boxed::Box;
 
-#[cfg(feature = "profile")]
-use ease_macros::profile;
-
-use crate::arch::{cpu_id, csr};
-use crate::arch::stack::STACK_CANARY;
-use crate::board::HARTS_MAX;
-use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
-use crate::kernel::{percpu, timer};
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::types::{
-    Deadline, HeapStack, PostSwitch, Qos, StackClass, State, THREADS_MAX, ThreadControlBlock,
-    ThreadHandle, ThreadsInner,
+    Deadline, PostSwitch, Qos, State, THREADS_MAX, ThreadControlBlock, ThreadHandle, ThreadsInner,
+    UserContext,
 };
+use crate::arch::{cpu_id, csr};
+use crate::board::HARTS_MAX;
+use crate::kernel::alloc::Order;
+use crate::kernel::sched::stack;
+use crate::kernel::sched::usermemmap::UserMemMap;
+use crate::kernel::sched::{MemRegion, STACK_CANARY};
+use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
+use crate::kernel::{percpu, timer};
+
+#[cfg(feature = "profile")]
+use ease_macros::profile;
 
 unsafe extern "C" {
     // Safety: caller must ensure prev points to a writable slot owned by the current
@@ -25,6 +29,7 @@ unsafe extern "C" {
     pub(crate) fn switch_to_h1(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
     static __hart0_irq_stack_top: u8;
     static __hart1_irq_stack_top: u8;
+    static __idle_stack_size: u8;
 }
 
 // Helper function to determine the HART boot threads in the threads array
@@ -46,6 +51,12 @@ const LEEWAY_BASE: u64 = LEEWAY_BASE_US * timer::CYCLES_PER_US;
 // Maximum slack period - used to cap the maximum requested leeway to sensible values
 const LEEWAY_MAX_US: u64 = 1_000_000;
 const LEEWAY_MAX: u64 = LEEWAY_MAX_US * timer::CYCLES_PER_US;
+
+// User thread constants
+#[allow(dead_code)]
+const USER_MEM_REGION_8KB: u8 = 13; // Order is log2(N)
+#[allow(dead_code)]
+const USER_MEM_REGION_16KB: u8 = 14;
 
 pub(super) static SCHEDULER: Scheduler = Scheduler::new();
 
@@ -70,16 +81,15 @@ impl ThreadControlBlock {
         Self {
             id: u32::MAX,
             state: State::Avail,
-            sp: core::ptr::null_mut(),
-            stack: None,
-            stack_base: core::ptr::null_mut(),
+            sp: None,
+            kernel_stack: None,
             qos: Qos::Low,
             priority: PRIORITY_MIN,
             pass: 0,
             last_started_cycles: 0,
             next_waiter: None,
             affinity: None,
-            user_stack_top: None,
+            user: None,
         }
     }
 
@@ -99,16 +109,6 @@ impl ThreadControlBlock {
         self.pass = self
             .pass
             .saturating_add(ran_cycles.saturating_mul(self.priority as u64));
-    }
-
-    // Deallocate the stack if heap-based
-    fn release_stack(&mut self) {
-        if let Some(class) = self.stack.take() {
-            unsafe {
-                HeapStack::deallocate(class, self.stack_base);
-            }
-        }
-        self.sp = core::ptr::null_mut();
     }
 
     // Calculates the latest wake up for a thread including leeway
@@ -244,20 +244,6 @@ impl ThreadsInner {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
-        // Find next index
-        // let next_idx = self
-        //     .control_blocks
-        //     .iter()
-        //     .enumerate()
-        //     .filter(|(_, tcb)| tcb.state == State::Ready)
-        //     .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
-        //     .filter(|(_, tcb)| tcb.priority != PRIORITY_MIN)
-        //     .min_by_key(|(_, tcb)| tcb.pass)
-        //     .map_or(percpu::idle_thread_idx(), |(i, _)| i);
-        //
-        // if curr_idx == next_idx {
-        //     return None;
-        // }
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
         for (idx, tcb) in self.control_blocks.iter().enumerate() {
@@ -294,25 +280,6 @@ impl ThreadsInner {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
         let this_hart = crate::arch::cpu_id() as u8;
-        // let next_idx = self
-        //     .control_blocks
-        //     .iter()
-        //     .enumerate()
-        //     .filter(|(idx, tcb)| tcb.state == State::Ready || *idx == curr_idx)
-        //     .filter(|(_, tcb)| tcb.affinity.is_none_or(|h| h == this_hart))
-        //     .filter(|(_, tcb)| tcb.priority != PRIORITY_MIN)
-        //     .min_by_key(|(_, tcb)| tcb.pass)
-        //     .map_or(percpu::idle_thread_idx(), |(idx, _)| idx);
-        //
-        // if curr_idx == next_idx {
-        //     None
-        // } else {
-        //     let [curr, next] = self
-        //         .control_blocks
-        //         .get_disjoint_mut([curr_idx, next_idx])
-        //         .expect("indices have been selected as disjoint");
-        //     Some((curr, curr_idx, next, next_idx))
-        // }
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
         for (idx, tcb) in self.control_blocks.iter().enumerate() {
@@ -337,14 +304,20 @@ impl ThreadsInner {
     }
 
     #[inline(never)]
-    #[cfg_attr(feature = "profile", profile)]
     fn check_curr_canary(&self) {
         let curr = &self.control_blocks[percpu::current_thread_idx()];
-        let base_addr = curr.stack_base;
+        let base_addr = match &curr.kernel_stack {
+            Some(memregion) => memregion.base_addr(),
+            None =>
+            // Idle thread stack (fixed by linker script)
+            {
+                &raw const __hart0_idle_stack_base as usize
+            }
+        };
         let val = unsafe { core::ptr::read(base_addr as *const usize) };
         assert!(
             val == STACK_CANARY,
-            "stack canary corrupted in thread {}: sp={:p}, base={:p}, read={:#x}, expected={:#x}",
+            "kernel stack canary corrupted in thread {}: sp={:?}, base={}, read={:#x}, expected={:#x}",
             curr.id,
             curr.sp,
             base_addr,
@@ -355,25 +328,41 @@ impl ThreadsInner {
 
     // Set the PerCpu info for a running thread on this HART
     // and set mscratch to top IRQ stack for M-mode or kernel stack for U-mode
-    fn set_running_thread_percpu(
+    fn activate_thread(
         &mut self,
         current_thread_idx: usize,
-        switching_thread_idx: Option<usize>,
+        switching_from_thread_idx: Option<usize>,
     ) {
+        // Set PerCpu
+        let stack = self.control_blocks[current_thread_idx]
+            .kernel_stack
+            .as_ref()
+            .expect("should not be setting percpu for thread without a stack");
         percpu::set_current_thread_idx(current_thread_idx);
-        percpu::set_current_stack_base(self.control_blocks[current_thread_idx].stack_base);
-        percpu::set_switching_thread_idx(switching_thread_idx);
+        percpu::set_switching_from_thread_idx(switching_from_thread_idx);
+        percpu::set_current_stack_base(stack.base().as_ptr());
+
         // Set mscratch
-        if self.control_blocks[current_thread_idx].user_stack_top.is_some() {
-            let class = self.control_blocks[current_thread_idx].stack.expect("should not be using idle thread for user thread");
-            unsafe { csr::mscratch::write(self.control_blocks[current_thread_idx].stack_base as usize + class.size()); }
-        } else {
-            if cpu_id() == 0 {
-                unsafe { csr::mscratch::write(&raw const __hart0_irq_stack_top as usize); }
-            } else {
-                unsafe { csr::mscratch::write(&raw const __hart1_irq_stack_top as usize); }
+        if let Some(user_context) = &self.control_blocks[current_thread_idx].user {
+            // User thread has kernel stack top in mscratch
+            unsafe {
+                csr::mscratch::write(stack.top().addr().into());
             }
 
+            // For user thread set pmp
+            let pmp_config = user_context.user_mem_map.to_pmp();
+            pmp_config.activate();
+        } else {
+            // Kernel thread has IRQ stack top in mscratch
+            if cpu_id() == 0 {
+                unsafe {
+                    csr::mscratch::write(&raw const __hart0_irq_stack_top as usize);
+                }
+            } else {
+                unsafe {
+                    csr::mscratch::write(&raw const __hart1_irq_stack_top as usize);
+                }
+            }
         }
     }
 }
@@ -406,21 +395,29 @@ impl Scheduler {
         let id = next_thread_id();
         let idx = slot_for_boot(hartid);
         let mut threads = self.threads.lock();
+        assert_eq!(
+            &raw const __idle_stack_size as usize,
+            Order::KB2.size(),
+            "idle stack size disagrees with linker"
+        );
         threads.control_blocks[idx] = ThreadControlBlock {
             id,
             state: State::Running,
-            sp: crate::arch::csr::regs::sp() as *mut u8,
-            stack: None, // Fixed stack is set by linker script
-            stack_base: match hartid {
-                0 => &raw const __hart0_idle_stack_base as *mut u8,
-                1 => &raw const __hart1_idle_stack_base as *mut u8,
-                _ => unreachable!("only running two harts"),
-            },
+            sp: NonNull::new(crate::arch::csr::regs::sp() as *mut u8),
+            kernel_stack: Some(MemRegion::from_fixed(
+                NonNull::new(match hartid {
+                    0 => &raw const __hart0_idle_stack_base as *mut u8,
+                    1 => &raw const __hart1_idle_stack_base as *mut u8,
+                    _ => unreachable!("only running two harts"),
+                })
+                .unwrap(),
+                Order::KB2,
+            )),
             last_started_cycles: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
         percpu::set_idle_thread_idx(idx);
-        threads.set_running_thread_percpu(idx, None);
+        threads.activate_thread(idx, None);
     }
 
     /// Helper function to clean up post switch threads
@@ -428,41 +425,48 @@ impl Scheduler {
     pub(super) fn post_switch_cleanup(&self) {
         // After switch_to returns (on this thread's eventual resume),
         let mut threads = self.threads.lock();
-        let switched_idx = percpu::take_switching_thread_idx()
+        let switched_from_idx = percpu::take_switching_from_thread_idx()
             .expect("should have a Switching thread to set back to Ready");
         let new_state = {
-            match threads.control_blocks[switched_idx].state {
+            match threads.control_blocks[switched_from_idx].state {
                 State::Switching(PostSwitch::Ready) => State::Ready,
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
                 State::Switching(PostSwitch::Dead) => {
-                    threads.control_blocks[switched_idx].release_stack();
-                    threads.control_blocks[switched_idx] = ThreadControlBlock::new();
+                    // Release user memory (if U-mode thread)
+                    threads.control_blocks[switched_from_idx].user = None;
+                    // Release kernel stack
+                    threads.control_blocks[switched_from_idx].kernel_stack = None;
+                    threads.control_blocks[switched_from_idx].sp = None;
+                    threads.control_blocks[switched_from_idx] = ThreadControlBlock::new();
+                    // Mark TCB slot avaialble for use
                     State::Avail
                 }
                 _ => panic!("Post switch but not in switching state"),
             }
         };
-        threads.control_blocks[switched_idx].state = new_state;
+        threads.control_blocks[switched_from_idx].state = new_state;
     }
 
-    // Set up initial thread block and stack for a new thread
+    // Set up kernel thread initial thread block and stack for a new thread
     pub(super) fn spawn<F: FnOnce() + Send + 'static>(
         &self,
         entry: F,
         priority: u8,
-        class: StackClass,
+        stack_order: Order,
         qos: Qos,
         affinity: Option<u8>,
     ) -> Option<ThreadHandle> {
-        // First allocate before locking
-        let base = HeapStack::allocate(class)?;
+        // Create pointer to closure
         let b = Box::new(entry);
         let closure_ptr = Box::into_raw(b) as *mut u8;
-
-        let sp =
-            unsafe { HeapStack::init_for_entry(base, class, closure_trampoline::<F>, closure_ptr) };
+        // Thread stack is taken from the kernel heap
+        let mut stack_region =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
+        let sp = unsafe {
+            stack::init_for_kernel_entry(&mut stack_region, run_closure_thread::<F>, closure_ptr)
+        };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
         // Get the current pass baselines so we don't schedule ahead of other threads
@@ -470,11 +474,64 @@ impl Scheduler {
         // Find a free TCB slot
         let Some((idx, tcb)) = threads.free_slot() else {
             drop(threads);
-            unsafe {
-                HeapStack::deallocate(class, base.as_ptr());
-            }
             return None;
         };
+        // Initialise the TCB
+        *tcb = ThreadControlBlock {
+            id: next_thread_id(),
+            state: State::Ready,
+            sp,
+            kernel_stack: Some(stack_region),
+            qos,
+            priority,
+            pass: baseline,
+            affinity,
+            ..ThreadControlBlock::new()
+        };
+        // Local variables to drop threads
+        let handle = ThreadHandle { id: tcb.id, idx };
+        // Set the timer
+        let ready_count = threads.wake_sleeping_threads();
+        let earliest_deadline = threads.earliest_deadline();
+        threads.set_next_timer(earliest_deadline, ready_count);
+        // If the spawned thread has affinity for the other hart, send an IPI
+        drop(threads);
+        if let Some(h) = affinity
+            && h as usize != crate::arch::cpu_id()
+        {
+            crate::kernel::ipi::send(h as usize);
+        } else {
+            percpu::set_needs_reschedule();
+        }
+        Some(handle)
+    }
+
+    // Set up initial thread control block and stack for a new user thread
+    pub(super) fn spawn_user(
+        &self,
+        user_entry: extern "C" fn(),
+        priority: u8,
+        kernel_stack_order: Order,
+        user_stack_order: Order,
+        qos: Qos,
+        affinity: Option<u8>,
+    ) -> Option<ThreadHandle> {
+        // Request a user memory map
+        let user_mem_map = UserMemMap::for_user_thread(user_stack_order).ok()?;
+        // Allocate a kernel stack before locking
+        let mut kernel_stack_region =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
+        let sp = unsafe { stack::init_for_user_entry(&mut kernel_stack_region, user_entry) };
+        // Now lock the scheduler
+        let mut threads = self.threads.lock();
+        // Get the current pass baselines so we don't schedule ahead of other threads
+        let baseline = threads.pass_baseline();
+        // Find a free TCB slot
+        let Some((idx, tcb)) = threads.free_slot() else {
+            drop(threads);
+            return None;
+        };
+
         // Initialise the TCB
         *tcb = ThreadControlBlock {
             id: next_thread_id(),
@@ -482,13 +539,16 @@ impl Scheduler {
             state: State::Ready,
             qos,
             priority,
-            stack: Some(class),
-            stack_base: base.as_ptr(),
+            kernel_stack: Some(kernel_stack_region),
             pass: baseline,
             affinity,
+            user: Some(UserContext {
+                user_mem_map,
+                user_entry,
+            }),
             ..ThreadControlBlock::new()
         };
-        // Local variables to drop threads
+        // Local variables to allow dropping the threads lock
         let handle = ThreadHandle { id: tcb.id, idx };
         // Set the timer
         let ready_count = threads.wake_sleeping_threads();
@@ -555,18 +615,22 @@ impl Scheduler {
             let prev_sp_ptr = &raw mut curr.sp;
             let next_sp_ptr = &raw mut next.sp;
 
-            threads.set_running_thread_percpu(next_idx, Some(curr_idx));
+            threads.activate_thread(next_idx, Some(curr_idx));
             let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
             threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
 
             if cpu_id() == 0 {
+                //Safety: Option<NonNull<u8>> is bit for bit identical to *mut u8
+                //  - Same size, same alignment (both one pointer-word).
+                // - None is represented by the all-zeroes / null bit pattern.
+                // - Some(NonNull(p)) is represented by exactly p's bits.
                 unsafe {
-                    switch_to_h0(prev_sp_ptr, next_sp_ptr);
+                    switch_to_h0(prev_sp_ptr as *mut *mut u8, next_sp_ptr as *mut *mut u8);
                 }
             } else {
                 unsafe {
-                    switch_to_h1(prev_sp_ptr, next_sp_ptr);
+                    switch_to_h1(prev_sp_ptr as *mut *mut u8, next_sp_ptr as *mut *mut u8);
                 }
             }
 
@@ -628,16 +692,16 @@ impl Scheduler {
                 // Create local variables before dropping the lock
                 let prev_sp_ptr = &raw mut curr.sp;
                 let next_sp_ptr = &raw mut next.sp;
-                threads.set_running_thread_percpu(next_idx, Some(curr_idx));
+                threads.activate_thread(next_idx, Some(curr_idx));
                 drop(threads);
 
                 if cpu_id() == 0 {
                     unsafe {
-                        switch_to_h0(prev_sp_ptr, next_sp_ptr);
+                        switch_to_h0(prev_sp_ptr as *mut *mut u8, next_sp_ptr as *mut *mut u8);
                     }
                 } else {
                     unsafe {
-                        switch_to_h1(prev_sp_ptr, next_sp_ptr);
+                        switch_to_h1(prev_sp_ptr as *mut *mut u8, next_sp_ptr as *mut *mut u8);
                     }
                 }
 
@@ -811,7 +875,7 @@ fn next_thread_id() -> u32 {
 }
 
 /// Call exit at the end of a spawned closure
-extern "C" fn closure_trampoline<F: FnOnce() + Send + 'static>(entry_ptr: *mut u8) -> ! {
+extern "C" fn run_closure_thread<F: FnOnce() + Send + 'static>(entry_ptr: *mut u8) -> ! {
     let e = unsafe { Box::from_raw(entry_ptr as *mut F) };
     e(); // runs the closure exactly once and consumes both the closure and the Box.
     SCHEDULER.exit()

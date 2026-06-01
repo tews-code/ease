@@ -4,13 +4,12 @@ use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::mstatus;
-use crate::arch::csr::mstatus::MPIE;
 use crate::arch::csr::{mepc, mtval};
-use crate::arch::stack::STACK_CANARY;
 use crate::arch::trap::TrapFrame;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::percpu::ExitReason;
+use crate::kernel::sched::STACK_CANARY;
 use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
@@ -78,7 +77,8 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
         } else {
             preempt_trampoline_h1 as *const () as usize
         };
-        frame.mstatus &= !MPIE; // Ensure trampoline executes with interrupts disabled
+        frame.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+        frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
     }
 }
 

@@ -1,43 +1,51 @@
 //! Scheduler
 
+pub(crate) mod stack;
 mod stride;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
 mod types;
+mod usermemmap;
+
+use crate::board::HARTS_MAX;
+use crate::kernel::alloc::{MemRegion, Order};
+use crate::kernel::percpu;
+use crate::kernel::sync::with_interrupts_disabled;
 
 use stride::SCHEDULER;
 pub use types::THREADS_MAX;
 
 #[allow(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
-pub use types::{Qos, StackClass, ThreadHandle};
+pub use types::{Qos, ThreadHandle};
 
-use crate::{
-    board::HARTS_MAX,
-    kernel::{percpu, sync::with_interrupts_disabled},
-};
+/// Sentinel placed at the bottom word of each thread's stack.
+/// Checked by the scheduler / panic path to detect stack overflow.
+pub const STACK_CANARY: usize = 0xDEAD_BEEF;
+
+/// Stack paint pattern
+pub const STACK_PAINT_PATTERN: usize = 0x5A5A5A5A;
 
 #[must_use = "Builder must be terminated with .spawn() to actually create a thread"]
 pub struct Builder {
-    stack_class: StackClass, // Must be from stack class
-    qos: Qos,                // Low priority for background
-    priority: u8,            // Lower number is higher priority
-    affinity: Option<u8>,    // Affinity to a particular HART
+    stack: Order,         // Must be from stack class
+    qos: Qos,             // Low priority for background
+    priority: u8,         // Lower number is higher priority
+    affinity: Option<u8>, // Affinity to a particular HART
 }
 
-#[allow(dead_code)]
 impl Builder {
     pub const fn new() -> Self {
         Self {
-            stack_class: StackClass::KB4,
+            stack: Order::KB4,
             qos: Qos::High,
             priority: PRIORITY_DEFAULT,
             affinity: None,
         }
     }
 
-    pub fn with_stack_class(mut self, stack_class: StackClass) -> Self {
-        self.stack_class = stack_class;
+    pub fn with_stack_class(mut self, order: Order) -> Self {
+        self.stack = order;
         self
     }
 
@@ -59,13 +67,7 @@ impl Builder {
     }
 
     pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<ThreadHandle> {
-        SCHEDULER.spawn(
-            entry,
-            self.priority,
-            self.stack_class,
-            self.qos,
-            self.affinity,
-        )
+        SCHEDULER.spawn(entry, self.priority, self.stack, self.qos, self.affinity)
     }
 }
 

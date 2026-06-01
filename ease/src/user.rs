@@ -5,7 +5,11 @@ use core::arch::naked_asm;
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_test() {
     unsafe {
-        core::arch::asm!("li a7, 0", "ecall");
+        core::arch::asm!(
+            "li a7, {exit}",
+            "ecall",
+            exit = const crate::syscall::EXIT
+        );
     }
     loop {
         core::hint::spin_loop();
@@ -13,13 +17,13 @@ pub extern "C" fn user_test() {
 }
 
 unsafe extern "C" {
-    static __heap_pd1_start: u8;
+    static __user_text_start: u8;
 }
 
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_fault_test() {
     unsafe {
-        core::ptr::read_volatile(&raw const __heap_pd1_start);
+        core::ptr::read_volatile(&raw const __user_text_start);
     }
     loop {
         core::hint::spin_loop();

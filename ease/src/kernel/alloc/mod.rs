@@ -5,14 +5,21 @@
 // uses KAlloc (slab + buddy tier) as its sole `#[global_allocator]`.
 // `bump` and `freelist` are retained for their host_tests as reference
 // algorithms — they're not wired into the kernel.
+
+#[cfg(target_os = "none")]
+use core::alloc::GlobalAlloc;
+use core::alloc::Layout;
+use core::ptr::NonNull;
+
 mod buddy;
 mod bump;
 mod freelist;
 mod kalloc;
+mod region;
 mod slab;
 
-#[cfg(target_os = "none")]
-use core::alloc::{GlobalAlloc, Layout};
+#[allow(unused_imports)]
+pub(crate) use region::{MemRegion, Order};
 
 #[cfg(target_os = "none")]
 mod bare_metal_alloc {
@@ -69,33 +76,58 @@ mod bare_metal_alloc {
     }
 }
 
-/// Allocate to SRAM0-3 in Power Domain 0 with NAPOT - intended for user allocation
-#[cfg(target_os = "none")]
-#[allow(dead_code)]
-pub fn kalloc_pd0_napot(order: u8) -> *mut u8 {
-    let size = 1usize << order;
-    let layout = Layout::from_size_align(size, size).expect("for NAPOT must align to own size");
-    // Safety: BUDDY_PD0 init has been called
-    unsafe { bare_metal_alloc::BUDDY_PD0.alloc(layout) }
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Pool {
+    UserPd0,
+    KernelPd1,
+    Psram,
 }
 
-/// Allocate to PSRAM with NAPOT - intended for user allocation
-/// PSRAM's MIN_BLOCK_SIZE is 4096, so meaningful order starts at 12 — smaller orders get rounded up to 4 KB by the buddy.
+/// Requests allocation from the specified pool
+///
+/// Safety: Caller must ensure allocators are initialised
 #[cfg(target_os = "none")]
 #[allow(dead_code)]
-pub fn kalloc_psram_napot(order: u8) -> *mut u8 {
-    let size = 1usize << order;
-    let layout = Layout::from_size_align(size, size).expect("for NAPOT must align to own size");
-    // Safety: BUDDY_PSRAM init has been called
-    unsafe { bare_metal_alloc::BUDDY_PSRAM.alloc(layout) }
+fn alloc_in(pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
+    // Safety: Caller ensures allocators have been initialised
+    NonNull::new(unsafe {
+        match pool {
+            Pool::UserPd0 => bare_metal_alloc::BUDDY_PD0.alloc(layout),
+            Pool::KernelPd1 => bare_metal_alloc::KALLOC_PD1.alloc(layout),
+            Pool::Psram => bare_metal_alloc::BUDDY_PSRAM.alloc(layout),
+        }
+    })
 }
 
-/// Allocate to PSRAM without NAPOT - intended for kernel alloc of arbitrary regions
+///  Deallocates from the specified pool
+///
+/// Safety: Caller must ensure the region base pointer and layout are from a valid allocation
 #[cfg(target_os = "none")]
 #[allow(dead_code)]
-pub fn kalloc_psram(layout: Layout) -> *mut u8 {
-    // Safety: BUDDY_PSRAM init has been called
-    unsafe { bare_metal_alloc::BUDDY_PSRAM.alloc(layout) }
+fn dealloc_in(pool: Pool, base: NonNull<u8>, layout: Layout) {
+    unsafe {
+        match pool {
+            Pool::UserPd0 => bare_metal_alloc::BUDDY_PD0.dealloc(base.as_ptr(), layout),
+            Pool::KernelPd1 => bare_metal_alloc::KALLOC_PD1.dealloc(base.as_ptr(), layout),
+            Pool::Psram => bare_metal_alloc::BUDDY_PSRAM.dealloc(base.as_ptr(), layout),
+        }
+    };
+}
+
+/// Requests allocation from the specified pool - required for host testing
+#[cfg(not(target_os = "none"))]
+#[allow(dead_code)]
+fn alloc_in(_pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
+    NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+}
+
+///  Deallocates from the specified pool - required for host testing
+#[cfg(not(target_os = "none"))]
+#[allow(dead_code)]
+fn dealloc_in(_pool: Pool, base: NonNull<u8>, layout: Layout) {
+    unsafe {
+        alloc::alloc::dealloc(base.as_ptr(), layout);
+    }
 }
 
 #[cfg(target_os = "none")]

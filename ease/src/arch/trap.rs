@@ -4,7 +4,7 @@
 
 #[repr(C, align(16))]
 pub(crate) struct TrapFrame {
-    ra: usize,
+    pub(crate) ra: usize,
     gp: usize,
     tp: usize,
     t0: usize,
@@ -34,8 +34,10 @@ pub(crate) struct TrapFrame {
     s9: usize,
     s10: usize,
     s11: usize,
-    pub mepc: usize,
-    pub mstatus: usize,
+    pub(crate) mepc: usize,
+    pub(crate) mstatus: usize,
+    pub(crate) user_sp: usize,
+    _pad: [usize; 3],
 }
 
 impl TrapFrame {
@@ -48,13 +50,13 @@ impl TrapFrame {
     }
 }
 
-const NUM_SLOTS: usize = 32;
+pub(crate) const NUM_SLOTS: usize = 36;
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == NUM_SLOTS * 4);
 // ra is always at the top
 const _: () = assert!(core::mem::offset_of!(TrapFrame, ra) == 0);
-// mepc and mstatus are always last
-const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 2) * 4);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 1) * 4);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 6) * 4);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 5) * 4);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, user_sp) == (NUM_SLOTS - 4) * 4);
 const _: () = assert!(
     core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
     "trap frame size must be a multiple of its alignment so it lands aligned at top of a stack"
@@ -62,18 +64,20 @@ const _: () = assert!(
 
 use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
 
-crate::arch::percore_text::global_asm_function!(
+crate::arch::percore_text::per_hart_trap_vector!(
     ".sram8_text",
     _trap_vector_h0,
     trap_handler_h0,
     ".sram9_text",
     _trap_vector_h1,
     trap_handler_h1,
+    NUM_SLOTS,
+    crate::arch::csr::mstatus::MPP,
     r#"
     # Swap sp with IRQ stack top in mscratch
     csrrw sp, mscratch, sp
     # Save registers to stack
-    addi sp, sp, -4 * 32
+    addi sp, sp, -4 * {num_slots}
     sw ra,  4 *  0(sp)
     sw gp,  4 *  1(sp)
     sw tp,  4 *  2(sp)
@@ -108,6 +112,9 @@ crate::arch::percore_text::global_asm_function!(
     sw t0,  4 * 30(sp)
     csrr t0, mstatus
     sw t0,  4 * 31(sp)
+    # Keep a copy of the stack pointer before we entered (needed if user sp)
+    csrr t0, mscratch
+    sw t0,  4 * 32(sp)
 
     mv a0, sp
     call {handler}
@@ -116,6 +123,16 @@ crate::arch::percore_text::global_asm_function!(
     csrw mepc, t0
     lw t0,  4 * 31(sp)
     csrw mstatus, t0
+
+    # Set up user stack pointer if returning to U-mode
+    # Check for U-mode
+    li t1, {mstatus_MPP}
+    and t1, t0, t1
+    bnez t1, 2f
+    lw t0, 4 * 32(sp)
+    csrw mscratch, t0
+    2:
+
     lw ra,  4 *  0(sp)
     lw gp,  4 *  1(sp)
     lw tp,  4 *  2(sp)
@@ -147,7 +164,7 @@ crate::arch::percore_text::global_asm_function!(
     lw s10, 4 * 28(sp)
     lw s11, 4 * 29(sp)
 
-    addi sp, sp, 4 * 32
+    addi sp, sp, 4 * {num_slots}
 
     # Swap sp back into in mscratch
     csrrw sp, mscratch, sp

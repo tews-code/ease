@@ -15,6 +15,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::ramfb::FrameBuffer;
+use crate::kernel::alloc::Order;
 use crate::kernel::sched::{self, spawn};
 use crate::kernel::sync::{Completion, IrqSpinLock};
 
@@ -119,6 +120,8 @@ extern "C" fn secondary_main() {
 #[cfg(test)]
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
+    use crate::kernel::alloc::Order;
+
     let _fb = kernel_init();
 
     // Move the test workload off the 4 KiB bootstrap stack onto a dedicated
@@ -126,7 +129,7 @@ extern "C" fn main() -> ! {
     // prints across test-all, FAT-format buffers, virtio sector reads on
     // stack) accumulates a surprisingly deep peak
     let id = sched::Builder::new()
-        .with_stack_class(sched::StackClass::KB16)
+        .with_stack_class(Order::KB16)
         .spawn(test_runner_thread);
     assert!(id.is_some(), "could not spawn test runner thread");
 
@@ -150,7 +153,7 @@ extern "C" fn main() -> ! {
 
     #[allow(clippy::diverging_sub_expression)]
     let Some(_id) = sched::Builder::new()
-        .with_stack_class(sched::StackClass::KB16)
+        .with_stack_class(Order::KB16)
         .spawn(shell_thread)
     else {
         panic!("failed to launch shell");
@@ -201,7 +204,7 @@ fn test_runner(tests: &[&dyn Testable]) {
                 static __hart0_irq_stack_top: u8;
             }
 
-            use crate::arch::stack::stack_high_watermark;
+            use crate::kernel::sched::stack::stack_high_watermark;
             let start_addr = &raw const __hart0_irq_stack_base as usize;
             let end_addr = &raw const __hart0_irq_stack_top as usize;
             println!("==== IRQ Stack High Watermark Check ====");
@@ -219,7 +222,7 @@ fn test_runner(tests: &[&dyn Testable]) {
                 static __hart0_idle_stack_base: u8;
                 static __hart0_idle_stack_top: u8;
             }
-            use crate::arch::stack::stack_high_watermark;
+            use crate::kernel::sched::stack::stack_high_watermark;
             let start_addr = &raw const __hart0_idle_stack_base as usize;
             let end_addr = &raw const __hart0_idle_stack_top as usize;
             let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");

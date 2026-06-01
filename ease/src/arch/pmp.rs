@@ -1,68 +1,165 @@
-//! Phyical Memory Protection
+//! Physical Memory Protection
+
+// PMP is per-hart.
+// It uses address registers to define regions, and config registers
+// (one for each set of four addresses) to set the config.
+// Addresses in NAPOT saves the last two bit (as they are always zero)
+//      base_addr >> 2
+// The lower bytes are set to 1 to indicate the region size through order
+// = 0x2000_8000 >> 2 = 0x0800_2000
+//      (size >> 3) - 1
+//
+// Example: 4 KiB region of SRAM at 0x2000_8000, as PMP entry 0,
+// with permissions read + execute, no write.
+//  base_addr >> 2  0x0800_2000
+//  size (0x1000 >> 3) - 1 = 512 - 1 = 0x1FF  ← nine 1-bits
+//  pmpaddr0 = 0x0800_2000 | 0x1FF = 0x0800_21FF
+//
+//  Low bits of 0x0800_21FF:
+//
+//  bit:  13            9 8                0
+//  1  0  0  0  0  0  1  1  1  1  1  1  1  1  1
+//  └── lowest 0 ──┘└── nine 1s ─┘
+//
+//   Entry 0 lives in bits [7:0] of pmpcfg0:
+//
+//   ┌─────┬───────┬───────┬────────────┐
+//   │ bit │ field │ value │  meaning   │
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 0   │ R     │ 1     │ read       │
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 1   │ W     │ 0     │ no write   │
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 2   │ X     │ 1     │ execute    │
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 4:3 │ A     │ 0b11  │ NAPOT or 0 │   // 0 is off
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 6:5 │ —     │ 0     │ reserved   │
+//   ├─────┼───────┼───────┼────────────┤
+//   │ 7   │ L     │ 0     │ not locked │
+//   └─────┴───────┴───────┴────────────┘
+//
+//    Byte = 0b0001_1101 = 0x1D. Entries 1–3 stay 0 (disabled), so:
+//
+//    pmpcfg0 = 0x0000_001D
+//
+//   Addresses are in a heirarchy, with the lower address number taking precendence over higher
+//   address numbers. Nesting is allowed.
 
 use crate::arch::csr::pmp;
+use crate::board::{self, PMP_ADDR_COUNT};
 
-// `pmpaddrX` register holds the region address shifted right by 2 (it counts 4-byte units)
-fn pmpaddr(base: usize, size: usize) -> usize {
-    assert!(
-        size.is_power_of_two(),
-        "size must power of two (RP2350 requires NAPOT regions)"
-    );
-    assert!(
-        size >= 32,
-        "requested size too small to be represented (NA4 unavailable in RP2350)"
-    );
-    assert!(
-        (base & (size - 1)) == 0,
-        "base and size not naturally aligned (NAPOT required for RP2350)"
-    );
-    (base | (size / 2 - 1)) >> 2
+#[derive(PartialEq, Eq)]
+struct PmpAddr(usize);
+
+impl PmpAddr {
+    const fn new() -> Self {
+        Self(0)
+    }
+
+    fn from_base_size(base: usize, size: usize) -> Self {
+        assert!(
+            size.is_power_of_two(),
+            "size must power of two (RP2350 requires NAPOT regions)"
+        );
+        assert!(
+            size >= 32,
+            "requested size too small to be represented (NA4 unavailable in RP2350)"
+        );
+        assert!(
+            (base & (size - 1)) == 0,
+            "base and size not naturally aligned (NAPOT required for RP2350)"
+        );
+        Self((base | (size / 2 - 1)) >> 2)
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
 }
 
-unsafe extern "C" {
-    static __user_text_start: u8;
-    static __user_text_end: u8;
-    static __heap_pd0_start: u8;
-    static __heap_pd0_end: u8;
+struct PmpCfg(usize);
+
+impl PmpCfg {
+    const fn new(
+        addr0_settings: u8,
+        addr1_settings: u8,
+        addr2_settings: u8,
+        addr3_settings: u8,
+    ) -> Self {
+        Self(
+            (Self::check_cfg(addr0_settings) as usize)
+                | (Self::check_cfg(addr1_settings) as usize) << 8
+                | (Self::check_cfg(addr2_settings) as usize) << 16
+                | (Self::check_cfg(addr3_settings) as usize) << 24,
+        )
+    }
+
+    const fn check_cfg(permissions: u8) -> u8 {
+        let clean_permissions = (permissions << 5) >> 5;
+        assert!(
+            (clean_permissions & (pmp::W | pmp::X)) != (pmp::W | pmp::X),
+            "attempt to set a PMP region to write and execute"
+        );
+        clean_permissions
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+
+    fn set(&mut self, region: usize, permissions: u8) {
+        let cfg = if permissions == 0 {
+            0
+        } else {
+            (Self::check_cfg(permissions) | pmp::NAPOT) as usize
+        };
+        self.0 |= cfg << (8 * (region % 4));
+    }
 }
 
-pub(crate) fn configure() {
-    let flash_start = &raw const __user_text_start as usize;
-    let flash_size = &raw const __user_text_end as usize - flash_start;
-    let flash_pmpaddr = pmpaddr(flash_start, flash_size);
-    let heap_start = &raw const __heap_pd0_start as usize;
-    let heap_size = &raw const __heap_pd0_end as usize - heap_start;
-    let heap_pmpaddr = pmpaddr(heap_start, heap_size);
+pub(crate) struct Pmp {
+    addr: [PmpAddr; board::PMP_ADDR_COUNT],
+    cfg: [PmpCfg; board::PMP_ADDR_COUNT / 4], // Each register holds permissions for 4 addresses
+}
 
-    // Safety: flash is NAPOT
-    unsafe {
-        pmp::pmpaddr0::write(flash_pmpaddr);
+impl Pmp {
+    pub(crate) const fn new() -> Self {
+        Self {
+            addr: [const { PmpAddr::new() }; board::PMP_ADDR_COUNT],
+            cfg: [const { PmpCfg::new(0, 0, 0, 0) }; board::PMP_ADDR_COUNT / 4],
+        }
     }
-    assert!(
-        pmp::pmpaddr0::read() == flash_pmpaddr,
-        "flash PMP was not configured"
-    );
-    // Safety: user heap in power domain 0 is NAPOT
-    unsafe {
-        pmp::pmpaddr1::write(heap_pmpaddr);
+    fn clear(&mut self) {
+        for i in 0..PMP_ADDR_COUNT {
+            self.addr[i].clear();
+        }
+        for i in 0..PMP_ADDR_COUNT / 4 {
+            self.cfg[i].clear();
+        }
     }
-    assert!(
-        pmp::pmpaddr1::read() == heap_pmpaddr,
-        "heap PMP was not configured"
-    );
 
-    // Enable the PMP
-    let pmpcfg_entry0 = pmp::R | pmp::X | pmp::NAPOT;
-    let pmpcfg_entry1 = (pmp::R | pmp::W | pmp::NAPOT) << 8;
-    let pmpcfg0 = pmpcfg_entry0 | pmpcfg_entry1;
-    // Safety: Address regions have been configured; flash is safe for read/execute and user heap is safe for RW
-    unsafe {
-        pmp::pmpcfg0::write(pmpcfg0);
+    pub(crate) fn set_region(&mut self, region: usize, base: usize, size: usize, permissions: u8) {
+        assert!(region < board::PMP_ADDR_COUNT);
+        self.addr[region] = PmpAddr::from_base_size(base, size);
+        self.cfg[region / 4].set(region, permissions);
     }
-    assert!(
-        pmp::pmpcfg0::read() == pmpcfg0,
-        "pmpcfg0 was not configured"
-    );
+
+    pub(crate) fn activate(&self) {
+        // Safety: The Pmp configuration is consistent and ready for write
+        unsafe {
+            pmp::pmpaddr0::write(self.addr[0].0);
+            pmp::pmpaddr1::write(self.addr[1].0);
+            pmp::pmpaddr2::write(self.addr[2].0);
+            pmp::pmpaddr3::write(self.addr[3].0);
+            pmp::pmpaddr4::write(self.addr[4].0);
+            pmp::pmpaddr5::write(self.addr[5].0);
+            pmp::pmpaddr6::write(self.addr[6].0);
+            pmp::pmpaddr7::write(self.addr[7].0);
+            pmp::pmpcfg0::write(self.cfg[0].0);
+            pmp::pmpcfg1::write(self.cfg[1].0);
+        }
+    }
 }
 
 // Encoding tests for `pmpaddr`. `arch` is stubbed out of the host lib
@@ -73,23 +170,29 @@ pub(crate) fn configure() {
 // must be shifted together with the size mask, `(base | mask) >> 2`.
 #[cfg(all(test, feature = "test-pmp"))]
 mod test {
-    use super::*;
+    use crate::arch::pmp::PmpAddr;
 
     // 32-byte region (the Hazard3 granule) at a 32-aligned base.
     #[test_case]
     fn encodes_minimum_granule_region() {
-        assert_eq!(pmpaddr(0x1000, 32), 0x403);
+        assert_eq!(PmpAddr::from_base_size(0x1000, 32).0, 0x403);
     }
 
     // 16 MiB flash region at 0x2000_0000 — the kernel/user code grant.
     #[test_case]
     fn encodes_16mib_flash_region() {
-        assert_eq!(pmpaddr(0x2000_0000, 0x100_0000), 0x081F_FFFF);
+        assert_eq!(
+            PmpAddr::from_base_size(0x2000_0000, 0x100_0000).0,
+            0x081F_FFFF
+        );
     }
 
     // 256 KiB SRAM_PD0 region at 0x8000_0000 — the user stack/data grant.
     #[test_case]
     fn encodes_256kib_pd0_region() {
-        assert_eq!(pmpaddr(0x8000_0000, 0x4_0000), 0x2000_7FFF);
+        assert_eq!(
+            PmpAddr::from_base_size(0x8000_0000, 0x4_0000).0,
+            0x2000_7FFF
+        );
     }
 }
