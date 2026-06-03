@@ -86,7 +86,7 @@ fn kernel_init() {
     minimal_init();
     #[cfg(feature = "profile")]
     sched::Builder::new()
-        .with_stack_class(sched::StackClass::KB16)
+        .with_stack_class(sched::Order::KB16)
         .with_priority(sched::PRIORITY_DEFAULT)
         .spawn(|| {
             loop {
