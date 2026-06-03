@@ -112,6 +112,10 @@ extern "C" fn _start() -> ! {
         // HART0 setup
         // Set the idle stack into SRAM8
         "la sp, {hart0_idle_stack_top}",
+
+        // Lock against near-null pointer deferences
+        "call {protect_null_ptr_deref}",
+
         // Paint the idle stack
         "li a0, {canary}",
         "li a1, {pattern}",
@@ -144,6 +148,9 @@ extern "C" fn _start() -> ! {
         "la a2, {sram8_text_end}",
         "jal _copy_section",
 
+        // Lock the scratch RAM text region with PMP
+        "call {protect_sram_text}",
+
         // Zero PerCpu for HART0
         "li a0, 0",
         "la a1, {hart0_percpu_start}",
@@ -165,6 +172,9 @@ extern "C" fn _start() -> ! {
         // Set idle stack in SRAM9
         "la sp, {hart1_idle_stack_top}",
 
+        // Lock against near-null pointer deferences
+        "call {protect_null_ptr_deref}",
+
         // Paint the idle stack
         "li a0, {canary}",
         "li a1, {pattern}",
@@ -184,6 +194,9 @@ extern "C" fn _start() -> ! {
         "la a1, {sram9_text_start}",
         "la a2, {sram9_text_end}",
         "jal _copy_section",
+
+        // Lock the text region with PMP
+        "call {protect_sram_text}",
 
         // Zero PerCpu for HART1
         "li a0, 0",
@@ -230,6 +243,9 @@ extern "C" fn _start() -> ! {
 
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
+
+        protect_null_ptr_deref = sym crate::arch::pmp::protect_null_ptr_deref,
+        protect_sram_text = sym crate::arch::pmp::protect_sram_text,
 
         canary = const STACK_CANARY,
         pattern = const STACK_PAINT_PATTERN,

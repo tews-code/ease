@@ -32,7 +32,9 @@ pub mod pmp {
     pub(crate) const R: u8 = 1;
     pub(crate) const W: u8 = 1 << 1;
     pub(crate) const X: u8 = 1 << 2;
+    pub(crate) const OFF: u8 = 0;
     pub(crate) const NAPOT: u8 = 0b11 << 3;
+    pub(crate) const LOCK: u8 = 1 << 7;
 
     define_csr!(pmpaddr0);
     define_csr!(pmpaddr1);

@@ -46,6 +46,7 @@
 //   Addresses are in a heirarchy, with the lower address number taking precendence over higher
 //   address numbers. Nesting is allowed.
 
+use crate::arch::cpu_id;
 use crate::arch::csr::pmp;
 use crate::board::{self, PMP_ADDR_COUNT};
 
@@ -108,13 +109,22 @@ impl PmpCfg {
         self.0 = 0;
     }
 
-    fn set(&mut self, region: usize, permissions: u8) {
-        let cfg = if permissions == 0 {
+    fn set(&mut self, region: usize, access: u8, permissions: u8) {
+        assert!(
+            access == pmp::OFF || access == pmp::NAPOT,
+            "PMP access only supports NAPOT or off"
+        );
+        let mut cfg = if permissions == 0 {
             0
         } else {
-            (Self::check_cfg(permissions) | pmp::NAPOT) as usize
+            Self::check_cfg(permissions)
         };
-        self.0 |= cfg << (8 * (region % 4));
+        cfg |= access;
+        self.0 |= (cfg as usize) << (8 * (region % 4));
+    }
+
+    fn set_lock(&mut self, region: usize) {
+        self.0 |= (pmp::LOCK as usize) << (8 * (region % 4));
     }
 }
 
@@ -139,10 +149,21 @@ impl Pmp {
         }
     }
 
-    pub(crate) fn set_region(&mut self, region: usize, base: usize, size: usize, permissions: u8) {
+    pub(crate) fn set_region(
+        &mut self,
+        region: usize,
+        base: usize,
+        size: usize,
+        access: u8,
+        permissions: u8,
+    ) {
         assert!(region < board::PMP_ADDR_COUNT);
         self.addr[region] = PmpAddr::from_base_size(base, size);
-        self.cfg[region / 4].set(region, permissions);
+        self.cfg[region / 4].set(region, access, permissions);
+    }
+
+    fn set_lock(&mut self, region: usize) {
+        self.cfg[region / 4].set_lock(region);
     }
 
     pub(crate) fn activate(&self) {
@@ -160,6 +181,94 @@ impl Pmp {
             pmp::pmpcfg1::write(self.cfg[1].0);
         }
     }
+}
+
+unsafe extern "C" {
+    static __sram8_text_start: u8;
+    static __sram8_text_end: u8;
+    static __sram9_text_start: u8;
+    static __sram9_text_end: u8;
+}
+
+/// Set up PMP protection to catch null or near-null pointer deferences
+///
+/// Note on QEMU these are already caught as 0x0 is not mapped.
+/// On RP2350 this is the boot ROM
+pub(crate) fn protect_null_ptr_deref() {
+    let mut pmp = Pmp::new();
+    pmp.set_region(0, 0, 4096, pmp::NAPOT, 0); // Set a 4096 size region to no access starting at address 0
+    pmp.set_lock(0);
+    pmp.activate();
+}
+
+/// Set up protection for .text in each HARTs scratch RAM (SRAM8 and SRAM9).
+///
+/// `.text` is just below the IRQ stack - this gives IRQ stack protection in M-mode
+/// This uses the first two PMP addresses. The remaining 6 are available for use in U-mode
+///
+/// Safety: Caller must call this function _after_ .text has been copied from flash, but
+/// _before_ any U-mode PMP.
+pub(crate) fn protect_sram_text() {
+    let mut pmp = Pmp::new();
+    let (base_sram_text, size_sram_text) = match cpu_id() {
+        0 => (
+            &raw const __sram8_text_start as usize,
+            &raw const __sram8_text_end as usize - &raw const __sram8_text_start as usize,
+        ),
+        1 => (
+            &raw const __sram9_text_start as usize,
+            &raw const __sram9_text_end as usize - &raw const __sram9_text_start as usize,
+        ),
+        _ => panic!("Only support 2 HARTs"),
+    };
+    pmp.set_region(
+        1,
+        base_sram_text,
+        size_sram_text,
+        pmp::NAPOT,
+        pmp::R | pmp::X,
+    );
+    pmp.set_lock(1);
+    pmp.activate();
+    assert_text_guard_locked(1);
+}
+
+/// Read the just-written guard config back and confirm it is a locked,
+/// write-denying R+X NAPOT region. Runs on the configuring hart at boot, so a
+/// stripped lock bit or a misrouted config write fails fast here rather than
+/// silently leaving the scratch `.text` unprotected.
+fn assert_text_guard_locked(region: usize) {
+    let cfg_word = if region < 4 {
+        pmp::pmpcfg0::read()
+    } else {
+        pmp::pmpcfg1::read()
+    };
+    let cfg = ((cfg_word >> (8 * (region % 4))) & 0xFF) as u8;
+    assert!(
+        cfg & pmp::LOCK != 0,
+        "scratch .text guard not locked: cfg={:#x}",
+        cfg
+    );
+    assert!(
+        cfg & pmp::W == 0,
+        "scratch .text guard is writable: cfg={:#x}",
+        cfg
+    );
+    assert!(
+        cfg & pmp::R != 0,
+        "scratch .text guard not readable: cfg={:#x}",
+        cfg
+    );
+    assert!(
+        cfg & pmp::X != 0,
+        "scratch .text guard not executable: cfg={:#x}",
+        cfg
+    );
+    assert!(
+        cfg & pmp::NAPOT == pmp::NAPOT,
+        "scratch .text guard A-field not NAPOT: cfg={:#x}",
+        cfg
+    );
 }
 
 // Encoding tests for `pmpaddr`. `arch` is stubbed out of the host lib

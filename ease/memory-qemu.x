@@ -65,18 +65,19 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  */
 
 MEMORY {
-    FLASH (rx)      : ORIGIN = 0x20000000, LENGTH = 0x01000000 /* 16 MB */
-    SRAM_PD0(rw)    : ORIGIN = 0x80000000, LENGTH = 0x00040000 /* SRAM0-3 - 256KB */
-    SRAM_PD1 (rwx)  : ORIGIN = 0x80040000, LENGTH = 0x00040000 /* SRAM4-7 - 256KB */
-    SRAM8 (rwx)     : ORIGIN = 0x80080000, LENGTH = 0x00001000 /* HART0 4KB scratch RAM */
-    SRAM9 (rwx)     : ORIGIN = 0x80081000, LENGTH = 0x00001000 /* HART1 4KB scratch RAM */
-    PSRAM (rw)      : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB */
+    FLASH       : ORIGIN = 0x20000000, LENGTH = 0x01000000 /* 16 MB */
+    SRAM_PD0    : ORIGIN = 0x80000000, LENGTH = 0x00040000 /* SRAM0-3 - 256KB */
+    SRAM_PD1    : ORIGIN = 0x80040000, LENGTH = 0x00040000 /* SRAM4-7 - 256KB */
+    SRAM8       : ORIGIN = 0x80080000, LENGTH = 0x00001000 /* HART0 4KB scratch RAM */
+    SRAM9       : ORIGIN = 0x80081000, LENGTH = 0x00001000 /* HART1 4KB scratch RAM */
+    PSRAM       : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB */
 }
 
-__user_text_size        = 4K;
 __idle_stack_size       = 2K;
 __irq_stack_size        = 1K + 512;
+__scratch_ram_text_size = 2K;
 __kernel_heap_size      = 128K;
+__user_text_size        = 4K;
 __user_heap_sram_size   = 256K;
 __user_heap_psram_size  = 4M;
 __fb_width = 640; __fb_height = 480; __fb_bpp = 4; /* 640  x 480 x 4 bytes = 1.2MiB */
@@ -155,10 +156,10 @@ SECTIONS {
     /* SRAM8 */
 
     /* SRAM8 is the dedicated HART0 scratch RAM */
-    .sram8_text : ALIGN(4) {
+    .sram8_text : ALIGN(__scratch_ram_text_size) {
         __sram8_text_start = .;
         *(.sram8_text .sram8_text.*)
-        . = ALIGN(4);
+        . = __sram8_text_start + __scratch_ram_text_size;
         __sram8_text_end = .;
     } > SRAM8 AT > FLASH
     __sram8_text_lma = LOADADDR(.sram8_text);
@@ -178,10 +179,10 @@ SECTIONS {
     /* SRAM9 */
 
     /* SRAM9 is the dedicated HART1 scratch RAM */
-    .sram9_text : ALIGN(4) {
+    .sram9_text : ALIGN(__scratch_ram_text_size) {
         __sram9_text_start = .;
         *(.sram9_text .sram9_text.*)
-        . = ALIGN(4);
+        . = __sram9_text_start + __scratch_ram_text_size;
         __sram9_text_end = .;
     } > SRAM9 AT > FLASH
     __sram9_text_lma = LOADADDR(.sram9_text);

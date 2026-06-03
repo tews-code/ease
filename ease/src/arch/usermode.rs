@@ -168,7 +168,7 @@ mod test {
             static __heap_pd0_start: u8;
             static __heap_pd0_end: u8;
         }
-        use crate::arch::csr::pmp::{R, W, X};
+        use crate::arch::csr::pmp::{NAPOT, R, W, X};
         use crate::arch::pmp::Pmp;
 
         let text_base = &raw const __user_text_start as usize;
@@ -176,9 +176,11 @@ mod test {
         let heap_base = &raw const __heap_pd0_start as usize;
         let heap_size = &raw const __heap_pd0_end as usize - heap_base;
 
+        // Regions 0 and 1 are reserved for the locked M-mode scratch-text
+        // guards, so user regions start at 2 (matching `Role::addr_slot`).
         let mut pmp = Pmp::new();
-        pmp.set_region(0, text_base, text_size, X);
-        pmp.set_region(1, heap_base, heap_size, R | W);
+        pmp.set_region(2, text_base, text_size, NAPOT, X);
+        pmp.set_region(3, heap_base, heap_size, NAPOT, R | W);
         pmp.activate();
     }
 

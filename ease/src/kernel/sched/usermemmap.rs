@@ -24,23 +24,16 @@ pub(crate) enum Role {
     DataBss,
     Stack,
     Heap,
-    Buf1,
-    Buf2,
-    Buf3,
-    Buf4,
+    BufRW,
+    BufRO,
 }
 
 impl Role {
     fn permissions(self) -> u8 {
         match self {
             Role::Text => pmp::R | pmp::X,
-            Role::DataBss
-            | Role::Stack
-            | Role::Heap
-            | Role::Buf1
-            | Role::Buf2
-            | Role::Buf3
-            | Role::Buf4 => pmp::R | pmp::W,
+            Role::DataBss | Role::Stack | Role::Heap | Role::BufRW => pmp::R | pmp::W,
+            Role::BufRO => pmp::R,
         }
     }
 
@@ -50,7 +43,18 @@ impl Role {
                 base: &raw const __user_text_start as usize,
             },
             Role::DataBss | Role::Stack | Role::Heap => Backing::Heap(Pool::UserPd0),
-            Role::Buf1 | Role::Buf2 | Role::Buf3 | Role::Buf4 => Backing::Heap(Pool::Psram),
+            Role::BufRW | Role::BufRO => Backing::Heap(Pool::Psram),
+        }
+    }
+
+    fn addr_slot(self) -> usize {
+        match self {
+            Role::Text => 2, // PmpAddr0 and PmpAddr1 are use in M-mode
+            Role::DataBss => 3,
+            Role::Stack => 4,
+            Role::Heap => 5,
+            Role::BufRW => 6,
+            Role::BufRO => 7,
         }
     }
 }
@@ -79,7 +83,7 @@ impl UserMemMap {
                 order,
             ),
         };
-        self.map[role as usize] = Some(Segment { role, region });
+        self.map[role.addr_slot()] = Some(Segment { role, region });
         Ok(())
     }
 
@@ -91,6 +95,7 @@ impl UserMemMap {
                     i,
                     segment.region.base_addr(),
                     segment.region.size(),
+                    pmp::NAPOT,
                     segment.role.permissions(),
                 );
             }
@@ -99,7 +104,7 @@ impl UserMemMap {
     }
 
     fn clear_region(&mut self, role: Role) {
-        self.map[role as usize] = None; // Triggers Drop on MemRegion which deallocs for heap-based regions
+        self.map[role.addr_slot()] = None; // Triggers Drop on MemRegion which deallocs for heap-based regions
     }
 
     pub(crate) fn for_user_thread(stack_order: Order) -> Result<UserMemMap, ()> {
