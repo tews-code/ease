@@ -724,7 +724,7 @@ fn mutex_holder_sleep_parks_contender() {
         .spawn(holder);
     assert!(id1.is_some(), "holder spawn failed");
     // Brief delay so holder definitely grabs the lock first.
-    crate::kernel::sched::sleep(10);
+    crate::kernel::sched::sleep(20);
     MAIN_AFTER_SLEEP10_AT.store(
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
@@ -761,10 +761,10 @@ fn mutex_holder_sleep_parks_contender() {
     let holder_sleep_duration = hsleep_end - hsleep_start;
     // Holder sleeps HOLD_MS while holding. Contender should wait at least
     // most of that. The HOLD_MS - 50 lower bound accommodates the
-    // "sleep(10) as barrier" heuristic stretching to ~25-30 ms under
+    // "sleep(20) as barrier" heuristic stretching to ~35-40 ms under
     // QEMU timer jitter (see QEMU TIMER JITTER NOTE at top of file)
     // plus the few ms it takes for main to spawn the contender after
-    // its sleep(10) wakes. Anything tighter flakes on most CI runs.
+    // its sleep(20) wakes. Anything tighter flakes on most CI runs.
     assert!(
         latency >= HOLD_MS as usize - 50,
         "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking.\n  \
@@ -773,7 +773,7 @@ fn mutex_holder_sleep_parks_contender() {
          holder_sleep_started   @ +{} ms\n  \
          holder_sleep_ended     @ +{} ms  (sleep_duration={} ms, requested={} ms)\n  \
          holder_released        @ +{} ms\n  \
-         main_after_sleep10     @ +{} ms  (requested 10 ms)\n  \
+         main_after_sleep10     @ +{} ms  (requested 20 ms)\n  \
          main_after_spawn_contender @ +{} ms\n  \
          contender_started      @ +{} ms\n  \
          contender_acquired     @ +{} ms",
