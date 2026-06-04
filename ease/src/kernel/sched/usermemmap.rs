@@ -125,11 +125,11 @@ impl UserMemMap {
         self.map[role.addr_slot()] = None; // Triggers Drop on MemRegion which deallocs for heap-based regions
     }
 
-    pub(crate) fn for_user_thread(stack_order: Order) -> Result<UserMemMap, ()> {
+    // Creates a memory map for a user process
+    pub(crate) fn for_process() -> Result<UserMemMap, ()> {
         let mut memmap = Self::new();
         memmap.add_region(Role::Text, Order::KB4)?;
         memmap.add_region(Role::DataBss, Order::KB4)?;
-        memmap.add_region(Role::Stack, stack_order)?;
         Ok(memmap)
     }
 }

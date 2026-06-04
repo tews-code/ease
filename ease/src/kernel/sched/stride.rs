@@ -12,8 +12,9 @@ use super::types::{
 use crate::arch::{cpu_id, csr};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
-use crate::kernel::sched::process::PROCS_MAX;
+use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
 use crate::kernel::sched::stack;
+use crate::kernel::sched::usermemmap::UserMemMap;
 use crate::kernel::sched::{MemRegion, STACK_CANARY};
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
@@ -129,7 +130,7 @@ impl ThreadControlBlock {
 
 impl ThreadsInner {
     // Find a free thread slot
-    fn free_slot(&mut self) -> Option<(usize, &mut ThreadControlBlock)> {
+    fn find_thread_slot(&mut self) -> Option<(usize, &mut ThreadControlBlock)> {
         self.thread_blocks
             .iter_mut()
             .enumerate()
@@ -477,7 +478,7 @@ impl Scheduler {
         // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
-        let Some((idx, tcb)) = threads.free_slot() else {
+        let Some((idx, tcb)) = threads.find_thread_slot() else {
             drop(threads);
             return None;
         };
@@ -540,7 +541,7 @@ impl Scheduler {
         // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
-        let Some((idx, tcb)) = threads.free_slot() else {
+        let Some((idx, tcb)) = threads.find_thread_slot() else {
             drop(threads);
             return None;
         };
@@ -578,6 +579,77 @@ impl Scheduler {
             percpu::set_needs_reschedule();
         }
         Some(handle)
+    }
+
+    // Spawn a new user process
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn spawn_process(
+        &self,
+        name: &'static str,
+        user_entry: extern "C" fn(),
+        priority: u8,
+        kernel_stack_order: Order,
+        user_stack_order: Order,
+        qos: Qos,
+        affinity: Option<u8>,
+    ) -> Option<ProcessHandle> {
+        let mem_map = UserMemMap::for_process().ok()?;
+        let mut pcb = ProcessControlBlock::new(name, mem_map);
+        let mut tcb = ThreadControlBlock::new();
+        // Allocate stacks before locking
+        let mut kernel_stack =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
+        let user_stack =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
+        let sp =
+            unsafe { stack::init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
+
+        // Initialise the TCB
+        tcb.id = next_thread_id();
+        tcb.sp = sp;
+        tcb.state = State::Ready;
+        tcb.qos = qos;
+        tcb.priority = priority;
+        tcb.kernel_stack = Some(kernel_stack);
+
+        tcb.affinity = affinity;
+        // Now lock
+        let mut sched = self.threads.lock();
+        // Get a process slot
+        let pcb_idx = sched.find_process_slot()?;
+        // Finish setting up the tcb
+        let baseline = sched.pass_baseline();
+        tcb.pass = baseline;
+        tcb.user = Some(UserContext {
+            user_stack,
+            user_entry,
+            process_idx: pcb_idx as u8,
+        });
+
+        let (tcb_idx, _) = sched.find_thread_slot()?;
+
+        // Install
+        pcb.add_thread_count()
+            .expect("adding the first thread is always valid");
+        let process_handle = sched.install_process_control_block(pcb_idx, pcb);
+        sched.thread_blocks[tcb_idx] = tcb;
+
+        // Set the timer
+        let ready_count = sched.wake_sleeping_threads();
+        let earliest_deadline = sched.earliest_deadline();
+        sched.set_next_timer(earliest_deadline, ready_count);
+
+        drop(sched);
+        // If the spawned thread has affinity for the other hart, send an IPI
+        if let Some(h) = affinity
+            && h as usize != crate::arch::cpu_id()
+        {
+            crate::kernel::ipi::send(h as usize);
+        } else {
+            percpu::set_needs_reschedule();
+        }
+
+        Some(process_handle)
     }
 
     // Set current thread state to `new_state` and next thread to `Ready` in round robin

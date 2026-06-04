@@ -12,20 +12,20 @@ const THREADS_PER_PROC_MAX: u8 = 6;
 
 static PID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-struct ProcessHandle {
-    pid: u32,
-    idx: usize,
+pub(crate) struct ProcessHandle {
+    pub(super) pid: u32,
+    pub(super) idx: usize,
 }
 
 pub(super) struct ProcessControlBlock {
-    pid: u32,
+    pub(super) pid: u32,
     name: &'static str,
     pub(super) mem_map: UserMemMap,
     thread_count: u8,
 }
 
 impl ProcessControlBlock {
-    fn new(name: &'static str, mem_map: UserMemMap) -> Self {
+    pub(super) fn new(name: &'static str, mem_map: UserMemMap) -> Self {
         Self {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
             name,
@@ -37,7 +37,7 @@ impl ProcessControlBlock {
     // Adds to the thread count and returns the new value if not above the cap
     //
     // Errors if the process can't have any more threads
-    fn add_thread_count(&mut self) -> Result<u8, ()> {
+    pub(super) fn add_thread_count(&mut self) -> Result<u8, ()> {
         if self.thread_count < THREADS_PER_PROC_MAX {
             self.thread_count += 1;
             Ok(self.thread_count)
@@ -58,11 +58,11 @@ impl ProcessControlBlock {
 }
 
 impl ThreadsInner {
-    fn find_process_slot(&self) -> Option<usize> {
+    pub(super) fn find_process_slot(&self) -> Option<usize> {
         self.process_blocks.iter().position(|pcb| pcb.is_none())
     }
 
-    fn install_process_control_block(
+    pub(super) fn install_process_control_block(
         &mut self,
         idx: usize,
         pcb: ProcessControlBlock,
