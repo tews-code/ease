@@ -13,6 +13,7 @@ unsafe extern "C" {
     static __data_start: u8;
     static __data_end: u8;
     static __data_lma: u8;
+
     static __bss_start: u8;
     static __bss_end: u8;
 
@@ -215,6 +216,13 @@ extern "C" fn _start() -> ! {
         "j secondary_main",
 
         "unimp",
+        data_start = sym __data_start,
+        data_end = sym __data_end,
+        data_lma = sym __data_lma,
+
+        bss_start = sym __bss_start,
+        bss_end = sym __bss_end,
+
         sram8_text_lma = sym __sram8_text_lma,
         sram8_text_start = sym __sram8_text_start,
         sram8_text_end = sym __sram8_text_end,
@@ -236,13 +244,6 @@ extern "C" fn _start() -> ! {
         sram9_text_lma = sym __sram9_text_lma,
         sram9_text_start = sym __sram9_text_start,
         sram9_text_end = sym __sram9_text_end,
-
-        data_start = sym __data_start,
-        data_end = sym __data_end,
-        data_lma = sym __data_lma,
-
-        bss_start = sym __bss_start,
-        bss_end = sym __bss_end,
 
         protect_null_ptr_deref = sym crate::arch::pmp::protect_null_ptr_deref,
         protect_sram_text = sym crate::arch::pmp::protect_sram_text,

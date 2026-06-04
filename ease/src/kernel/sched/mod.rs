@@ -1,11 +1,12 @@
 //! Scheduler
 
+mod process;
 pub(crate) mod stack;
 mod stride;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
 mod types;
-mod usermemmap;
+pub(crate) mod usermemmap;
 
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};

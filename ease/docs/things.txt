@@ -407,3 +407,48 @@ That's it — 2KB stereo i16 buffer living in SRAM5, zero flash footprint, no st
      - (If requested) - shared buffer is put in PD1 (lower memory) (1 NAPOT region -RW or R)
     That's a total of 5 regions per user thread, easily fits in RP2350 PMP config
 
+
+    28. A null-pointer guard is a small locked, no-access PMP region sitting over the lowest addresses (around address 0). Once it's in place, any
+  access to a near-null address — read, write, or instruction fetch — traps immediately with a precise fault, instead of silently succeeding or
+  corrupting whatever happens to live at address 0.
+
+  Why you'd want it. A null pointer is just address 0 (recall our earlier null == 0 chat). When code dereferences a null pointer, it accesses
+  address 0. Without a guard, what happens depends entirely on what's mapped there:
+  - On real RP2350, address 0 is the boot ROM — mapped and readable. So a null read silently returns ROM bytes (your bug produces garbage data
+  and limps on), and a null write hits ROM (ignored or faults unpredictably). Silent-wrong is the worst failure mode: the bug surfaces
+  somewhere far away.
+  - On QEMU virt, address 0 is likely unmapped, so a null access may already fault — meaning the guard is partly redundant in your current test
+  environment, but not on the silicon you're targeting.
+
+  The guard makes this deterministic everywhere: null access → clean fault at the instruction that did it, with mtval showing the address. That
+  converts "mysterious corruption later" into "faulted right here."
+
+  Why it's specifically an M-mode protection. This is the key thing to connect to last message's principle. In U-mode, address 0 is already
+  denied — no region grants it, and U-mode default-denies unmatched addresses, so a U-mode null deref already faults. The guard adds nothing
+  there. The value is entirely for M-mode (your kernel), where the default is allow: without an explicit locked deny-region, the kernel can
+  freely touch address 0. So the null guard is kernel self-protection — it catches the kernel's own null derefs. And that matters because a
+  kernel is full of unsafe raw-pointer code (MMIO, linker symbols, pointer arithmetic, any NonNull::new_unchecked). Safe Rust never produces a
+  null deref — references are non-null and Option<&T> uses the null niche — but your unsafe blocks can, and NonNull::new_unchecked(null) is
+  outright UB the optimizer may "reason around." The guard is the runtime backstop for exactly those.
+
+  Design choices, if you built it:
+  - Size: the minimum NAPOT is 32 bytes, but that only catches addresses 0–31. Real null bugs often look like null_ptr->field (address = offset
+  of field) or array[i] through a null base — small offsets from null. So you'd typically cover a whole page (a 4 KB NAPOT region at 0) to
+  catch null-plus-small-offset, not just exact zero. Nothing legitimate lives in [0, 0x1000), so it's free to forbid.
+  - Permissions: zero R/W/X, A-field = NAPOT, L = 1 (locked, so M-mode is bound by it).
+  - Placement: a low-numbered locked region, alongside your scratch-text guard (lowest-number-wins means nothing can override it — though
+  nothing overlaps it anyway).
+
+  The catch in your code (this is the real blocker, and it's the same one I flagged): your PmpCfg::set does if permissions == 0 { 0 }, which
+  sets the A-field to OFF — i.e., passing zero permissions disables the region rather than making it deny-all. A null guard needs A = NAPOT
+  with R=W=X=0 and L=1. So before you could build one, you'd fix set to keep the NAPOT/A bits when permissions are zero, distinguishing "region
+  off" from "region matches and denies everything." That same fix is what any no-access guard (null guard, stack dead-zone) needs.
+
+  My honest take for where you are: it's a classic, legitimate hardening technique and well worth understanding — but it's defense-in-depth,
+  not a fix for a bug you have, its payoff is mostly on real hardware (QEMU likely faults on null already), and it costs you the permanent
+  region plus the set rework. So it fits exactly the advice from last time: don't spend the locked region speculatively. Keep it in your back
+  pocket as a strong candidate for when you harden for real silicon — at which point fixing set to express no-access regions unlocks both the
+  null guard and proper stack dead-zone guards in one go.
+
+
+  29.

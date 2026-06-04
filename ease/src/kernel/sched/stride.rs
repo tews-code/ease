@@ -12,8 +12,8 @@ use super::types::{
 use crate::arch::{cpu_id, csr};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
+use crate::kernel::sched::process::PROCS_MAX;
 use crate::kernel::sched::stack;
-use crate::kernel::sched::usermemmap::UserMemMap;
 use crate::kernel::sched::{MemRegion, STACK_CANARY};
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
@@ -130,7 +130,7 @@ impl ThreadControlBlock {
 impl ThreadsInner {
     // Find a free thread slot
     fn free_slot(&mut self) -> Option<(usize, &mut ThreadControlBlock)> {
-        self.control_blocks
+        self.thread_blocks
             .iter_mut()
             .enumerate()
             .find(|(_, tcb)| tcb.state == State::Avail)
@@ -145,7 +145,7 @@ impl ThreadsInner {
     // pass naturally catches up to the rest of the system.
     fn pass_baseline(&self) -> u64 {
         let mut best: Option<u64> = None;
-        for tcb in &self.control_blocks {
+        for tcb in &self.thread_blocks {
             let eligible = (tcb.state == State::Ready || tcb.state == State::Running)
                 && tcb.priority != PRIORITY_MIN;
             if eligible {
@@ -162,7 +162,7 @@ impl ThreadsInner {
         let now = timer::elapsed();
         let running_idx = percpu::current_thread_idx();
         let mut ready_count: usize = 0;
-        for (idx, tcb) in self.control_blocks.iter_mut().enumerate() {
+        for (idx, tcb) in self.thread_blocks.iter_mut().enumerate() {
             if idx == running_idx {
                 continue;
             }
@@ -189,7 +189,7 @@ impl ThreadsInner {
     // Gets the first wake up deadline including leeway (including threads busy switching)
     // Returns None if no threads are sleeping
     fn earliest_deadline(&self) -> Option<u64> {
-        self.control_blocks
+        self.thread_blocks
             .iter()
             .filter_map(|tcb| tcb.wakeup_deadline())
             .min()
@@ -211,7 +211,7 @@ impl ThreadsInner {
             // whose window doesn't include `b`, memoise the computed
             // leeway into `fixed_leeway` so future visits in this set of
             // calls see a stable value.
-            for tcb in &mut self.control_blocks {
+            for tcb in &mut self.thread_blocks {
                 if let State::Sleeping(d) | State::Switching(PostSwitch::Sleeping(d)) =
                     &mut tcb.state
                 {
@@ -246,7 +246,7 @@ impl ThreadsInner {
         let this_hart = crate::arch::cpu_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
-        for (idx, tcb) in self.control_blocks.iter().enumerate() {
+        for (idx, tcb) in self.thread_blocks.iter().enumerate() {
             let candidate = tcb.state == State::Ready;
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
             let pri_ok = tcb.priority != PRIORITY_MIN;
@@ -260,7 +260,7 @@ impl ThreadsInner {
             None
         } else {
             let [curr, next] = self
-                .control_blocks
+                .thread_blocks
                 .get_disjoint_mut([curr_idx, next_idx])
                 .expect("indices have been selected as disjoint");
             Some((curr, curr_idx, next, next_idx))
@@ -282,7 +282,7 @@ impl ThreadsInner {
         let this_hart = crate::arch::cpu_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
-        for (idx, tcb) in self.control_blocks.iter().enumerate() {
+        for (idx, tcb) in self.thread_blocks.iter().enumerate() {
             let candidate = tcb.state == State::Ready || idx == curr_idx;
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
             let pri_ok = tcb.priority != PRIORITY_MIN;
@@ -296,7 +296,7 @@ impl ThreadsInner {
             None
         } else {
             let [curr, next] = self
-                .control_blocks
+                .thread_blocks
                 .get_disjoint_mut([curr_idx, next_idx])
                 .expect("indices have been selected as disjoint");
             Some((curr, curr_idx, next, next_idx))
@@ -305,7 +305,7 @@ impl ThreadsInner {
 
     #[inline(never)]
     fn check_curr_canary(&self) {
-        let curr = &self.control_blocks[percpu::current_thread_idx()];
+        let curr = &self.thread_blocks[percpu::current_thread_idx()];
         let base_addr = match &curr.kernel_stack {
             Some(memregion) => memregion.base_addr(),
             None =>
@@ -334,7 +334,7 @@ impl ThreadsInner {
         switching_from_thread_idx: Option<usize>,
     ) {
         // Set PerCpu
-        let stack = self.control_blocks[current_thread_idx]
+        let stack = self.thread_blocks[current_thread_idx]
             .kernel_stack
             .as_ref()
             .expect("should not be setting percpu for thread without a stack");
@@ -343,14 +343,18 @@ impl ThreadsInner {
         percpu::set_current_stack_base(stack.base().as_ptr());
 
         // Set mscratch
-        if let Some(user_context) = &self.control_blocks[current_thread_idx].user {
+        if let Some(user_context) = &self.thread_blocks[current_thread_idx].user {
             // User thread has kernel stack top in mscratch
             unsafe {
                 csr::mscratch::write(stack.top().addr().into());
             }
 
-            // For user thread set pmp
-            let pmp_config = user_context.user_mem_map.to_pmp();
+            // For user thread merge the thread's stack and set pmp
+            let pmp_config = self.process_blocks[user_context.process_idx as usize]
+                .as_ref()
+                .expect("process should be configured before this thread is scheduled")
+                .mem_map
+                .to_pmp(&user_context.user_stack);
             pmp_config.activate();
         } else {
             // Kernel thread has IRQ stack top in mscratch
@@ -384,7 +388,8 @@ impl Scheduler {
     const fn new() -> Self {
         Self {
             threads: IrqSpinLock::new(ThreadsInner {
-                control_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
+                thread_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
+                process_blocks: [const { None }; PROCS_MAX],
             }),
             run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
@@ -400,7 +405,7 @@ impl Scheduler {
             Order::KB2.size(),
             "idle stack size disagrees with linker"
         );
-        threads.control_blocks[idx] = ThreadControlBlock {
+        threads.thread_blocks[idx] = ThreadControlBlock {
             id,
             state: State::Running,
             sp: NonNull::new(crate::arch::csr::regs::sp() as *mut u8),
@@ -428,25 +433,25 @@ impl Scheduler {
         let switched_from_idx = percpu::take_switching_from_thread_idx()
             .expect("should have a Switching thread to set back to Ready");
         let new_state = {
-            match threads.control_blocks[switched_from_idx].state {
+            match threads.thread_blocks[switched_from_idx].state {
                 State::Switching(PostSwitch::Ready) => State::Ready,
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
                 State::Switching(PostSwitch::Dead) => {
                     // Release user memory (if U-mode thread)
-                    threads.control_blocks[switched_from_idx].user = None;
+                    threads.thread_blocks[switched_from_idx].user = None;
                     // Release kernel stack
-                    threads.control_blocks[switched_from_idx].kernel_stack = None;
-                    threads.control_blocks[switched_from_idx].sp = None;
-                    threads.control_blocks[switched_from_idx] = ThreadControlBlock::new();
+                    threads.thread_blocks[switched_from_idx].kernel_stack = None;
+                    threads.thread_blocks[switched_from_idx].sp = None;
+                    threads.thread_blocks[switched_from_idx] = ThreadControlBlock::new();
                     // Mark TCB slot avaialble for use
                     State::Avail
                 }
                 _ => panic!("Post switch but not in switching state"),
             }
         };
-        threads.control_blocks[switched_from_idx].state = new_state;
+        threads.thread_blocks[switched_from_idx].state = new_state;
     }
 
     // Set up kernel thread initial thread block and stack for a new thread
@@ -507,8 +512,10 @@ impl Scheduler {
     }
 
     // Set up initial thread control block and stack for a new user thread
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_user(
         &self,
+        process_idx: usize,
         user_entry: extern "C" fn(),
         priority: u8,
         kernel_stack_order: Order,
@@ -516,14 +523,20 @@ impl Scheduler {
         qos: Qos,
         affinity: Option<u8>,
     ) -> Option<ThreadHandle> {
-        // Request a user memory map
-        let user_mem_map = UserMemMap::for_user_thread(user_stack_order).ok()?;
-        // Allocate a kernel stack before locking
-        let mut kernel_stack_region =
+        // Allocate stacks before locking
+        let mut kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
-        let sp = unsafe { stack::init_for_user_entry(&mut kernel_stack_region, user_entry) };
+        let user_stack =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
+        let sp =
+            unsafe { stack::init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
+        // We should have a process control block already set up
+        if threads.process_blocks[process_idx].is_none() {
+            drop(threads);
+            return None;
+        }
         // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
@@ -539,12 +552,13 @@ impl Scheduler {
             state: State::Ready,
             qos,
             priority,
-            kernel_stack: Some(kernel_stack_region),
+            kernel_stack: Some(kernel_stack),
             pass: baseline,
             affinity,
             user: Some(UserContext {
-                user_mem_map,
+                user_stack,
                 user_entry,
+                process_idx: process_idx as u8,
             }),
             ..ThreadControlBlock::new()
         };
@@ -586,7 +600,7 @@ impl Scheduler {
             // First check if current state matches pre-condition
             if let Some(state) = current_state {
                 let idx = percpu::current_thread_idx();
-                if threads.control_blocks[idx].state != state {
+                if threads.thread_blocks[idx].state != state {
                     return;
                 }
             }
@@ -654,7 +668,7 @@ impl Scheduler {
         let now_cycles = timer::elapsed();
         let curr_idx = percpu::current_thread_idx();
         {
-            let curr = &mut threads.control_blocks[curr_idx];
+            let curr = &mut threads.thread_blocks[curr_idx];
             let ran = now_cycles - curr.last_started_cycles;
             curr.last_started_cycles = now_cycles;
             unsafe { self.run_cycles[curr_idx].add(ran) };
@@ -785,14 +799,14 @@ impl Scheduler {
         let mut threads = self.threads.lock();
         let mut did_unpark: bool = false;
         let affinity = if matches!(
-            threads.control_blocks[handle.idx].state,
+            threads.thread_blocks[handle.idx].state,
             State::Blocked | State::BlockedUntil(_)
-        ) && threads.control_blocks[handle.idx].id == handle.id
+        ) && threads.thread_blocks[handle.idx].id == handle.id
         {
             did_unpark = true;
             // Note - does not deal with lost wakeup yet
-            threads.control_blocks[handle.idx].state = State::Ready;
-            threads.control_blocks[handle.idx].affinity
+            threads.thread_blocks[handle.idx].state = State::Ready;
+            threads.thread_blocks[handle.idx].affinity
         } else {
             None
         };
@@ -815,7 +829,7 @@ impl Scheduler {
         let threads = self.threads.lock();
         let idx = percpu::current_thread_idx();
         ThreadHandle {
-            id: threads.control_blocks[idx].id,
+            id: threads.thread_blocks[idx].id,
             idx,
         }
     }
@@ -823,16 +837,16 @@ impl Scheduler {
     /// Sets the TCB's next_waiter for the thread the handle points to.
     pub fn set_next_waiter(&self, handle: &ThreadHandle, next: Option<ThreadHandle>) {
         let mut threads = self.threads.lock();
-        if threads.control_blocks[handle.idx].id == handle.id {
-            threads.control_blocks[handle.idx].next_waiter = next;
+        if threads.thread_blocks[handle.idx].id == handle.id {
+            threads.thread_blocks[handle.idx].next_waiter = next;
         }
     }
 
     /// Get waiter tcb index
     pub fn get_next_waiter(&self, handle: &ThreadHandle) -> Option<ThreadHandle> {
         let threads = self.threads.lock();
-        if threads.control_blocks[handle.idx].id == handle.id {
-            threads.control_blocks[handle.idx].next_waiter
+        if threads.thread_blocks[handle.idx].id == handle.id {
+            threads.thread_blocks[handle.idx].next_waiter
         } else {
             None
         }
@@ -842,8 +856,8 @@ impl Scheduler {
     #[allow(dead_code)]
     pub fn unpark_by_index(&self, idx: usize) {
         let mut threads = self.threads.lock();
-        if threads.control_blocks[idx].state == State::Blocked {
-            threads.control_blocks[idx].state = State::Ready;
+        if threads.thread_blocks[idx].state == State::Blocked {
+            threads.thread_blocks[idx].state = State::Ready;
             // Ask for immediate reschedule to avoid waiting for a time slice
             percpu::set_needs_reschedule();
         }
@@ -853,7 +867,7 @@ impl Scheduler {
     pub fn set_self_blocked(&self) {
         let current = self.current_thread();
         let mut threads = self.threads.lock();
-        threads.control_blocks[current.idx].state = State::Blocked;
+        threads.thread_blocks[current.idx].state = State::Blocked;
     }
 
     /// Set this thread to blocked state without rescheduling with a wake up deadline
@@ -864,7 +878,7 @@ impl Scheduler {
         };
         let current = self.current_thread();
         let mut threads = self.threads.lock();
-        threads.control_blocks[current.idx].state = State::BlockedUntil(deadline);
+        threads.thread_blocks[current.idx].state = State::BlockedUntil(deadline);
     }
 }
 

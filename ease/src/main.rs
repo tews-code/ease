@@ -84,6 +84,7 @@ fn minimal_init() {
 
 fn kernel_init() {
     minimal_init();
+    sched::usermemmap::init();
     #[cfg(feature = "profile")]
     sched::Builder::new()
         .with_stack_class(sched::Order::KB16)

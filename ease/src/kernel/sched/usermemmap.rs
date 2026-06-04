@@ -10,6 +10,12 @@ use crate::kernel::alloc::{MemRegion, Order, Pool};
 // For now, put the user .text in the PSRAM buffer area (immediately after the 4MB heap region)
 unsafe extern "C" {
     static __user_text_start: u8;
+    static __user_data_bss_start: u8;
+    static __user_data_lma: u8;
+    static mut __user_data_start: u8;
+    static __user_data_end: u8;
+    static mut __user_bss_start: u8;
+    static __user_bss_end: u8;
 }
 
 pub(crate) enum Backing {
@@ -42,7 +48,10 @@ impl Role {
             Role::Text => Backing::Fixed {
                 base: &raw const __user_text_start as usize,
             },
-            Role::DataBss | Role::Stack | Role::Heap => Backing::Heap(Pool::UserPd0),
+            Role::DataBss => Backing::Fixed {
+                base: &raw const __user_data_bss_start as usize,
+            },
+            Role::Stack | Role::Heap => Backing::Heap(Pool::UserPd0),
             Role::BufRW | Role::BufRO => Backing::Heap(Pool::Psram),
         }
     }
@@ -69,7 +78,7 @@ pub(crate) struct UserMemMap {
 }
 
 impl UserMemMap {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             map: [const { None }; board::PMP_ADDR_COUNT],
         }
@@ -87,7 +96,7 @@ impl UserMemMap {
         Ok(())
     }
 
-    pub(crate) fn to_pmp(&self) -> Pmp {
+    pub(super) fn to_pmp(&self, user_stack: &MemRegion) -> Pmp {
         let mut pmp = Pmp::new();
         for (i, slot) in self.map.iter().enumerate() {
             if let Some(segment) = slot {
@@ -100,6 +109,15 @@ impl UserMemMap {
                 );
             }
         }
+        // Add the thread's stack
+        let role = Role::Stack;
+        pmp.set_region(
+            role.addr_slot(),
+            user_stack.base().addr().into(),
+            user_stack.size(),
+            pmp::NAPOT,
+            role.permissions(),
+        );
         pmp
     }
 
@@ -110,8 +128,29 @@ impl UserMemMap {
     pub(crate) fn for_user_thread(stack_order: Order) -> Result<UserMemMap, ()> {
         let mut memmap = Self::new();
         memmap.add_region(Role::Text, Order::KB4)?;
-        memmap.add_region(Role::DataBss, Order::KB2)?;
+        memmap.add_region(Role::DataBss, Order::KB4)?;
         memmap.add_region(Role::Stack, stack_order)?;
         Ok(memmap)
+    }
+}
+
+pub(crate) fn init() {
+    // Copy the user .data from flash to PSRAM
+    // Safety: Linker script sets up symbols to an aligned writeable region
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &raw const __user_data_lma,
+            &raw mut __user_data_start,
+            &raw const __user_data_end as usize - &raw const __user_data_start as usize,
+        );
+    }
+    // Zero the user .bss
+    // Safety: Linker script sets up symbols to an aligned writeable region
+    unsafe {
+        core::ptr::write_bytes(
+            &raw mut __user_bss_start,
+            0,
+            &raw const __user_bss_end as usize - &raw const __user_bss_start as usize,
+        );
     }
 }

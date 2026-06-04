@@ -3,7 +3,7 @@
 use core::ptr::NonNull;
 
 use crate::kernel::alloc::MemRegion;
-use crate::kernel::sched::usermemmap::UserMemMap;
+use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock};
 
 pub const THREADS_MAX: usize = 32;
 
@@ -39,8 +39,9 @@ pub enum Qos {
 }
 
 pub(super) struct UserContext {
-    pub(super) user_mem_map: UserMemMap,
+    pub(super) user_stack: MemRegion,
     pub(super) user_entry: extern "C" fn(),
+    pub(super) process_idx: u8,
 }
 
 pub(super) struct ThreadControlBlock {
@@ -58,7 +59,8 @@ pub(super) struct ThreadControlBlock {
 }
 
 pub(super) struct ThreadsInner {
-    pub(super) control_blocks: [ThreadControlBlock; THREADS_MAX],
+    pub(super) thread_blocks: [ThreadControlBlock; THREADS_MAX],
+    pub(super) process_blocks: [Option<ProcessControlBlock>; PROCS_MAX], // Two thread control blocks are taken up by idle so can't be used for a process
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

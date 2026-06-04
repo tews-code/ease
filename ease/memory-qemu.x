@@ -78,6 +78,8 @@ __irq_stack_size        = 1K + 512;
 __scratch_ram_text_size = 2K;
 __kernel_heap_size      = 128K;
 __user_text_size        = 4K;
+__user_data_size        = 2K;
+__user_bss_size         = 2K;
 __user_heap_sram_size   = 256K;
 __user_heap_psram_size  = 4M;
 __fb_width = 640; __fb_height = 480; __fb_bpp = 4; /* 640  x 480 x 4 bytes = 1.2MiB */
@@ -215,6 +217,24 @@ SECTIONS {
         *(.user_text .user_text.*)
         . = __user_text_start + __user_text_size;
         __user_text_end = .;
+    } > PSRAM
+
+    /* Temporarily put all user threads .data and .bss in 4KB window in PSRAM */
+    .user_data : ALIGN(4K) {
+        __user_data_bss_start = .;
+        __user_data_start = .;
+        *(.user_data .user_data.*)
+        . = __user_data_start + __user_data_size;
+        __user_data_end = .;
+    } > PSRAM AT > FLASH
+    __user_data_lma = LOADADDR(.user_data);
+
+    .user_bss (NOLOAD) : {
+        __user_bss_start = .;
+        *(.user_bss .user_bss.*)
+        . = __user_bss_start + __user_bss_size;
+        __user_bss_end = .;
+        __user_data_bss_end = .;
     } > PSRAM
 
     /* Remaining PSRAM up to the frame buffer is a region for buffers etc. */
