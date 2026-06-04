@@ -71,4 +71,16 @@ impl ThreadsInner {
         self.process_blocks[idx] = Some(pcb);
         ProcessHandle { pid, idx }
     }
+
+    // Decrements the process thread count and releases the process control
+    // block if the thread count reaches zero.
+    pub(super) fn release_process_thread(&mut self, process_idx: u8) {
+        let thread_count = self.process_blocks[process_idx as usize]
+            .as_mut()
+            .expect("should only be decrementing thread count on a valid process control block")
+            .dec_thread_count();
+        if thread_count == 0 {
+            self.process_blocks[process_idx as usize] = None;
+        }
+    }
 }

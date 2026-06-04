@@ -440,13 +440,15 @@ impl Scheduler {
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
                 State::Switching(PostSwitch::Dead) => {
-                    // Release user memory (if U-mode thread)
-                    threads.thread_blocks[switched_from_idx].user = None;
-                    // Release kernel stack
-                    threads.thread_blocks[switched_from_idx].kernel_stack = None;
-                    threads.thread_blocks[switched_from_idx].sp = None;
+                    // Handle a user process
+                    if let Some(user_context) = &threads.thread_blocks[switched_from_idx].user {
+                        let process_idx = user_context.process_idx;
+                        // Release the user thread; this will also release the process if last thread
+                        threads.release_process_thread(process_idx);
+                    }
+                    // Release the thread resources
                     threads.thread_blocks[switched_from_idx] = ThreadControlBlock::new();
-                    // Mark TCB slot avaialble for use
+                    // Mark TCB slot available for use
                     State::Avail
                 }
                 _ => panic!("Post switch but not in switching state"),
@@ -512,11 +514,11 @@ impl Scheduler {
         Some(handle)
     }
 
-    // Set up initial thread control block and stack for a new user thread
+    // Add an additional user thread to a process
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_user(
         &self,
-        process_idx: usize,
+        process: &ProcessHandle,
         user_entry: extern "C" fn(),
         priority: u8,
         kernel_stack_order: Order,
@@ -534,20 +536,33 @@ impl Scheduler {
         // Now lock the scheduler
         let mut threads = self.threads.lock();
         // We should have a process control block already set up
-        if threads.process_blocks[process_idx].is_none() {
+        if threads.process_blocks[process.idx]
+            .as_ref()
+            .is_none_or(|pcb| pcb.pid != process.pid)
+        {
             drop(threads);
             return None;
         }
         // Get the current pass baselines so we don't schedule ahead of other threads
         let baseline = threads.pass_baseline();
         // Find a free TCB slot
-        let Some((idx, tcb)) = threads.find_thread_slot() else {
+        let Some((idx, _)) = threads.find_thread_slot() else {
             drop(threads);
             return None;
         };
+        // Increment this process's thread count
+        if threads.process_blocks[process.idx]
+            .as_mut()
+            .expect("still holding the lock and verified this is Some above")
+            .add_thread_count()
+            .is_err()
+        {
+            drop(threads);
+            return None;
+        }
 
-        // Initialise the TCB
-        *tcb = ThreadControlBlock {
+        // Create the TCB
+        let tcb = ThreadControlBlock {
             id: next_thread_id(),
             sp,
             state: State::Ready,
@@ -559,18 +574,22 @@ impl Scheduler {
             user: Some(UserContext {
                 user_stack,
                 user_entry,
-                process_idx: process_idx as u8,
+                process_idx: process.idx as u8,
             }),
             ..ThreadControlBlock::new()
         };
         // Local variables to allow dropping the threads lock
         let handle = ThreadHandle { id: tcb.id, idx };
+        // Install the tcb
+        threads.thread_blocks[idx] = tcb;
         // Set the timer
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
         threads.set_next_timer(earliest_deadline, ready_count);
-        // If the spawned thread has affinity for the other hart, send an IPI
+
         drop(threads);
+
+        // If the spawned thread has affinity for the other hart, send an IPI
         if let Some(h) = affinity
             && h as usize != crate::arch::cpu_id()
         {
