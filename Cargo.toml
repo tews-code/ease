@@ -5,4 +5,10 @@ members = ["ease", "ease-macros"]
 [profile.test]
 opt-level = 1
 
+# Catch integer overflow/underflow in release just like debug builds.
+# Audit 2026-06-04: no designed-wrap arithmetic in the codebase, so this
+# only turns silent wrapping bugs into loud panics.
+[profile.release]
+overflow-checks = true
+
 
