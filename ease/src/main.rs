@@ -15,6 +15,7 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::ramfb::FrameBuffer;
+#[cfg(not(test))]
 use crate::kernel::alloc::Order;
 use crate::kernel::sched::{self, spawn};
 use crate::kernel::sync::{Completion, IrqSpinLock};
@@ -151,6 +152,10 @@ fn test_runner_thread() {
 #[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     kernel_init();
+
+    let p = sched::spawn_process("abtest", user::user_print_a).unwrap();
+    sched::spawn_user(&p, user::user_print_b)
+        .expect("thread printing b should be able to join the user process");
 
     #[allow(clippy::diverging_sub_expression)]
     let Some(_id) = sched::Builder::new()

@@ -14,7 +14,7 @@ pub(crate) struct TrapFrame {
     t4: usize,
     t5: usize,
     t6: usize,
-    a0: usize,
+    pub(crate) a0: usize,
     a1: usize,
     a2: usize,
     a3: usize,

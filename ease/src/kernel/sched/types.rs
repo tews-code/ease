@@ -13,13 +13,22 @@ pub(super) struct Deadline {
     pub(super) fixed_leeway: Option<u64>, // None - use system default leeway
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ExitReason {
+    Exit,
+    Fault,
+}
+const _: () = assert!(ExitReason::Exit as u8 == 0);
+const _: () = assert!(ExitReason::Fault as u8 == 1);
+
 #[derive(PartialEq, Debug)]
 pub(super) enum PostSwitch {
     Blocked,
     BlockedUntil(Deadline),
     Ready,
     Sleeping(Deadline),
-    Dead,
+    Dead(ExitReason),
 }
 
 #[derive(PartialEq, Debug)]
@@ -38,6 +47,7 @@ pub enum Qos {
     Low,
 }
 
+#[expect(dead_code)] // user_entry is read from assembly
 pub(super) struct UserContext {
     pub(super) user_stack: MemRegion,
     pub(super) user_entry: extern "C" fn(),
@@ -69,6 +79,7 @@ pub struct ThreadHandle {
     pub(super) idx: usize,
 }
 
+#[allow(dead_code)]
 impl ThreadHandle {
     pub fn id(&self) -> u32 {
         self.id

@@ -11,6 +11,7 @@ pub(crate) mod usermemmap;
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::percpu;
+use crate::kernel::sched::process::ProcessHandle;
 use crate::kernel::sync::with_interrupts_disabled;
 
 use stride::SCHEDULER;
@@ -18,7 +19,7 @@ pub use types::THREADS_MAX;
 
 #[allow(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
-pub use types::{Qos, ThreadHandle};
+pub use types::{ExitReason, Qos, ThreadHandle};
 
 /// Sentinel placed at the bottom word of each thread's stack.
 /// Checked by the scheduler / panic path to detect stack overflow.
@@ -35,6 +36,7 @@ pub struct Builder {
     affinity: Option<u8>, // Affinity to a particular HART
 }
 
+#[allow(dead_code)]
 impl Builder {
     pub const fn new() -> Self {
         Self {
@@ -136,8 +138,8 @@ pub fn post_switch_cleanup() {
 
 /// Voluntarily terminate the current thread. Doesn't return.
 #[allow(dead_code)] // currently only used from test helpers
-pub fn exit() -> ! {
-    SCHEDULER.exit();
+pub fn exit(reason: ExitReason) -> ! {
+    SCHEDULER.exit(reason);
 }
 
 /// Park the current thread
@@ -197,7 +199,34 @@ pub fn park_if_blocked_until(deadline_ms: u64) {
 pub fn mark_for_preempt() {
     SCHEDULER.mark_for_preempt();
 }
+
 /// Schedule the next thread
 pub fn schedule() {
     SCHEDULER.schedule();
+}
+
+/// Spawn a user process
+pub fn spawn_process(name: &'static str, user_entry: extern "C" fn()) -> Option<ProcessHandle> {
+    SCHEDULER.spawn_process(
+        name,
+        user_entry,
+        PRIORITY_DEFAULT,
+        Order::KB4,
+        Order::KB4,
+        Qos::High,
+        None,
+    )
+}
+
+/// Spawn a user thread
+pub fn spawn_user(process: &ProcessHandle, user_entry: extern "C" fn()) -> Option<ThreadHandle> {
+    SCHEDULER.spawn_user(
+        process,
+        user_entry,
+        PRIORITY_DEFAULT,
+        Order::KB4,
+        Order::KB4,
+        Qos::High,
+        None,
+    )
 }

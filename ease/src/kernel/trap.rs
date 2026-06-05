@@ -6,9 +6,10 @@ use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::mstatus;
 use crate::arch::csr::{mepc, mtval};
 use crate::arch::trap::TrapFrame;
+use crate::arch::usermode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
-use crate::kernel::percpu::ExitReason;
+use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::STACK_CANARY;
 use crate::kernel::{ipi, percpu, sched};
 
@@ -89,6 +90,13 @@ fn handle_ecall(frame: &mut TrapFrame) {
         crate::syscall::EXIT => {
             exit_from_user(frame, ExitReason::Exit);
         }
+        crate::syscall::PUT_CHAR => {
+            // Advance mepc
+            frame.mepc += 4;
+            if let Some(c) = char::from_u32(frame.a0 as u32) {
+                crate::dprint!("{c}");
+            }
+        }
         _ => {
             // Advance mepc
             frame.mepc += 4;
@@ -98,13 +106,23 @@ fn handle_ecall(frame: &mut TrapFrame) {
 }
 
 fn exit_from_user(frame: &mut TrapFrame, reason: ExitReason) {
-    // Store the exit reason
-    percpu::set_user_exit_reason(reason);
-    // Set mstatus to reenable interrupts on return
-    frame.mstatus |= mstatus::MPP;
-    frame.mstatus |= mstatus::MPIE;
-    // Switch mepc to return to M-mode
-    frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
+    // Confirm whether we are a synchronous or scheduled based on presence of PerCpu.kernel_resume_sp
+    if percpu::kernel_resume_sp() != 0 {
+        #[cfg(all(test, feature = "test-user"))]
+        // Store the exit reason in percpu for testing purposes only
+        percpu::set_user_exit_reason(reason);
+        // Set mstatus to reenable interrupts on return
+        frame.mstatus |= mstatus::MPP;
+        frame.mstatus |= mstatus::MPIE;
+        // Switch mepc to return to M-mode
+        frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
+    } else {
+        // Set up frame for user exit trampoline
+        frame.a0 = reason as usize;
+        frame.mepc = usermode::user_thread_exit as *const () as usize;
+        frame.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+        frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
+    }
 }
 
 #[inline(never)]
@@ -168,6 +186,12 @@ fn handle_unknown_interrupt(code: usize) {
 fn handle_exception(code: usize) {
     match code {
         ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
+        LOAD_ACCESS_FAULT => panic!(
+            "Load access fault {} (=mcause) attempting to load address {:x} (=mtval) from instruction {:x} (=mepc)",
+            code,
+            mtval::read(),
+            mepc::read()
+        ),
         _ => panic!(
             "Unknown exception code {:x} mepc {:x} mtval {:x}",
             code,

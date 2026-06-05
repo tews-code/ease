@@ -39,7 +39,7 @@
 // rebuilt. Real RP2350 hardware will have prompt interrupt delivery
 // and the bounds can be tightened then.
 
-use crate::kernel::sched::{Order, Qos};
+use crate::kernel::sched::{ExitReason, Order, Qos};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Counter the partner thread bumps each iteration. We only assert it
@@ -74,7 +74,7 @@ fn exit_runs_and_recycles_slot() {
     static DONE: AtomicUsize = AtomicUsize::new(0);
     fn marker_then_exit() {
         DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
@@ -163,7 +163,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
         crate::kernel::sched::sleep_with_leeway(5, 1000);
         // Exit cleanly so the slot is recycled and we don't leave a
         // ghost thread disturbing later tests' scheduling.
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
     ensure_partner_spawned();
     if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -204,7 +204,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
         // u64::MAX in both args — exercises every saturating site on the
         // path from public API to the Deadline struct.
         crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
     ensure_partner_spawned();
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -269,7 +269,7 @@ fn fair_stride_resists_wake_spammer() {
             }
             crate::kernel::sched::sleep(1);
         }
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     fn t3_hog() {
@@ -278,7 +278,7 @@ fn fair_stride_resists_wake_spammer() {
                 T3_HOG_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -336,7 +336,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
     fn t4_low_neighbor() {
         // Qos::Low + long sleep gives a wide leeway window.
         crate::kernel::sched::sleep(200);
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     fn t4_high_measurer() {
@@ -345,7 +345,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
         let elapsed = crate::kernel::timer::elapsed_ms() - start;
         MEASURER_ELAPSED.store(elapsed as usize, Ordering::Relaxed);
         MEASURER_DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     ensure_partner_spawned();
@@ -1610,7 +1610,7 @@ fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
                 HOG_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -1674,7 +1674,7 @@ fn forced_preempt_preserves_computation() {
         }
         RESULT.store(acc as usize, Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     fn peer() {
@@ -1685,7 +1685,7 @@ fn forced_preempt_preserves_computation() {
                 PEER_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit()
+        crate::kernel::sched::exit(ExitReason::Exit)
     }
 
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -1756,4 +1756,86 @@ fn sched_benchmarks() {
     println!();
     println!("===================== ");
     println!();
+}
+
+// =====================================================================
+// User process lifecycle
+//
+// These run real U-mode threads through the scheduler (not the
+// synchronous excursion path in arch/usermode.rs). `user_test` issues
+// the EXIT ecall immediately, so each spawned thread dies through
+// exit_from_user -> user_thread_exit -> PostSwitch::Dead, exercising
+// release_process_thread on the way out.
+//
+// Liveness is observed through the public API only: spawn_user against
+// a handle returns None once the process is gone (slot empty or pid
+// mismatch), so "poll until None" is "wait for the process to die".
+// Polling bounds are loose for QEMU timer jitter (see header note).
+// =====================================================================
+
+// A process whose threads all exit must release its PCB slot.
+#[test_case]
+fn user_process_exits_and_releases_slot() {
+    let handle = crate::kernel::sched::spawn_process("t-reap", crate::user::user_test)
+        .expect("process spawn should succeed");
+    // Each poll that lands while the process is still alive adds one
+    // more immediately-exiting thread — harmless, and the count stays
+    // far below THREADS_PER_PROC_MAX because they die within a slice.
+    let mut released = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            released = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        released,
+        "process slot was never released after its threads exited"
+    );
+}
+
+// A recycled slot gets a fresh pid, and the old handle is refused even
+// if its slot has been reoccupied (ABA protection).
+#[test_case]
+fn process_slot_recycle_rejects_stale_handle() {
+    let first = crate::kernel::sched::spawn_process("t-stale-a", crate::user::user_test)
+        .expect("first process spawn should succeed");
+    let mut released = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&first, crate::user::user_test).is_none() {
+            released = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(released, "first process never released");
+
+    // Recycle the slot. The new process must carry a distinct pid even
+    // if it lands in the same array index.
+    let second = crate::kernel::sched::spawn_process("t-stale-b", crate::user::user_test)
+        .expect("second process spawn should succeed");
+    assert!(
+        second.pid != first.pid,
+        "recycled process slot must get a fresh pid"
+    );
+
+    // The stale handle must be rejected whether its old slot is now
+    // empty or holds the second process.
+    assert!(
+        crate::kernel::sched::spawn_user(&first, crate::user::user_test).is_none(),
+        "stale process handle must be rejected"
+    );
+
+    // Drain: wait for the second process to die too, so its teardown
+    // doesn't inject scheduling noise into the next test.
+    let mut drained = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&second, crate::user::user_test).is_none() {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(drained, "second process never released");
 }

@@ -17,6 +17,7 @@ pub(crate) struct ProcessHandle {
     pub(super) idx: usize,
 }
 
+#[allow(dead_code)]
 pub(super) struct ProcessControlBlock {
     pub(super) pid: u32,
     name: &'static str,

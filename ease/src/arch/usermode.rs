@@ -2,7 +2,9 @@
 
 use core::arch::naked_asm;
 
-use crate::{arch::csr::mstatus, kernel::sched::post_switch_cleanup};
+use crate::arch::csr::mstatus;
+use crate::kernel::sched::{self, post_switch_cleanup};
+use crate::sched::ExitReason;
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -53,11 +55,21 @@ pub(crate) extern "C" fn user_entry(entry: extern "C" fn()) {
     );
 }
 
+// Entered via trap return from exit_from_user; a0 carries the ExitReason discriminant
+pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
+    let exit_reason = match reason {
+        0 => ExitReason::Exit,
+        1 => ExitReason::Fault,
+        _ => panic!("unknown user thread exit reason"),
+    };
+    sched::exit(exit_reason);
+}
+
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub(crate) extern "C" fn resume_kernel() {
     naked_asm!(
-        "call {kernel_resume_sp}",
+        "call {take_kernel_resume_sp}",
         "mv sp, a0",
         // Restore callee-saved registers
         "lw ra,  4 *  0(sp)",
@@ -76,7 +88,7 @@ pub(crate) extern "C" fn resume_kernel() {
 
         "addi sp, sp, 4 * 16",
         "ret",
-        kernel_resume_sp = sym crate::kernel::percpu::kernel_resume_sp,
+        take_kernel_resume_sp = sym crate::kernel::percpu::take_kernel_resume_sp,
     );
 }
 
@@ -145,7 +157,8 @@ pub extern "C" fn user_first_run() -> ! {
 #[cfg(all(test, feature = "test-user"))]
 mod test {
     use super::user_entry;
-    use crate::kernel::percpu::{ExitReason, user_exit_reason};
+    use crate::kernel::percpu::user_exit_reason;
+    use crate::kernel::sched::ExitReason;
     use crate::user::{user_fault_test, user_return_test, user_test};
 
     // These tests drive `user_entry` synchronously rather than going through

@@ -23,6 +23,7 @@ pub(crate) enum Backing {
     Fixed { base: usize },
 }
 
+#[allow(dead_code)]
 #[repr(u8)]
 #[derive(Clone, Copy)]
 pub(crate) enum Role {
@@ -121,6 +122,7 @@ impl UserMemMap {
         pmp
     }
 
+    #[allow(dead_code)]
     fn clear_region(&mut self, role: Role) {
         self.map[role.addr_slot()] = None; // Triggers Drop on MemRegion which deallocs for heap-based regions
     }

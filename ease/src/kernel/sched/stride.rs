@@ -13,8 +13,8 @@ use crate::arch::{cpu_id, csr};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
 use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
-use crate::kernel::sched::stack;
 use crate::kernel::sched::usermemmap::UserMemMap;
+use crate::kernel::sched::{ExitReason, stack};
 use crate::kernel::sched::{MemRegion, STACK_CANARY};
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
@@ -439,7 +439,8 @@ impl Scheduler {
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
-                State::Switching(PostSwitch::Dead) => {
+                State::Switching(PostSwitch::Dead(_r)) => {
+                    // Not using exit reason until fault-kill policy lands
                     // Handle a user process
                     if let Some(user_context) = &threads.thread_blocks[switched_from_idx].user {
                         let process_idx = user_context.process_idx;
@@ -853,8 +854,8 @@ impl Scheduler {
         self.run_cycles[tcb_idx].get()
     }
 
-    pub(super) fn exit(&self) -> ! {
-        self.reschedule(None, PostSwitch::Dead);
+    pub(super) fn exit(&self, reason: ExitReason) -> ! {
+        self.reschedule(None, PostSwitch::Dead(reason));
         // reschedule switches away. If we get here, no other thread was
         // available to switch to, which means this thread is the only one
         // alive on this hart and we can't actually die. Panic — it's a
@@ -983,5 +984,5 @@ fn next_thread_id() -> u32 {
 extern "C" fn run_closure_thread<F: FnOnce() + Send + 'static>(entry_ptr: *mut u8) -> ! {
     let e = unsafe { Box::from_raw(entry_ptr as *mut F) };
     e(); // runs the closure exactly once and consumes both the closure and the Box.
-    SCHEDULER.exit()
+    SCHEDULER.exit(ExitReason::Exit)
 }
