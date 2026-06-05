@@ -66,6 +66,7 @@ pub(super) struct ThreadControlBlock {
     pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
     pub(super) affinity: Option<u8>,              // Affinity to a particular HART
     pub(super) user: Option<UserContext>, // If is Some then this TCB is supporting a user thread
+    pub(super) marked_for_exit: bool, // If set then thread will be forced to exit on next schedule
 }
 
 pub(super) struct ThreadsInner {

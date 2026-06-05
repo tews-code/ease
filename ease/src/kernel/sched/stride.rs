@@ -91,6 +91,7 @@ impl ThreadControlBlock {
             next_waiter: None,
             affinity: None,
             user: None,
+            marked_for_exit: false,
         }
     }
 
@@ -439,17 +440,49 @@ impl Scheduler {
                 State::Switching(PostSwitch::Sleeping(d)) => State::Sleeping(d),
                 State::Switching(PostSwitch::Blocked) => State::Blocked,
                 State::Switching(PostSwitch::BlockedUntil(d)) => State::BlockedUntil(d),
-                State::Switching(PostSwitch::Dead(_r)) => {
-                    // Not using exit reason until fault-kill policy lands
+                State::Switching(PostSwitch::Dead(r)) => {
                     // Handle a user process
                     if let Some(user_context) = &threads.thread_blocks[switched_from_idx].user {
                         let process_idx = user_context.process_idx;
-                        // Release the user thread; this will also release the process if last thread
                         threads.release_process_thread(process_idx);
+                        // Find all threads in this process if faulted and exit them too
+                        // If the exit reason is a fault, exit the other threads in this process too
+                        if r == ExitReason::Fault {
+                            for idx in 0..threads.thread_blocks.len() {
+                                if idx == switched_from_idx {
+                                    continue;
+                                }
+                                if let Some(user_context) = &threads.thread_blocks[idx].user
+                                    && user_context.process_idx == process_idx
+                                {
+                                    match threads.thread_blocks[idx].state {
+                                        State::Avail => {
+                                            panic!("thread Avail but has user context")
+                                        }
+                                        State::Blocked | State::BlockedUntil(_) => {
+                                            panic!("don't yet support user threads that block")
+                                        }
+                                        State::Ready | State::Sleeping(_) => {
+                                            threads.release_process_thread(process_idx);
+                                            // Release the thread resources
+                                            threads.thread_blocks[idx] = ThreadControlBlock::new();
+                                        }
+                                        State::Switching(_) => {
+                                            threads.thread_blocks[idx].state = State::Switching(
+                                                PostSwitch::Dead(ExitReason::Fault),
+                                            );
+                                        }
+                                        State::Running => {
+                                            threads.thread_blocks[idx].marked_for_exit = true;
+                                            // IPI is an MMIO write safe under lock
+                                            crate::kernel::ipi::send(cpu_id() ^ 1);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
-                    // Release the thread resources
                     threads.thread_blocks[switched_from_idx] = ThreadControlBlock::new();
-                    // Mark TCB slot available for use
                     State::Avail
                 }
                 _ => panic!("Post switch but not in switching state"),
@@ -706,8 +739,12 @@ impl Scheduler {
                 return;
             };
             // Ready to switch
-            // Set current thread to the new state
-            curr.state = State::Switching(new_state);
+            // Set current thread to the new state, unless it is marked for exit
+            curr.state = if curr.marked_for_exit {
+                State::Switching(PostSwitch::Dead(ExitReason::Fault))
+            } else {
+                State::Switching(new_state)
+            };
             // Safety: Only writing to current within locked threads array - single writer
             let now_cycles = timer::elapsed();
             let ran = now_cycles - curr.last_started_cycles;
@@ -767,6 +804,13 @@ impl Scheduler {
             curr.stride(ran);
         }
 
+        // If thread is marked for exit skip looking for fairer thread
+        if threads.thread_blocks[curr_idx].marked_for_exit {
+            threads.set_next_timer(earliest_deadline, ready_count);
+            percpu::set_needs_reschedule();
+            return;
+        }
+
         let Some((_curr, _curr_idx, _next, _next_idx)) = threads.pick_next_if_fairer_mut() else {
             // Same thread is running uncontended, increase slice deadline
             threads.set_next_timer(earliest_deadline, ready_count);
@@ -785,11 +829,18 @@ impl Scheduler {
             with_interrupts_disabled(|_cs| {
                 let mut threads = self.threads.lock();
                 threads.check_curr_canary();
+
+                // Check if thread is marked for exit
+                let marked_for_exit = threads.thread_blocks[percpu::current_thread_idx()].marked_for_exit;
+                if marked_for_exit {
+                    drop(threads);
+                    self.exit(ExitReason::Fault);
+                }
+
                 let pick = threads.pick_next_if_fairer_mut();
                 let Some((curr, curr_idx, next, next_idx)) = pick else {
                     return;
                 };
-
                 // Perform switch
                 curr.state = State::Switching(PostSwitch::Ready);
                 next.state = State::Running;

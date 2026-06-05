@@ -1839,3 +1839,33 @@ fn process_slot_recycle_rejects_stale_handle() {
     }
     assert!(drained, "second process never released");
 }
+
+// A PMP fault in any thread kills the whole process: the spinning
+// sibling can never exit voluntarily, so the handle going stale proves
+// the kill reached it. Spawn order matters for determinism: the
+// immortal spinner is the FIRST thread (keeping the process alive
+// through the second spawn), the faulter joins after.
+//
+// Depending on timing the spinner is Ready or Running-on-the-other-hart
+// when the sweep runs, so this exercises both the direct-reap and the
+// doom+IPI paths across runs.
+#[test_case]
+fn fault_kills_whole_process() {
+    let handle = crate::kernel::sched::spawn_process("t-fault", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "process with spinning sibling was never killed after fault"
+    );
+}

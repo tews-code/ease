@@ -44,6 +44,31 @@ pub extern "C" fn user_test() {
     }
 }
 
+/// Takes a PMP access fault immediately: no user region covers low
+/// memory, so the load traps. Used by the fault-kills-process test.
+/// (Reads address 4 rather than 0 so we exercise an ordinary unmapped
+/// access, not anything null-pointer-special.)
+#[allow(dead_code)]
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_fault_now() {
+    unsafe {
+        core::ptr::read_volatile(4 as *const u32);
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Spins forever and never exits — only dies if the kernel kills it.
+/// Used to prove fault-kill reaches sibling threads.
+#[allow(dead_code)]
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_spin_forever() {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 unsafe extern "C" {
     static __user_text_start: u8;
 }
