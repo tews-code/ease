@@ -46,7 +46,6 @@
 //   Addresses are in a heirarchy, with the lower address number taking precendence over higher
 //   address numbers. Nesting is allowed.
 
-use crate::arch::cpu_id;
 use crate::arch::csr::pmp;
 use crate::board::{self, PMP_ADDR_COUNT};
 
@@ -194,7 +193,7 @@ unsafe extern "C" {
 ///
 /// Note on QEMU these are already caught as 0x0 is not mapped.
 /// On RP2350 this is the boot ROM
-pub(crate) fn protect_null_ptr_deref() {
+pub(crate) extern "C" fn protect_null_ptr_deref() {
     let mut pmp = Pmp::new();
     pmp.set_region(0, 0, 4096, pmp::NAPOT, 0); // Set a 4096 size region to no access starting at address 0
     pmp.set_lock(0);
@@ -208,23 +207,12 @@ pub(crate) fn protect_null_ptr_deref() {
 ///
 /// Safety: Caller must call this function _after_ .text has been copied from flash, but
 /// _before_ any U-mode PMP.
-pub(crate) fn protect_sram_text() {
+pub(crate) extern "C" fn protect_sram_text(sram_text_start: usize, sram_text_end: usize) {
     let mut pmp = Pmp::new();
-    let (base_sram_text, size_sram_text) = match cpu_id() {
-        0 => (
-            &raw const __sram8_text_start as usize,
-            &raw const __sram8_text_end as usize - &raw const __sram8_text_start as usize,
-        ),
-        1 => (
-            &raw const __sram9_text_start as usize,
-            &raw const __sram9_text_end as usize - &raw const __sram9_text_start as usize,
-        ),
-        _ => panic!("Only support 2 HARTs"),
-    };
     pmp.set_region(
         1,
-        base_sram_text,
-        size_sram_text,
+        sram_text_start,
+        sram_text_end - sram_text_start,
         pmp::NAPOT,
         pmp::R | pmp::X,
     );

@@ -1,10 +1,15 @@
 //! Scheduler
 
+#[cfg(all(test, feature = "bench"))]
+mod bench;
 mod process;
-pub(crate) mod stack;
 mod stride;
+#[cfg(all(test, any(feature = "test-sched", feature = "bench")))]
+mod test_support;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
+#[cfg(feature = "trace")]
+pub mod trace;
 mod types;
 pub(crate) mod usermemmap;
 
@@ -19,14 +24,8 @@ pub use types::THREADS_MAX;
 
 #[allow(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
-pub use types::{ExitReason, Qos, ThreadHandle};
-
-/// Sentinel placed at the bottom word of each thread's stack.
-/// Checked by the scheduler / panic path to detect stack overflow.
-pub const STACK_CANARY: usize = 0xDEAD_BEEF;
-
-/// Stack paint pattern
-pub const STACK_PAINT_PATTERN: usize = 0x5A5A5A5A;
+#[allow(unused_imports)]
+pub(crate) use types::{ExitReason, Qos, State, ThreadHandle};
 
 #[must_use = "Builder must be terminated with .spawn() to actually create a thread"]
 pub struct Builder {

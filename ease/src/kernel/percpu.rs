@@ -6,7 +6,7 @@ use crate::sched::THREADS_MAX;
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-#[repr(C, align(8))]
+#[repr(C)]
 #[allow(dead_code)]
 struct PerCpu {
     idle_thread_idx: UnsafeCell<u8>,

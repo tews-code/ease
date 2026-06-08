@@ -144,6 +144,9 @@ pub extern "C" fn user_first_run() -> ! {
         // Swap kernel sp with mscratch (user sp)
         "csrrw sp, mscratch, sp",
 
+        // Ensure .text is ready for execution
+        "fence.i",
+
         "mret",
         post_switch_cleanup = sym post_switch_cleanup,
         num_slots = const crate::arch::trap::NUM_SLOTS,

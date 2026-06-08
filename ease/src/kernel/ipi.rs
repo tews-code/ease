@@ -1,4 +1,4 @@
-//! Inter process interrupts
+//! Inter processor interrupts
 
 use crate::arch::csr::mie;
 use crate::drivers::clint::with_clint;

@@ -8,14 +8,14 @@ use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock};
 pub const THREADS_MAX: usize = 32;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(super) struct Deadline {
+pub(crate) struct Deadline {
     pub(super) min: u64,
     pub(super) fixed_leeway: Option<u64>, // None - use system default leeway
 }
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub enum ExitReason {
+pub(crate) enum ExitReason {
     Exit,
     Fault,
 }
@@ -23,7 +23,7 @@ const _: () = assert!(ExitReason::Exit as u8 == 0);
 const _: () = assert!(ExitReason::Fault as u8 == 1);
 
 #[derive(PartialEq, Debug)]
-pub(super) enum PostSwitch {
+pub(crate) enum PostSwitch {
     Blocked,
     BlockedUntil(Deadline),
     Ready,
@@ -32,7 +32,7 @@ pub(super) enum PostSwitch {
 }
 
 #[derive(PartialEq, Debug)]
-pub(super) enum State {
+pub(crate) enum State {
     Avail,
     Blocked,
     BlockedUntil(Deadline),

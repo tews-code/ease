@@ -15,6 +15,10 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             | .rodata / .srodata |
  *             | .data / .sdata     |   LMA for .data
  * 0x2100_0000 +--------------------+
+ *             :                    :
+ *             :    (unused gap)    :   QEMU virt requires 32MB but this is unused
+ *             :                    :
+ * 0x2200_0000 +--------------------+
  *
  * 0x8000_0000 +--------------------+   Represents RP2350 256KiB SRAM0-3 - Power Domain 0
  *             | user heap -->      |
@@ -25,27 +29,29 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             | .bss / .sbss       |
  *             |  buffers           |
  *             +--------------------+
- *             |  idle stack hart0  |   2KB
+ *             |  idle stack hart0  |   2KB; doubles as boot stack
  *             +--------------------+
- *             |  idle stack hart1  |   2KB
+ *             |  idle stack hart1  |   2KB; doubles as boot stack
  *             +--------------------+
  *             |    -- 128KB --     |
  *             | kernel heap -->    |   128KB and grows up
  *             |                    |
  *             |                    |
- * 0x8008_0000 +--------------------+   Also in Power Domain 1
- *             |SRAM8: HART0 scratch|   Split into text, IRQ stack, per-cpu data
- * 0x80081000  +--------------------+   Also in Power Domain 1
- *             |SRAM9: HART1 scratch|   Split into text, IRQ stack, per-cpu data
+ * 0x8008_0000 +--------------------+
+ *             |SRAM8: HART0 scratch|   Also in Power Domain 1
+ * 0x80081000  +--------------------+
+ *             |SRAM9: HART1 scratch|   Also in Power Domain 1
  * 0x80082000  +--------------------+   End of declared SRAM (520KiB)
  *             :                    :
- *             :   (unused gap)     :   Backed by QEMU RAM, but unused
+ *             :   (unused gap)     :   Backed by QEMU RAM, but unused (QEMU virt only supports one RAM region)
  *             :                    :
  * 0x81000000  +--------------------+   Represents Adafruit Metro PSRAM (8MB)
  *             |  PSRAM heap ->     |
  *             |    (4MB)           |
  *             +--------------------+   End of heap
- *             | .user_text (4KB)   |   Must be NAPOT for PMP
+ *             | .user_text (4KB)   |   Temporary for user processes set at compile time; Must be NAPOT for PMP
+ *             +--------------------+
+ *             | .user_data/bss(4KB)|   Temporary for user processes set at compile time; Must be NAPOT for PMP
  *             +--------------------+
  *             |  buffers           |
  *             +--------------------+
@@ -56,8 +62,8 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *  Scratch RAM is split into
  *
  *             +--------------------+
- *             |   .text    ~2KB+   |   .text is switch_to, preempt trampoline, mark_for_preempt
- *             +--------------------+
+ *             |   .text      2KB   |   .text is switch_to, preempt trampoline, mark_for_preempt
+ *             +--------------------+   It is NAPOT 2KB to allow PMP M-mode to protect from writes
  *             |   IRQ stack 1.5KB  |
  *             +--------------------+
  *             |    per cpu ~64B    |
@@ -77,16 +83,16 @@ __idle_stack_size       = 2K;
 __irq_stack_size        = 1K + 512;
 __scratch_ram_text_size = 2K;
 __kernel_heap_size      = 128K;
-__user_text_size        = 4K;
-__user_data_size        = 2K;
-__user_bss_size         = 2K;
+__user_text_size        = 4K;   /* Temporary while user processes are compiled with the kernel */
+__user_data_size        = 2K;   /* Temporary while user processes are compiled with the kernel */
+__user_bss_size         = 2K;   /* Temporary while user processes are compiled with the kernel */
 __user_heap_sram_size   = 256K;
 __user_heap_psram_size  = 4M;
-__fb_width = 640; __fb_height = 480; __fb_bpp = 4; /* 640  x 480 x 4 bytes = 1.2MiB */
+__fb_width = 640; __fb_height = 480; __fb_bytes_pp = 4; /* 640  x 480 x 4 bytes = ~1.2MiB */
 
 __sram_pd1_end  = ORIGIN(SRAM_PD1) + LENGTH(SRAM_PD1);
 __psram_end     = ORIGIN(PSRAM) + LENGTH(PSRAM);
-__fb_size       = __fb_width * __fb_height * __fb_bpp;
+__fb_size       = __fb_width * __fb_height * __fb_bytes_pp;
 __fb_addr       = __psram_end - __fb_size;
 
 SECTIONS {
@@ -172,9 +178,10 @@ SECTIONS {
         __hart0_irq_stack_top = .;
     } > SRAM8
 
-    .sram8_percpu (NOLOAD) : ALIGN(8) {
+    .sram8_percpu (NOLOAD) : ALIGN(4) {
         __hart0_percpu_start = .;
         *(.sram8_percpu .sram8_percpu.*)
+        . = ALIGN(4);   /* Zero region in boot assembly requires 4 byte alignment */
         __hart0_percpu_end = .;
     } > SRAM8
 
@@ -195,9 +202,10 @@ SECTIONS {
         __hart1_irq_stack_top = .;
     } > SRAM9
 
-    .sram9_percpu (NOLOAD) : ALIGN(8) {
+    .sram9_percpu (NOLOAD) : ALIGN(4) {
         __hart1_percpu_start = .;
         *(.sram9_percpu .sram9_percpu.*)
+        . = ALIGN(4);   /* Zero region in boot assembly requires 4 byte alignment */
         __hart1_percpu_end = .;
     } > SRAM9
 
@@ -217,7 +225,8 @@ SECTIONS {
         *(.user_text .user_text.*)
         . = __user_text_start + __user_text_size;
         __user_text_end = .;
-    } > PSRAM
+    } > PSRAM AT > FLASH
+    __user_text_lma = LOADADDR(.user_text);
 
     /* Temporarily put all user threads .data and .bss in 4KB window in PSRAM */
     .user_data : ALIGN(4K) {
@@ -245,7 +254,7 @@ SECTIONS {
     } > PSRAM
 
     /* Framebuffer */
-    .framebuffer __fb_addr (NOLOAD) : ALIGN(4) {
+    .framebuffer __fb_addr (NOLOAD) : {
         *(.fb_buf .fb_buf.*)
     } > PSRAM
 
@@ -253,11 +262,12 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.eh_frame_hdr) *(.eh_frame)} /* Discard comment strings to keep binary small */
 }
 
-ASSERT(__pd1_buf_end <= __hart0_idle_stack_base, "PD1 .data .bss and buffers overflow into HART0 idle stack")
-ASSERT(__hart1_idle_stack_top <= __heap_pd1_start, "Idle stack overflows into kernel heap")
+ASSERT(__scratch_ram_text_size % 4  == 0, "scratch text size must be word-multiple (copy_region)")
+ASSERT(__irq_stack_size        % 16 == 0, "irq stack size must be 16-multiple (paint + ABI sp)")
+ASSERT(__idle_stack_size       % 16 == 0, "idle stack size must be 16-multiple (paint + ABI sp)")
 ASSERT(__heap_pd1_end == __sram_pd1_end, "kernel heap doesn't end at SRAM_PD1 boundary")
 ASSERT(__hart0_percpu_end <= ORIGIN(SRAM8) + LENGTH(SRAM8), "SRAM8 overflow")
 ASSERT(__hart1_percpu_end <= ORIGIN(SRAM9) + LENGTH(SRAM9), "SRAM9 overflow")
-ASSERT(__psram_buf_end <= __fb_addr, "psram_buf overflows in the framebuffer")
+ASSERT(__psram_buf_end <= __fb_addr, "psram_buf overflows into the framebuffer")
 ASSERT(__fb_addr >= ORIGIN(PSRAM), "framebuffer below PSRAM")
 ASSERT(__fb_addr + __fb_size <= ORIGIN(PSRAM) + LENGTH(PSRAM), "framebuffer exceeds PSRAM")

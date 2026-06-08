@@ -367,7 +367,7 @@ mod test {
     }
 }
 
-#[cfg(all(test, feature = "test-virtio", feature = "test-bench"))]
+#[cfg(all(test, feature = "bench"))]
 mod baselines {
     // Measured on QEMU virt, set with wide margin for variance
     //   READ_BLOCK:       200,000  (measured ~49,000)
@@ -378,7 +378,7 @@ mod baselines {
     pub const WRITE_READ_BLOCK: u64 = 4_000_000;
 }
 
-#[cfg(all(test, feature = "test-virtio", feature = "test-bench"))]
+#[cfg(all(test, feature = "bench"))]
 mod benchmarks {
     use super::baselines;
     use super::*;

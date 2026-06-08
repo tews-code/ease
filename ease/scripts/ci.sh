@@ -72,9 +72,21 @@ cargo test --bin ease --no-default-features --features "$FEATURES"
 
 if [ $FOCUSED -eq 1 ]; then
     echo ""
-    echo "✓ Focused checks passed (host tests, miri, docs skipped)"
+    echo "✓ Focused checks passed (host tests, miri, docs, benchmarks skipped)"
     exit 0
 fi
+
+echo ""
+echo "=== QEMU Benchmarks ==="
+# `bench` is the SOLE gate for benchmark #[test_case]s (not ANDed with
+# any area feature), so this compiles and runs ONLY the benchmarks — not
+# the functional suite — so it doesn't re-run (or re-mutate) the FS
+# tests. Regression gates assert on per-thread cpu cycles (src/bench.rs),
+# which hold steady under QEMU wall-clock variance. Fresh disk because
+# the virtio benchmark writes blocks.
+# Focused benchmark iteration: ./scripts/ci.sh --test=bench
+./scripts/mkdisk.sh
+cargo test --bin ease --no-default-features --features "bench"
 
 echo ""
 echo "=== Host Tests ==="

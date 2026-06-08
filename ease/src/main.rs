@@ -108,8 +108,7 @@ fn kernel_init() {
     });
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn secondary_main() {
+extern "C" fn secondary_main() -> ! {
     // Spin on initialisation completion
     while !INIT_COMPLETE.load(Ordering::Acquire) {
         core::hint::spin_loop();
@@ -120,7 +119,6 @@ extern "C" fn secondary_main() {
 }
 
 #[cfg(test)]
-#[unsafe(no_mangle)]
 extern "C" fn main() -> ! {
     use crate::kernel::alloc::Order;
 
@@ -149,7 +147,7 @@ fn test_runner_thread() {
 }
 
 #[cfg(not(test))]
-#[unsafe(no_mangle)]
+#[allow(dead_code)]
 extern "C" fn main() -> ! {
     kernel_init();
 
@@ -210,7 +208,7 @@ fn test_runner(tests: &[&dyn Testable]) {
                 static __hart0_irq_stack_top: u8;
             }
 
-            use crate::kernel::sched::stack::stack_high_watermark;
+            use crate::kernel::stack::stack_high_watermark;
             let start_addr = &raw const __hart0_irq_stack_base as usize;
             let end_addr = &raw const __hart0_irq_stack_top as usize;
             println!("==== IRQ Stack High Watermark Check ====");
@@ -228,7 +226,7 @@ fn test_runner(tests: &[&dyn Testable]) {
                 static __hart0_idle_stack_base: u8;
                 static __hart0_idle_stack_top: u8;
             }
-            use crate::kernel::sched::stack::stack_high_watermark;
+            use crate::kernel::stack::stack_high_watermark;
             let start_addr = &raw const __hart0_idle_stack_base as usize;
             let end_addr = &raw const __hart0_idle_stack_top as usize;
             let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");

@@ -12,6 +12,7 @@ pub mod panic;
 pub mod percpu;
 pub mod profile;
 pub mod sched;
+pub mod stack;
 pub mod sync;
 pub mod timer;
 pub mod trap;

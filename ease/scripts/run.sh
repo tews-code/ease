@@ -11,13 +11,30 @@ CRATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$1"
 FLASH_BIN="$(dirname "$ELF")/flash.bin"
 
+# Display policy: test binaries (cargo test builds them under deps/) run
+# headless — the GUI repaint path costs >50% of QEMU's CPU and distorts
+# the timing tests (see project notes, 2026-06-05 investigation).
+# Interactive `cargo run` gets a window. Override with EASE_DISPLAY=none
+# or EASE_DISPLAY=<backend>. Keep the window unscaled (1:1) — bilinear
+# scaling is the slow path.
+case "${EASE_DISPLAY:-auto}" in
+    auto) case "$ELF" in
+              */deps/*) DISPLAY_ARG="-display none" ;;
+              *)        DISPLAY_ARG="" ;;
+          esac ;;
+    none) DISPLAY_ARG="-display none" ;;
+    *)    DISPLAY_ARG="-display ${EASE_DISPLAY}" ;;
+esac
+
+# We pad to 0x22000000 because QEMU virt requires 32MB
 rust-objcopy -O binary \
-    --only-section=.text --only-section=.rodata \
-    --pad-to=0x22000000 --gap-fill=0xff \
+    --pad-to=0x22000000 \
+    --gap-fill=0xff \
     "$ELF" "$FLASH_BIN"
 
 #Start QEMU
-$QEMU -machine virt -bios none -device ramfb -serial stdio \
+# QEMU virt requires 32MB even though we model 16MB
+$QEMU -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
     -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
     -drive if=pflash,unit=0,format=raw,file="$FLASH_BIN",readonly=on \

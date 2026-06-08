@@ -42,26 +42,9 @@
 use crate::kernel::sched::{ExitReason, Order, Qos};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Counter the partner thread bumps each iteration. We only assert it
-/// INCREASES during a test, so the absolute value across tests is fine.
-static PARTNER_COUNT: AtomicUsize = AtomicUsize::new(0);
-/// Set to 1 once the partner has been spawned; ensure-once across tests.
-static PARTNER_SPAWNED: AtomicUsize = AtomicUsize::new(0);
-
-fn partner_thread() {
-    loop {
-        PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
-        crate::kernel::sched::yield_now();
-    }
-}
-
-fn ensure_partner_spawned() {
-    if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
-        crate::kernel::sched::Builder::new()
-            .with_stack_class(Order::KB2)
-            .spawn(partner_thread);
-    }
-}
+// The partner thread and its progress counter (PARTNER_COUNT) live in
+// `test_support`, shared with the benchmark suite.
+use super::test_support::{PARTNER_COUNT, ensure_partner_spawned};
 
 /// Verify that `exit()` actually runs the dying-thread's last
 /// instructions, then cleans up its TCB slot so it can be reused.
@@ -1727,36 +1710,8 @@ fn forced_preempt_preserves_computation() {
     );
 }
 
-/// Benchmark: average yield_now round-trip cycles. No assertion.
-/// Reports cpu (this thread only) and wall (includes partner thread).
-#[cfg(feature = "test-bench")]
-#[test_case]
-fn sched_benchmarks() {
-    use crate::bench;
-    use crate::println;
-
-    println!();
-    println!("====== SCHEDULER ====== ");
-    println!();
-
-    ensure_partner_spawned();
-    const N: u32 = 1000;
-    let c = bench::measure(|| {
-        for _ in 0..N {
-            crate::kernel::sched::yield_now();
-        }
-    });
-    println!(
-        "  yield_now round-trip: cpu={} wall={} cycles/call ({} calls)",
-        c.cpu / N as u64,
-        c.wall / N as u64,
-        N
-    );
-
-    println!();
-    println!("===================== ");
-    println!();
-}
+// (The scheduler benchmark moved to `bench.rs`, gated on the `bench`
+// feature so it compiles without the functional sched test set.)
 
 // =====================================================================
 // User process lifecycle

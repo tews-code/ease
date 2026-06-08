@@ -49,7 +49,7 @@ mod bare_metal_alloc {
     /// Returns the address of `__heap_pd1_start` for diagnostics (e.g. computing
     /// heap-used in benchmarks). Only referenced from the `#[cfg(test)]`
     /// allocator benchmarks.
-    #[cfg(all(test, feature = "test-alloc", feature = "test-bench"))]
+    #[cfg(all(test, feature = "bench"))]
     pub(crate) fn heap_start_addr() -> usize {
         &raw const __heap_pd1_start as usize
     }
@@ -131,21 +131,16 @@ fn dealloc_in(_pool: Pool, base: NonNull<u8>, layout: Layout) {
 }
 
 #[cfg(target_os = "none")]
-#[cfg(all(test, feature = "test-alloc", feature = "test-bench"))]
+#[cfg(all(test, feature = "bench"))]
 pub(crate) use bare_metal_alloc::heap_start_addr;
 #[cfg(target_os = "none")]
 #[allow(unused_imports)] // main.rs consumes this but isn't part of the lib check
 pub use bare_metal_alloc::init_global_allocator;
 
-// QEMU benchmark suite for KAlloc. test-bench is opt-in (not part of
-// test-all) so regression benches can be run separately from functional
-// tests.
-#[cfg(all(
-    test,
-    target_os = "none",
-    feature = "test-alloc",
-    feature = "test-bench",
-))]
+// QEMU benchmark suite for KAlloc. The `bench` feature is opt-in (not
+// part of test-all) so regression benches run separately from functional
+// tests via `cargo test --features bench`.
+#[cfg(all(test, target_os = "none", feature = "bench"))]
 mod bench;
 
 // `init_global_allocator()` is called from main.rs during early boot.

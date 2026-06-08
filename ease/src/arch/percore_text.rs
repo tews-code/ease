@@ -26,7 +26,7 @@ macro_rules! per_hart_trap_vector {
             concat!(
                 ".section ", $section0, ", \"ax\"\n",
                 ".global ", stringify!($name0),"\n",
-                ".align 4\n",
+                ".balign 4\n",
                 stringify!($name0),":\n",
                 $body,
             ),
@@ -39,7 +39,7 @@ macro_rules! per_hart_trap_vector {
             concat!(
                 ".section ", $section1, ", \"ax\"\n",
                 ".global ", stringify!($name1),"\n",
-                ".align 4\n",
+                ".balign 4\n",
                 stringify!($name1),":\n",
                 $body,
             ),

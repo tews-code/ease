@@ -112,7 +112,7 @@ pub mod mhartid {
 // Machine scratch register
 define_csr!(mscratch);
 
-/// Machine exception program counter (mtval)
+/// Machine exception program counter
 pub mod mtval {
     /// Read the mtval CSR.
     pub fn read() -> usize {
@@ -155,6 +155,12 @@ pub mod mstatus {
             core::arch::asm!("csrs mstatus, {}", in(reg) bits);
         }
     }
+}
+
+/// Machine Interrupt Status.
+pub mod mip {
+    /// Machine software interrupt enable bit (bit 3).
+    pub const MSIP: usize = 1 << 3;
 }
 
 /// Main registers

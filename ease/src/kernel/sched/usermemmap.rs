@@ -9,13 +9,18 @@ use crate::kernel::alloc::{MemRegion, Order, Pool};
 
 // For now, put the user .text in the PSRAM buffer area (immediately after the 4MB heap region)
 unsafe extern "C" {
-    static __user_text_start: u8;
-    static __user_data_bss_start: u8;
-    static __user_data_lma: u8;
+    static mut __user_text_start: u8;
+    static __user_text_end: u8;
+    static __user_text_lma: u8;
+
     static mut __user_data_start: u8;
     static __user_data_end: u8;
+    static __user_data_lma: u8;
+
     static mut __user_bss_start: u8;
     static __user_bss_end: u8;
+
+    static __user_data_bss_start: u8;
 }
 
 pub(crate) enum Backing {
@@ -137,6 +142,15 @@ impl UserMemMap {
 }
 
 pub(crate) fn init() {
+    // Copy the user .text from flash to PSRAM
+    // Safety: Linker script sets up symbols to an aligned writeable region
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            &raw const __user_text_lma,
+            &raw mut __user_text_start,
+            &raw const __user_text_end as usize - &raw const __user_text_start as usize,
+        );
+    }
     // Copy the user .data from flash to PSRAM
     // Safety: Linker script sets up symbols to an aligned writeable region
     unsafe {

@@ -4,7 +4,7 @@ use crate::hal::wait_for_interrupt;
 #[cfg(not(test))]
 use crate::kernel::percpu;
 #[cfg(not(test))]
-use crate::kernel::sched::STACK_CANARY;
+use crate::kernel::stack::{canary_is_ok, stack_high_watermark};
 #[cfg(test)]
 use crate::qemu;
 
@@ -103,8 +103,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let stack_ok = if stack_base.is_null() {
             None
         } else {
-            // Safety: current_stack_base is aligned and valid for reading
-            Some(unsafe { core::ptr::read_volatile(stack_base as *const usize) } == STACK_CANARY)
+            match canary_is_ok(stack_base.addr()) {
+                Ok(()) => Some(true),
+                Err(_) => Some(false),
+            }
         };
         use crate::io::DirectWriter;
         use core::fmt::Write;
@@ -125,7 +127,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 static __hart0_irq_stack_top: u8;
             }
             use crate::io::DirectWriter;
-            use crate::kernel::sched::stack::stack_high_watermark;
             use core::fmt::Write;
             let start_addr = &raw const __hart0_irq_stack_base as usize;
             let end_addr = &raw const __hart0_irq_stack_top as usize;
@@ -145,7 +146,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
                 static __hart0_idle_stack_top: u8;
             }
             use crate::io::DirectWriter;
-            use crate::kernel::sched::stack::stack_high_watermark;
             use core::fmt::Write;
             let start_addr = &raw const __hart0_idle_stack_base as usize;
             let end_addr = &raw const __hart0_idle_stack_top as usize;

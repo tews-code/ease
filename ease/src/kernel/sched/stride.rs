@@ -9,13 +9,16 @@ use super::types::{
     Deadline, PostSwitch, Qos, State, THREADS_MAX, ThreadControlBlock, ThreadHandle, ThreadsInner,
     UserContext,
 };
+use crate::arch::context::Context;
+use crate::arch::trap::TrapFrame;
 use crate::arch::{cpu_id, csr};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
 use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
 use crate::kernel::sched::usermemmap::UserMemMap;
-use crate::kernel::sched::{ExitReason, stack};
-use crate::kernel::sched::{MemRegion, STACK_CANARY};
+use crate::kernel::sched::{ExitReason, MemRegion};
+use crate::kernel::stack::STACK_CANARY;
+use crate::kernel::stack::canary_is_ok;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
 
@@ -75,6 +78,91 @@ impl Deadline {
             }
         }
     }
+}
+
+// Forges a thread Context for a kernel thread
+// The thread entry function is stored in s0
+// Returns the stack pointer
+// Safety: stack_base must be class.size()-aligned and point to
+// writeable memory of at least class.size() bytes
+pub unsafe fn init_for_kernel_entry(
+    stack: &mut MemRegion,
+    closure_run: extern "C" fn(*mut u8) -> !,
+    closure_ptr: *mut u8,
+) -> Option<NonNull<u8>> {
+    debug_assert!(
+        stack.size() > core::mem::size_of::<Context>(),
+        "stack memory region too small for context switch"
+    );
+    // Safety: Caller has provided a valid stack base pointer
+    unsafe {
+        core::ptr::write(stack.base().as_ptr() as *mut usize, STACK_CANARY);
+    }
+    let context_ptr = unsafe {
+        stack
+            .base()
+            .as_ptr()
+            .add(stack.size() - core::mem::size_of::<Context>()) as *mut Context
+    };
+    // Safety: context_ptr is derived from stack_base, and
+    // aligned because sizeof(Context) is a multiple of align(Context).
+    unsafe {
+        *context_ptr = Context::init_for_kernel_entry(closure_run, closure_ptr);
+    }
+
+    NonNull::new(context_ptr as *mut u8)
+}
+
+// Forges a thread Context for a user thread
+// Returns the stack pointer
+// Safety:
+// - stack_base must be class.size()-aligned and point to
+// writeable memory of at least class.size() bytes.
+// - user stack top must be the top of a live, U-mode-accessible region
+pub unsafe fn init_for_user_entry(
+    kernel_stack: &mut MemRegion,
+    user_entry: extern "C" fn(),
+    user_stack_top: NonNull<u8>,
+) -> Option<NonNull<u8>> {
+    debug_assert!(
+        kernel_stack.size() > core::mem::size_of::<Context>() + core::mem::size_of::<TrapFrame>(),
+        "kernel stack memory region too small for context switch and trap return"
+    );
+    // Set up a stack canary
+    // Safety: Caller has provided a valid stack base pointer
+    unsafe {
+        core::ptr::write(kernel_stack.base().as_ptr() as *mut usize, STACK_CANARY);
+    }
+    // Safety: trap_frame_ptr is derived from stack_base and aligned
+    unsafe {
+        // Set up a trap frame so trap return arrives in U-mode
+        let trap_frame_ptr = kernel_stack
+            .base()
+            .as_ptr()
+            .add(kernel_stack.size() - core::mem::size_of::<TrapFrame>())
+            as *mut TrapFrame;
+        core::ptr::write_bytes(trap_frame_ptr, 0, 1); // First zero
+        (*trap_frame_ptr).ra = crate::user::user_exit as *const () as usize;
+        (*trap_frame_ptr).mepc = user_entry as usize;
+        (*trap_frame_ptr).mstatus = 0; //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
+        (*trap_frame_ptr).user_sp = user_stack_top.addr().into();
+    }
+
+    // Set up a switch context
+    // Safety: context_ptr is derived from stack_base, and
+    // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
+    let context_ptr = unsafe {
+        kernel_stack.base().as_ptr().add(
+            kernel_stack.size()
+                - core::mem::size_of::<TrapFrame>()
+                - core::mem::size_of::<Context>(),
+        ) as *mut Context
+    };
+    unsafe {
+        *context_ptr = Context::init_for_user_entry();
+    }
+
+    NonNull::new(context_ptr as *mut u8) // Return pointer to the context which is below the trap frame
 }
 
 impl ThreadControlBlock {
@@ -310,22 +398,14 @@ impl ThreadsInner {
         let curr = &self.thread_blocks[percpu::current_thread_idx()];
         let base_addr = match &curr.kernel_stack {
             Some(memregion) => memregion.base_addr(),
-            None =>
-            // Idle thread stack (fixed by linker script)
-            {
-                &raw const __hart0_idle_stack_base as usize
-            }
+            None => &raw const __hart0_idle_stack_base as usize, // Idle thread stack (fixed by linker script)
         };
-        let val = unsafe { core::ptr::read(base_addr as *const usize) };
-        assert!(
-            val == STACK_CANARY,
-            "kernel stack canary corrupted in thread {}: sp={:?}, base={}, read={:#x}, expected={:#x}",
-            curr.id,
-            curr.sp,
-            base_addr,
-            val,
-            STACK_CANARY,
-        );
+        if let Err(val) = canary_is_ok(base_addr) {
+            panic!(
+                "kernel stack canary corrupted in thread {}: sp={:?}, base={}, read={:#x}, expected={:#x}",
+                curr.id, curr.sp, base_addr, val, STACK_CANARY
+            )
+        };
     }
 
     // Set the PerCpu info for a running thread on this HART
@@ -507,7 +587,7 @@ impl Scheduler {
         let mut stack_region =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
         let sp = unsafe {
-            stack::init_for_kernel_entry(&mut stack_region, run_closure_thread::<F>, closure_ptr)
+            init_for_kernel_entry(&mut stack_region, run_closure_thread::<F>, closure_ptr)
         };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
@@ -565,8 +645,7 @@ impl Scheduler {
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
         let user_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
-        let sp =
-            unsafe { stack::init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
+        let sp = unsafe { init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
         // Now lock the scheduler
         let mut threads = self.threads.lock();
         // We should have a process control block already set up
@@ -654,8 +733,7 @@ impl Scheduler {
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
         let user_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
-        let sp =
-            unsafe { stack::init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
+        let sp = unsafe { init_for_user_entry(&mut kernel_stack, user_entry, user_stack.top()) };
 
         // Initialise the TCB
         tcb.id = next_thread_id();
@@ -831,7 +909,8 @@ impl Scheduler {
                 threads.check_curr_canary();
 
                 // Check if thread is marked for exit
-                let marked_for_exit = threads.thread_blocks[percpu::current_thread_idx()].marked_for_exit;
+                let marked_for_exit =
+                    threads.thread_blocks[percpu::current_thread_idx()].marked_for_exit;
                 if marked_for_exit {
                     drop(threads);
                     self.exit(ExitReason::Fault);

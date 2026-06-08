@@ -49,6 +49,7 @@ pub extern "C" fn user_test() {
 /// (Reads address 4 rather than 0 so we exercise an ordinary unmapped
 /// access, not anything null-pointer-special.)
 #[allow(dead_code)]
+#[allow(clippy::manual_dangling_ptr)]
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_fault_now() {
     unsafe {

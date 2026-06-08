@@ -16,8 +16,12 @@ path = "src/main.rs"
 default = ["test-all"]
 qemu = []  # For QEMU-specific code
 profile = []
+trace = []
+# Benchmark suite. Sole gate for all benchmark `#[test_case]`s — NOT
+# ANDed with any area feature — so `cargo test --features bench` compiles
+# and runs only the benchmarks, no functional tests. Not part of test-all.
+bench = []
 test-alloc = []
-test-bench = []
 test-bss = []
 test-clint = []
 test-collections = []

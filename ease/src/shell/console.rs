@@ -292,7 +292,7 @@ impl core::fmt::Write for Console {
     }
 }
 
-#[cfg(all(test, feature = "test-shell", feature = "test-bench"))]
+#[cfg(all(test, feature = "bench"))]
 mod benchmarks {
     use crate::bench;
     use crate::drivers::ramfb::FrameBuffer;
