@@ -9,6 +9,15 @@
 #![cfg_attr(test, feature(custom_test_frameworks))]
 #![cfg_attr(test, test_runner(crate::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
+// The bench-only build (`cargo test --features bench`) compiles just the
+// benchmark #[test_case]s — not the functional tests or production main()
+// that exercise the process/spawn machinery — so that code reads as dead
+// in this one configuration only. Relax dead-code checking here; the
+// functional builds (test-all) keep full vigilance.
+#![cfg_attr(
+    all(test, feature = "bench", not(feature = "test-sched")),
+    allow(dead_code)
+)]
 
 #[allow(unused_imports)]
 use core::fmt::Write;
