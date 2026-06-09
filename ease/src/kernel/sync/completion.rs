@@ -37,6 +37,7 @@ impl Completion {
         }
     }
 
+    #[allow(dead_code)]
     pub fn wait(&self) {
         loop {
             let mut inner = self.inner.lock();

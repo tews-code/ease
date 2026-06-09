@@ -10,7 +10,7 @@ use crate::arch::usermode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::sched::ExitReason;
-use crate::kernel::stack::canary_is_ok;
+use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
@@ -45,7 +45,7 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
     } else {
         &raw const __hart1_irq_stack_base as *const usize
     };
-    if canary_is_ok(irq_stack_base.addr()).is_err() {
+    if check_canary(irq_stack_base.addr()).is_err() {
         irq_panic();
     }
     match mcause::read() {

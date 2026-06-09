@@ -296,7 +296,6 @@ impl core::fmt::Write for Console {
 mod benchmarks {
     use crate::bench;
     use crate::drivers::ramfb::FrameBuffer;
-    use crate::println;
     use crate::shell::ascii;
     use core::fmt::Write;
 

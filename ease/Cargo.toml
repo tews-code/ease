@@ -21,6 +21,7 @@ trace = []
 # ANDed with any area feature — so `cargo test --features bench` compiles
 # and runs only the benchmarks, no functional tests. Not part of test-all.
 bench = []
+paint-stack = []
 test-alloc = []
 test-bss = []
 test-clint = []

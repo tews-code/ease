@@ -9,17 +9,22 @@
 #                                            # tests, miri, and docs for fast
 #                                            # iteration on one feature.
 #   ./scripts/ci.sh --scheduler=sched-stride # (currently the only option)
+#   ./scripts/ci.sh --paint-stack            # also paint stacks and print
+#                                            # high-watermarks in the QEMU
+#                                            # stage; off by default
 #   ./scripts/ci.sh --help                   # this message
 
 set -e
 
 TEST_SET="test-all"
+PAINT_STACK=0
 
 for arg in "$@"; do
     case "$arg" in
         --test=*)      TEST_SET="${arg#*=}" ;;
+        --paint-stack) PAINT_STACK=1 ;;
         --help|-h)
-            sed -n '2,13p' "$0"
+            sed -n '2,15p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -40,6 +45,13 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 FEATURES="$TEST_SET"
 
+# Stack painting + high-watermark printing is an opt-in diagnostic (the
+# `paint-stack` feature). It's scoped to the RISC-V build — the watermark
+# code is QEMU-only — so host tests, miri and docs keep the base feature
+# set. Off unless --paint-stack is passed.
+RISCV_FEATURES="$FEATURES"
+[ $PAINT_STACK -eq 1 ] && RISCV_FEATURES="$FEATURES paint-stack"
+
 # The bump and freelist allocator modules are kept in-tree as reference
 # implementations (with host_tests) but aren't wired into the kernel
 # binary, so their code is legitimately dead from the kernel's point of
@@ -48,6 +60,7 @@ CLIPPY_EXTRA="-A dead-code"
 
 echo "Test set                : $TEST_SET"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
+[ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
 
 # Unconditionally reformat to pass clippy
 cargo fmt
@@ -63,12 +76,12 @@ echo "=== Clippy ==="
 # the tested feature set (or vice versa), producing spurious dead_code
 # errors.
 cargo clippy --target riscv32imac-unknown-none-elf \
-    --no-default-features --features "$FEATURES" \
+    --no-default-features --features "$RISCV_FEATURES" \
     -- -D warnings $CLIPPY_EXTRA
 
 echo ""
 echo "=== QEMU Tests ==="
-cargo test --bin ease --no-default-features --features "$FEATURES"
+cargo test --bin ease --no-default-features --features "$RISCV_FEATURES"
 
 if [ $FOCUSED -eq 1 ]; then
     echo ""

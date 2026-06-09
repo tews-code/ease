@@ -77,6 +77,7 @@ mod bare_metal_alloc {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub(crate) enum Pool {
     UserPd0,
     KernelPd1,

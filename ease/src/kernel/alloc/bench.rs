@@ -10,7 +10,6 @@ use core::hint::black_box;
 use core::sync::atomic::Ordering;
 
 use crate::kernel::alloc::heap_start_addr;
-use crate::println;
 
 // kalloc dispatches small allocs to slab and large allocs to buddy. The
 // bench workloads (alloc_one_byte, alloc_small_mix) are all ≤ 64 bytes,

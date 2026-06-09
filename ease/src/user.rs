@@ -2,7 +2,7 @@
 
 use core::arch::naked_asm;
 
-#[cfg(not(test))]
+#[allow(dead_code)]
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_print_a() {
     loop {
@@ -16,7 +16,7 @@ pub extern "C" fn user_print_a() {
     }
 }
 
-#[cfg(not(test))]
+#[allow(dead_code)]
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_print_b() {
     loop {

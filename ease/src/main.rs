@@ -1,13 +1,13 @@
 //! EASE - OS for RP2350
 //!
 //! A hobby OS for Adafruit Metro RP2350 with 8MB PSRAM in RISC-V mode.
-//!
+//! Developed on the QEMU `virt` board.
 
 #![no_std]
 #![no_main]
 #![warn(missing_docs)]
 #![cfg_attr(test, feature(custom_test_frameworks))]
-#![cfg_attr(test, test_runner(crate::test_runner))]
+#![cfg_attr(test, test_runner(crate::test::test_runner))]
 #![cfg_attr(test, reexport_test_harness_main = "test_main")]
 // The bench-only build (`cargo test --features bench`) compiles just the
 // benchmark #[test_case]s — not the functional tests or production main()
@@ -19,17 +19,17 @@
     allow(dead_code)
 )]
 
-#[allow(unused_imports)]
-use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::drivers::ramfb::FrameBuffer;
-#[cfg(not(test))]
 use crate::kernel::alloc::Order;
-use crate::kernel::sched::{self, spawn};
-use crate::kernel::sync::{Completion, IrqSpinLock};
+use crate::kernel::sched;
 
 extern crate alloc;
+
+// Bring the print/println macros in first so other modules can benefit
+#[macro_use]
+mod io;
 
 mod arch;
 mod bench;
@@ -37,47 +37,27 @@ mod board;
 mod drivers;
 mod fs;
 mod hal;
-mod io;
 mod kernel;
 mod qemu;
 mod shell;
 mod syscall;
 mod user;
 
-static FB_HANDOFF: IrqSpinLock<Option<FrameBuffer>> = IrqSpinLock::new(None);
-static FB_READY: Completion = Completion::new();
 static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
 // Entry Points
 // =============================================================================
 
-#[allow(dead_code)]
-fn shell_thread() {
-    FB_READY.wait();
-    let fb = FB_HANDOFF
-        .lock()
-        .take()
-        .expect("Framebuffer should be present after FB_READY signal");
+fn shell_main(fb: FrameBuffer) {
     let console = shell::console::Console::new(fb);
     let mut shell = shell::Shell::new(console);
     shell.run();
-    #[allow(unreachable_code)]
-    loop {
-        crate::arch::wait_for_interrupt();
-    }
 }
 
-fn secondary_init() {
-    kernel::timer::init();
-    sched::bootstrap(1);
-    kernel::ipi::init();
-    // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
-    arch::enable_interrupts();
-}
-
-fn minimal_init() {
+fn kernel_init() {
     // Initialise just the basics to keep stack use light
+    // The initialisation functions panic or succeed
     #[cfg(feature = "profile")]
     kernel::profile::init();
     kernel::timer::init();
@@ -85,36 +65,35 @@ fn minimal_init() {
     drivers::plic::init();
     drivers::uart::init();
     kernel::ipi::init();
-
     sched::bootstrap(0);
     arch::enable_interrupts();
-    // Set the flag to allow HART1 to progress
-    INIT_COMPLETE.store(true, Ordering::Release);
-}
 
-fn kernel_init() {
-    minimal_init();
-    sched::usermemmap::init();
+    // Spawn a profiler thread early if we want to profile the initialisation
     #[cfg(feature = "profile")]
     sched::Builder::new()
-        .with_stack_class(sched::Order::KB16)
-        .with_priority(sched::PRIORITY_DEFAULT)
+        .with_stack_class(Order::KB16)
         .spawn(|| {
             loop {
                 sched::sleep(1_000);
                 crate::kernel::profile::dump();
             }
-        });
+        })
+        .expect("unable to spawn profiler thread");
 
     // Spawn a thread with a deeper stack to complete initialisation
-    spawn(|| {
+    sched::spawn(|| {
+        sched::usermemmap::init();
         drivers::virtio::virtio_blk_init();
         fs::volume::fat16_init();
-
-        let fb = drivers::ramfb::FrameBuffer::init();
-        *FB_HANDOFF.lock() = Some(fb);
-        FB_READY.signal();
-    });
+        let fb = FrameBuffer::init();
+        sched::Builder::new()
+            .with_stack_class(Order::KB16)
+            .spawn(move || shell_main(fb))
+            .expect("spawn shell");
+        // Set the flag to allow HART1 to progress
+        INIT_COMPLETE.store(true, Ordering::Release);
+    })
+    .expect("could not spawn initialisation thread");
 }
 
 extern "C" fn secondary_main() -> ! {
@@ -122,56 +101,35 @@ extern "C" fn secondary_main() -> ! {
     while !INIT_COMPLETE.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    secondary_init();
-    println!("Hello from HART{}!", crate::arch::cpu_id());
+    // Perform Hart-specific initialisation
+    kernel::timer::init();
+    sched::bootstrap(1);
+    kernel::ipi::init();
+    // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
+    arch::enable_interrupts();
+    // Drop into idle
     sched::idle_thread();
 }
 
 #[cfg(test)]
 extern "C" fn main() -> ! {
-    use crate::kernel::alloc::Order;
-
-    let _fb = kernel_init();
+    kernel_init();
 
     // Move the test workload off the 4 KiB bootstrap stack onto a dedicated
     // 16 KiB heap stack. The test framework (format machinery, ~211 result
     // prints across test-all, FAT-format buffers, virtio sector reads on
     // stack) accumulates a surprisingly deep peak
-    let id = sched::Builder::new()
+    sched::Builder::new()
         .with_stack_class(Order::KB16)
-        .spawn(test_runner_thread);
-    assert!(id.is_some(), "could not spawn test runner thread");
-
-    // Bootstrap converts into the idle thread
+        .spawn(crate::test::test_runner_thread)
+        .expect("could not spawn test runner thread");
+    // Bootstrap drops into the idle thread for Hart0
     sched::idle_thread();
 }
 
-/// Wrap `test_main` so it can be spawned as a thread entry.
-#[cfg(test)]
-fn test_runner_thread() {
-    test_main();
-    // `test_main` calls `qemu::exit_success` once all tests pass, so under
-    // normal circumstances this never returns. If it ever does, the
-    // implicit `exit()` in the trampoline cleans up this thread.
-}
-
 #[cfg(not(test))]
-#[allow(dead_code)]
 extern "C" fn main() -> ! {
     kernel_init();
-
-    let p = sched::spawn_process("abtest", user::user_print_a).unwrap();
-    sched::spawn_user(&p, user::user_print_b)
-        .expect("thread printing b should be able to join the user process");
-
-    #[allow(clippy::diverging_sub_expression)]
-    let Some(_id) = sched::Builder::new()
-        .with_stack_class(Order::KB16)
-        .spawn(shell_thread)
-    else {
-        panic!("failed to launch shell");
-    };
-
     // Main drops into idle_thread
     sched::idle_thread();
 }
@@ -180,76 +138,85 @@ extern "C" fn main() -> ! {
 // Test Framework
 // =============================================================================
 
-/// Trait for test cases that can be run by the test framework
 #[cfg(test)]
-trait Testable {
-    /// Run the test and print status
-    fn run(&self);
-}
-
-#[cfg(test)]
-impl<T: Fn()> Testable for T {
-    fn run(&self) {
-        print!("{}...\t", core::any::type_name::<T>());
-        self();
-        println!("[\x1b[32mok\x1b[0m]");
+mod test {
+    /// Wrap `test_main` so it can be spawned as a thread entry.
+    #[cfg(test)]
+    pub(super) fn test_runner_thread() {
+        crate::test_main();
+        // `test_main` calls `qemu::exit_success` once all tests pass, so under
+        // normal circumstances this never returns. If it ever does, the
+        // implicit `exit()` in the trampoline cleans up this thread.
     }
-}
 
-/// Custom test runner for QEMU
-///
-/// Runs all test cases and exits QEMU with appropriate status code.
-#[cfg(test)]
-fn test_runner(tests: &[&dyn Testable]) {
-    println!("Running {} tests", tests.len());
-    for test in tests {
-        test.run();
+    /// Trait for test cases that can be run by the test framework
+    pub(super) trait Testable {
+        /// Run the test and print status
+        fn run(&self);
     }
-    println!();
-    println!("All tests passed!");
 
-    {
-        use crate::io::DirectWriter;
-        use core::fmt::Write;
+    impl<T: Fn()> Testable for T {
+        fn run(&self) {
+            print!("{}...\t", core::any::type_name::<T>());
+            self();
+            println!("[\x1b[32mok\x1b[0m]");
+        }
+    }
+
+    /// Custom test runner for QEMU
+    ///
+    /// Runs all test cases and exits QEMU with appropriate status code.
+    pub(super) fn test_runner(tests: &[&dyn Testable]) {
+        println!("Running {} tests", tests.len());
+        for test in tests {
+            test.run();
+        }
+        println!();
+        println!("All tests passed!");
+
+        // Display stack depth used
+        #[cfg(feature = "paint-stack")]
         {
             unsafe extern "C" {
                 static __hart0_irq_stack_base: u8;
                 static __hart0_irq_stack_top: u8;
-            }
-
-            use crate::kernel::stack::stack_high_watermark;
-            let start_addr = &raw const __hart0_irq_stack_base as usize;
-            let end_addr = &raw const __hart0_irq_stack_top as usize;
-            println!("==== IRQ Stack High Watermark Check ====");
-            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
-                println!("Start address: {start_addr:x}");
-                println!("High watermark address: {addr:x}");
-                println!("Top address: {end_addr:x}");
-            } else {
-                println!(" * STACK CORRUPT * ");
-            };
-            println!("==== IRQ Stack High Watermark Check ====");
-        }
-        {
-            unsafe extern "C" {
+                static __hart1_irq_stack_base: u8;
+                static __hart1_irq_stack_top: u8;
                 static __hart0_idle_stack_base: u8;
                 static __hart0_idle_stack_top: u8;
+                static __hart1_idle_stack_base: u8;
+                static __hart1_idle_stack_top: u8;
             }
-            use crate::kernel::stack::stack_high_watermark;
-            let start_addr = &raw const __hart0_idle_stack_base as usize;
-            let end_addr = &raw const __hart0_idle_stack_top as usize;
-            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
-            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
-                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
-                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
-                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
-            } else {
-                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
-            };
-            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+
+            use crate::kernel::stack::print_stack_watermark;
+
+            print_stack_watermark(
+                "IRQ Hart",
+                0,
+                &raw const __hart0_irq_stack_base as usize,
+                &raw const __hart0_irq_stack_top as usize,
+            );
+            print_stack_watermark(
+                "IRQ Hart",
+                1,
+                &raw const __hart1_irq_stack_base as usize,
+                &raw const __hart1_irq_stack_top as usize,
+            );
+            print_stack_watermark(
+                "Idle Hart",
+                0,
+                &raw const __hart0_idle_stack_base as usize,
+                &raw const __hart0_idle_stack_top as usize,
+            );
+            print_stack_watermark(
+                "Idle Hart",
+                1,
+                &raw const __hart1_idle_stack_base as usize,
+                &raw const __hart1_idle_stack_top as usize,
+            );
         }
+        crate::qemu::exit_success();
     }
-    qemu::exit_success();
 }
 
 // =============================================================================

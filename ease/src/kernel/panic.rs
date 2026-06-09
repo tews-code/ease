@@ -1,10 +1,10 @@
 //! Panic handler
 
 use crate::hal::wait_for_interrupt;
-#[cfg(not(test))]
 use crate::kernel::percpu;
-#[cfg(not(test))]
-use crate::kernel::stack::{canary_is_ok, stack_high_watermark};
+use crate::kernel::stack::check_canary;
+#[cfg(feature = "paint-stack")]
+use crate::kernel::stack::print_stack_watermark;
 #[cfg(test)]
 use crate::qemu;
 
@@ -96,24 +96,21 @@ impl core::fmt::Write for DirectConsoleWriter {
 // Panic handler writes straight to UART without locking
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
-    #[cfg(not(test))]
     {
         // Check that the stack canary has been set up
         let stack_base = percpu::current_stack_base();
         let stack_ok = if stack_base.is_null() {
             None
         } else {
-            match canary_is_ok(stack_base.addr()) {
+            match check_canary(stack_base.addr()) {
                 Ok(()) => Some(true),
                 Err(_) => Some(false),
             }
         };
-        use crate::io::DirectWriter;
-        use core::fmt::Write;
-        let _ = writeln!(DirectWriter, "PANIC: {info}");
-        let _ = writeln!(
-            DirectWriter,
-            "Stack canary in place: {}",
+
+        dprintln!("PANIC: {info}");
+        dprintln!(
+            "Stack canary: {}",
             match stack_ok {
                 None => "unavailable",
                 Some(true) => "intact",
@@ -121,44 +118,46 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             }
         );
 
+        #[cfg(feature = "paint-stack")]
         {
             unsafe extern "C" {
                 static __hart0_irq_stack_base: u8;
                 static __hart0_irq_stack_top: u8;
-            }
-            use crate::io::DirectWriter;
-            use core::fmt::Write;
-            let start_addr = &raw const __hart0_irq_stack_base as usize;
-            let end_addr = &raw const __hart0_irq_stack_top as usize;
-            let _ = writeln!(DirectWriter, "==== IRQ Stack High Watermark Check ====");
-            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
-                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
-                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
-                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
-            } else {
-                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
-            };
-            let _ = writeln!(DirectWriter, "==== IRQ Stack High Watermark Check ====");
-        }
-        {
-            unsafe extern "C" {
+                static __hart1_irq_stack_base: u8;
+                static __hart1_irq_stack_top: u8;
                 static __hart0_idle_stack_base: u8;
                 static __hart0_idle_stack_top: u8;
+                static __hart1_idle_stack_base: u8;
+                static __hart1_idle_stack_top: u8;
             }
-            use crate::io::DirectWriter;
-            use core::fmt::Write;
-            let start_addr = &raw const __hart0_idle_stack_base as usize;
-            let end_addr = &raw const __hart0_idle_stack_top as usize;
-            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
-            if let Some(addr) = stack_high_watermark(start_addr, end_addr) {
-                let _ = writeln!(DirectWriter, "Start address: {start_addr:x}");
-                let _ = writeln!(DirectWriter, "High watermark address: {addr:x}");
-                let _ = writeln!(DirectWriter, "Top address: {end_addr:x}");
-            } else {
-                let _ = writeln!(DirectWriter, " * STACK CORRUPT * ");
-            };
-            let _ = writeln!(DirectWriter, "==== Boot Stack High Watermark Check ====");
+            print_stack_watermark(
+                "Irq Hart",
+                0,
+                &raw const __hart0_irq_stack_base as usize,
+                &raw const __hart0_irq_stack_top as usize,
+            );
+            print_stack_watermark(
+                "Irq Hart",
+                1,
+                &raw const __hart1_irq_stack_base as usize,
+                &raw const __hart1_irq_stack_top as usize,
+            );
+            print_stack_watermark(
+                "Idle",
+                0,
+                &raw const __hart0_idle_stack_base as usize,
+                &raw const __hart0_idle_stack_top as usize,
+            );
+            print_stack_watermark(
+                "Idle",
+                1,
+                &raw const __hart1_idle_stack_base as usize,
+                &raw const __hart1_idle_stack_top as usize,
+            );
         }
+
+        use core::fmt::Write;
+
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
         let _ = writeln!(

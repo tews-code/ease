@@ -383,7 +383,6 @@ mod benchmarks {
     use super::baselines;
     use super::*;
     use crate::bench;
-    use crate::println;
 
     const ITERATIONS: u32 = 10;
 

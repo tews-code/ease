@@ -72,28 +72,6 @@ extern "C" fn zero_region(start_addr: usize, end_addr: usize) {
     }
 }
 
-// Paint the stack and add a canary at the bottom of the stack
-// Using naked_asm as we do not yet have a stack pointer
-#[unsafe(naked)]
-extern "C" fn paint_stack(start_addr: usize, end_addr: usize) {
-    naked_asm!(
-        "bgeu a0, a1, 2f",
-        "li t0, {canary}",
-        "li t1, {pattern}",
-        "sw t0, 0(a0)",
-        "addi a0, a0, 4",
-        "1:",
-            "bgeu a0, a1, 2f",
-            "sw t1, 0(a0)",
-            "addi a0, a0, 4",
-            "j 1b",
-        "2:",
-            "ret",
-        canary = const crate::kernel::stack::STACK_CANARY,
-        pattern = const crate::kernel::stack::STACK_PAINT_PATTERN,
-    );
-}
-
 // Hart 1 waiting on doorbell from Hart 0
 // Using naked_asm as we do not yet have a stack pointer
 #[unsafe(naked)]
@@ -159,159 +137,171 @@ static mut LAUNCH_MAILBOX: LaunchMailbox = LaunchMailbox {
 #[allow(clippy::identity_op)]
 extern "C" fn _start() -> ! {
     naked_asm!(
-        // Disable interrupts
-        "csrw mie, zero",
-        "csrw mstatus, zero",
+        r#" csrw mie, zero                  # Disable interrupts
+            csrw mstatus, zero
 
-        "csrr t0, mhartid",             // Read HARTID
-        "bnez t0, hart1",               // Set up HART1
+            csrr t0, mhartid                # Read HART ID
+            bnez t0, hart1                  # Set up HART1
 
-        "hart0:",
+            hart0:
 
-            // HART0 setup
-            // Set up a temporary trap vector - will not recover
-            "la t0, {park_loop}",
-            "csrw mtvec, t0",
+            # HART0 setup
+            # Set up a temporary trap vector - will not recover
+            la t0, {park_loop}
+            csrw mtvec, t0"#,
 
-            // Paint the IRQ stacks
-            "la a0, {hart0_irq_stack_base}",
-            "la a1, {hart0_irq_stack_top}",
-            "call {paint_stack}",
+            #[cfg(feature = "paint-stack")]
+        r#" # Paint the IRQ stacks
+            la a0, {hart0_irq_stack_base}
+            la a1, {hart0_irq_stack_top}
+            call {paint_stack}
 
-            "la a0, {hart1_irq_stack_base}",
-            "la a1, {hart1_irq_stack_top}",
-            "call {paint_stack}",
+            la a0, {hart1_irq_stack_base}
+            la a1, {hart1_irq_stack_top}
+            call {paint_stack}
 
-            // Paint the idle/boot stacks before using the stack pointer
-            "la a0, {hart0_idle_stack_base}",
-            "la a1, {hart0_idle_stack_top}",
-            "call {paint_stack}",
+            # Paint the idle/boot stacks before using the stack pointer
+            la a0, {hart0_idle_stack_base}
+            la a1, {hart0_idle_stack_top}
+            call {paint_stack}
 
-            "la a0, {hart1_idle_stack_base}",
-            "la a1, {hart1_idle_stack_top}",
-            "call {paint_stack}",
+            la a0, {hart1_idle_stack_base}
+            la a1, {hart1_idle_stack_top}
+            call {paint_stack}"#,
 
-            // Set the idle/boot stack pointer
-            "la sp, {hart0_idle_stack_top}",
+        r#" # Set the stack canaries
+            la a0, {hart0_irq_stack_base}
+            call {set_canary}
+            la a0, {hart0_idle_stack_base}
+            call {set_canary}
+            la a0, {hart1_irq_stack_base}
+            call {set_canary}
+            la a0, {hart1_idle_stack_base}
+            call {set_canary}
 
-            // Copy .data from LMA to VMA
-            "la a0, {data_lma}",
-            "la a1, {data_start}",
-            "la a2, {data_end}",
-            "call {copy_region}",
+            # Set the idle/boot stack pointer
+            la sp, {hart0_idle_stack_top}
 
-            // Zero BSS segment
-            "la a0, {bss_start}",
-            "la a1, {bss_end}",
-            "call {zero_region}",
+            # Copy .data from LMA to VMA
+            la a0, {data_lma}
+            la a1, {data_start}
+            la a2, {data_end}
+            call {copy_region}
 
-            // Lock bottom of RAM against near-null pointer deferences for HART0
-            "call {protect_null_ptr_deref}",
+            # Zero BSS segment
+            la a0, {bss_start}
+            la a1, {bss_end}
+            call {zero_region}
 
-            // Copy scratch RAM text from LMA to VMA
-            // Copy for HART0
-            "la a0, {sram8_text_lma}",
-            "la a1, {sram8_text_start}",
-            "la a2, {sram8_text_end}",
-            "call {copy_region}",
+            # Lock bottom of RAM against near-null pointer deferences for HART0
+            call {protect_null_ptr_deref}
 
-            // Copy for HART1
-            "la a0, {sram9_text_lma}",
-            "la a1, {sram9_text_start}",
-            "la a2, {sram9_text_end}",
-            "call {copy_region}",
+            # Copy scratch RAM text from LMA to VMA
+            # Copy for HART0
+            la a0, {sram8_text_lma}
+            la a1, {sram8_text_start}
+            la a2, {sram8_text_end}
+            call {copy_region}
 
-            // Lock the scratch RAM text region with PMP for HART0
-            "la a0, {sram8_text_start}",
-            "la a1, {sram8_text_end}",
-            "call {protect_sram_text}",
+            # Copy for HART1
+            la a0, {sram9_text_lma}
+            la a1, {sram9_text_start}
+            la a2, {sram9_text_end}
+            call {copy_region}
 
-            // Zero PerCpu
-            "la a0, {hart0_percpu_start}",
-            "la a1, {hart0_percpu_end}",
-            "call {zero_region}",
+            # Lock the scratch RAM text region with PMP for HART0
+            la a0, {sram8_text_start}
+            la a1, {sram8_text_end}
+            call {protect_sram_text}
 
-            "la a0, {hart1_percpu_start}",
-            "la a1, {hart1_percpu_end}",
-            "call {zero_region}",
+            # Zero PerCpu
+            la a0, {hart0_percpu_start}
+            la a1, {hart0_percpu_end}
+            call {zero_region}
 
-            // Store the IRQ stack top in mscratch
-            "la t0, {hart0_irq_stack_top}",
-            "csrw mscratch, t0",
+            la a0, {hart1_percpu_start}
+            la a1, {hart1_percpu_end}
+            call {zero_region}
 
-            // Set up trap vector
-            "la t0, _trap_vector_h0",
-            "csrw mtvec, t0",
+            # Store the IRQ stack top in mscratch
+            la t0, {hart0_irq_stack_top}
+            csrw mscratch, t0
 
-            // Pass secondary hart details - for QEMU virt we use
-            // a struct in BSS and the CLINT MSIP instead of SIO FIFO
-            "la t0, {launch_mailbox}",
-            "la a0, {hart1_idle_stack_top}",
-            "sw a0, {launch_mailbox_sp}(t0)",
-            "la a0, _trap_vector_h1",
-            "sw a0, {launch_mailbox_mtvec}(t0)",
-            "la a0, {secondary_main}",
-            "sw a0, {launch_mailbox_entry}(t0)",
+            # Set up trap vector
+            la t0, _trap_vector_h0
+            csrw mtvec, t0
 
-            // Fence - store/release
-            "fence rw, w",
-            // Fence - for HART0 instruction fetch
-            "fence.i",
+            # Pass secondary hart details - for QEMU virt we use
+            # a struct in BSS and the CLINT MSIP instead of SIO FIFO
+            la t0, {launch_mailbox}
+            la a0, {hart1_idle_stack_top}
+            sw a0, {launch_mailbox_sp}(t0)
+            la a0, _trap_vector_h1
+            sw a0, {launch_mailbox_mtvec}(t0)
+            la a0, {secondary_main}
+            sw a0, {launch_mailbox_entry}(t0)
 
-            // Ring doorbell for HART1 - note without CLINT locking as yet
-            "li a0, 1",
-            "la a1, {clint_hart1_msip}",
-            "sw a0, 0(a1)",
+            # Fence - store/release
+            fence rw, w
+            # Fence - for HART0 instruction fetch
+            fence.i
 
-            "call {main}",
+            # Ring doorbell for HART1 - note without CLINT locking as yet
+            li a0, 1
+            la a1, {clint_hart1_msip}
+            sw a0, 0(a1)
 
-            "unimp",
+            call {main}
 
-        // Set up HART1
-        "hart1:",
+            unimp
 
-            // Set up a temporary trap vector - will not recover
-            "la t0, {park_loop}",
-            "csrw mtvec, t0",
+        # Set up HART1
+        hart1:
 
-            // Spin on doorbell (MSIP on QEMU virt board)
-            "call {wait_on_doorbell}",
+            # Set up a temporary trap vector - will not recover
+            la t0, {park_loop}
+            csrw mtvec, t0
 
-            // Fence with HART0 - load/acquire
-            "fence r, rw",
-            // Fence on copied instruction .text
-            "fence.i",
+            # Spin on doorbell (MSIP on QEMU virt board)
+            call {wait_on_doorbell}
 
-            // Retrieve boot details
-            "la t0, {launch_mailbox}",
-            "lw sp, {launch_mailbox_sp}(t0)",
-            "lw t1, {launch_mailbox_mtvec}(t0)",
-            "mv s0, t1",
-            "lw t2, {launch_mailbox_entry}(t0)",
-            "mv s1, t2",
+            # Fence with HART0 - load/acquire
+            fence r, rw
+            # Fence on copied instruction .text
+            fence.i
 
-            // Lock against near-null pointer deferences for HART1
-            "call {protect_null_ptr_deref}",
+            # Retrieve boot details
+            la t0, {launch_mailbox}
+            lw sp, {launch_mailbox_sp}(t0)
+            lw t1, {launch_mailbox_mtvec}(t0)
+            mv s0, t1
+            lw t2, {launch_mailbox_entry}(t0)
+            mv s1, t2
 
-            // Lock the text region with PMP for HART1
-            "la a0, {sram9_text_start}",
-            "la a1, {sram9_text_end}",
-            "call {protect_sram_text}",
+            # Lock against near-null pointer deferences for HART1
+            call {protect_null_ptr_deref}
 
-            // Store the IRQ stack top in mscratch
-            "la t0, {hart1_irq_stack_top}",
-            "csrw mscratch, t0",
+            # Lock the text region with PMP for HART1
+            la a0, {sram9_text_start}
+            la a1, {sram9_text_end}
+            call {protect_sram_text}
 
-            // Set the trap vector
-            "csrw mtvec, s0",
+            # Store the IRQ stack top in mscratch
+            la t0, {hart1_irq_stack_top}
+            csrw mscratch, t0
 
-            // Jump to entry
-            "jr s1",
+            # Set the trap vector
+            csrw mtvec, s0
 
-            "unimp",
+            # Jump to entry
+            jr s1
+
+            unimp"#,
 
         park_loop = sym _park_loop,
-        paint_stack = sym paint_stack,
+        #[cfg(feature = "paint-stack")]
+        paint_stack = sym crate::kernel::stack::paint_stack,
+        set_canary = sym crate::kernel::stack::set_canary,
         copy_region = sym copy_region,
         zero_region = sym zero_region,
         wait_on_doorbell = sym wait_on_doorbell,

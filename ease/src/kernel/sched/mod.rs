@@ -205,6 +205,7 @@ pub fn schedule() {
 }
 
 /// Spawn a user process
+#[allow(dead_code)]
 pub fn spawn_process(name: &'static str, user_entry: extern "C" fn()) -> Option<ProcessHandle> {
     SCHEDULER.spawn_process(
         name,
@@ -218,6 +219,7 @@ pub fn spawn_process(name: &'static str, user_entry: extern "C" fn()) -> Option<
 }
 
 /// Spawn a user thread
+#[allow(dead_code)]
 pub fn spawn_user(process: &ProcessHandle, user_entry: extern "C" fn()) -> Option<ThreadHandle> {
     SCHEDULER.spawn_user(
         process,

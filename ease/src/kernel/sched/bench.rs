@@ -7,7 +7,6 @@ use super::test_support::ensure_partner_spawned;
 #[test_case]
 fn sched_benchmarks() {
     use crate::bench;
-    use crate::println;
 
     println!();
     println!("====== SCHEDULER ====== ");
