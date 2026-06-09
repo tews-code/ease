@@ -102,7 +102,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let stack_ok = if stack_base.is_null() {
             None
         } else {
-            match check_canary(stack_base.addr()) {
+            // Safety: stack base is set in percpu from an aligned stack address either from the linker (for idle) or from buddy allocation
+            match unsafe { check_canary(stack_base.addr()) } {
                 Ok(()) => Some(true),
                 Err(_) => Some(false),
             }
@@ -119,7 +120,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         );
 
         #[cfg(feature = "paint-stack")]
-        {
+        // Safety: base and top addresses are aligned by linker and valid for reads
+        unsafe {
             unsafe extern "C" {
                 static __hart0_irq_stack_base: u8;
                 static __hart0_irq_stack_top: u8;

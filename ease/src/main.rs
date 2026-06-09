@@ -176,7 +176,8 @@ mod test {
 
         // Display stack depth used
         #[cfg(feature = "paint-stack")]
-        {
+        // Safety: Linker ensures stack addresses are aligned and available for reads
+        unsafe {
             unsafe extern "C" {
                 static __hart0_irq_stack_base: u8;
                 static __hart0_irq_stack_top: u8;

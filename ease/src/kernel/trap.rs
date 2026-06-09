@@ -45,7 +45,8 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
     } else {
         &raw const __hart1_irq_stack_base as *const usize
     };
-    if check_canary(irq_stack_base.addr()).is_err() {
+    // Safety: IRQ stack base is a valid stack address from linker script
+    if unsafe { check_canary(irq_stack_base.addr()) }.is_err() {
         irq_panic();
     }
     match mcause::read() {

@@ -95,10 +95,12 @@ pub unsafe fn init_for_kernel_entry(
         stack.size() > core::mem::size_of::<Context>(),
         "stack memory region too small for context switch"
     );
-    // Paint the stack
-    #[cfg(feature = "paint-stack")]
-    paint_stack(stack.base_addr(), stack.top().addr().into());
-    set_canary(stack.base_addr());
+    // Safety: Caller has ensured base and top addresses are aligned and valid for writes
+    unsafe {
+        #[cfg(feature = "paint-stack")]
+        paint_stack(stack.base_addr(), stack.top().addr().into());
+        set_canary(stack.base_addr());
+    }
     let context_ptr = unsafe {
         stack
             .base()
@@ -129,10 +131,12 @@ pub unsafe fn init_for_user_entry(
         kernel_stack.size() > core::mem::size_of::<Context>() + core::mem::size_of::<TrapFrame>(),
         "kernel stack memory region too small for context switch and trap return"
     );
-    // Paint the kernel stack
-    #[cfg(feature = "paint-stack")]
-    paint_stack(kernel_stack.base_addr(), kernel_stack.top().addr().into());
-    set_canary(kernel_stack.base_addr());
+    // Safety: kernel stack has aligned addresses and region is valid for writes
+    unsafe {
+        #[cfg(feature = "paint-stack")]
+        paint_stack(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+        set_canary(kernel_stack.base_addr());
+    }
     // Safety: trap_frame_ptr is derived from stack_base and aligned
     unsafe {
         // Set up a trap frame so trap return arrives in U-mode
@@ -400,7 +404,8 @@ impl ThreadsInner {
             Some(memregion) => memregion.base_addr(),
             None => &raw const __hart0_idle_stack_base as usize, // Idle thread stack (fixed by linker script)
         };
-        if let Err(val) = check_canary(base_addr) {
+        // Safety: base address is aligned and valid for reads either from linker script or buddy allocation
+        if let Err(val) = unsafe { check_canary(base_addr) } {
             panic!(
                 "kernel stack canary corrupted in thread {}: sp={:?}, base={}, read={:#x}, expected={:#x}",
                 curr.id, curr.sp, base_addr, val, STACK_CANARY
@@ -529,12 +534,15 @@ impl Scheduler {
                             .as_ref()
                             .expect("kernel stack should have been present");
                         let id = threads.thread_blocks[switched_from_idx].id;
-                        print_stack_watermark(
-                            "Thread",
-                            id as usize,
-                            kernel_stack.base_addr(),
-                            kernel_stack.top().addr().into(),
-                        );
+                        // Safety: kernel stack is aligned and valid for reads
+                        unsafe {
+                            print_stack_watermark(
+                                "Thread",
+                                id as usize,
+                                kernel_stack.base_addr(),
+                                kernel_stack.top().addr().into(),
+                            );
+                        }
                     }
                     // Handle a user process
                     if let Some(user_context) = &threads.thread_blocks[switched_from_idx].user {
