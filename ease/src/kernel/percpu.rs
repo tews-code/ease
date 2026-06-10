@@ -1,10 +1,12 @@
 //! Per HART struct
 
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::arch::hart_id;
 #[cfg(all(test, feature = "test-user"))]
 use crate::sched::ExitReason;
 use crate::sched::THREADS_MAX;
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 #[allow(dead_code)]
@@ -47,7 +49,7 @@ static PERCPU_HART0: PerCpu = PerCpu::new();
 static PERCPU_HART1: PerCpu = PerCpu::new();
 
 fn this_cpu() -> &'static PerCpu {
-    match crate::arch::cpu_id() {
+    match hart_id() {
         0 => &PERCPU_HART0,
         1 => &PERCPU_HART1,
         _ => unreachable!("only have two HARTs"),

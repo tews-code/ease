@@ -109,7 +109,7 @@ impl Shell {
                     if crate::kernel::percpu::needs_reschedule() {
                         crate::kernel::sched::yield_now();
                     } else {
-                        crate::hal::wait_for_interrupt();
+                        crate::arch::interrupts::wait_for_interrupt();
                     }
                 }
             }

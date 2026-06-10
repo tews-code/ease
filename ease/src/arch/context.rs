@@ -73,7 +73,7 @@ unsafe extern "C" fn kernel_thread_first_run(
     closure_ptr: *mut u8,
 ) -> ! {
     crate::kernel::sched::post_switch_cleanup();
-    crate::arch::enable_interrupts();
+    crate::arch::interrupts::enable();
     trampoline_ptr(closure_ptr);
 }
 

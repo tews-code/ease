@@ -4,7 +4,7 @@ use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::{disable_interrupts, restore_interrupts};
+use crate::arch::interrupts;
 
 //-------------------------------------------------------------------------
 //
@@ -38,7 +38,7 @@ impl<T> IrqSpinLock<T> {
             }
 
             // Disable interrupts before taking the lock
-            prev_mstatus = disable_interrupts();
+            prev_mstatus = interrupts::disable();
             // Only attempt CAS when we see it's free
             if self
                 .locked
@@ -47,7 +47,7 @@ impl<T> IrqSpinLock<T> {
             {
                 break;
             }
-            restore_interrupts(prev_mstatus);
+            interrupts::restore(prev_mstatus);
         }
         IrqSpinLockGuard {
             lock: self,
@@ -58,7 +58,7 @@ impl<T> IrqSpinLock<T> {
     #[expect(dead_code)]
     pub fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
         // Disable interrupts before taking the lock
-        let prev_mstatus = disable_interrupts();
+        let prev_mstatus = interrupts::disable();
         // Only attempt CAS
         if self
             .locked
@@ -70,7 +70,7 @@ impl<T> IrqSpinLock<T> {
                 prev_interrupt_status: prev_mstatus,
             })
         } else {
-            restore_interrupts(prev_mstatus);
+            interrupts::restore(prev_mstatus);
             None
         }
     }
@@ -99,7 +99,7 @@ impl<'a, T> Drop for IrqSpinLockGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
         // Enable interrupts if previously enabled
-        restore_interrupts(self.prev_interrupt_status);
+        interrupts::restore(self.prev_interrupt_status);
     }
 }
 

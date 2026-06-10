@@ -1368,7 +1368,7 @@ fn completion_signal_twice_is_idempotent() {
 // remote hart's trap handler clears MSIP and runs preempt(), and
 // preempt's pick_next_*_mut filters TCBs by affinity. The end-to-end
 // observable behaviour is: a thread spawned with `with_affinity(N)`
-// records `cpu_id() == N` when it runs.
+// records `hart_id() == N` when it runs.
 //
 // Tests run on HART0 (test runner). Spawning an affinity-1 thread from
 // here must wake HART1 (currently in idle_thread / wfi) via IPI for the
@@ -1376,7 +1376,7 @@ fn completion_signal_twice_is_idempotent() {
 // transitively verifies the IPI delivery path.
 
 /// Affinity 0: a thread pinned to HART0 should be picked by HART0's
-/// scheduler and `cpu_id()` from inside it should return 0. Sanity
+/// scheduler and `hart_id()` from inside it should return 0. Sanity
 /// check for the affinity-filter path on the local hart (no IPI
 /// involved here).
 #[test_case]
@@ -1394,19 +1394,19 @@ fn affinity_hart0_runs_on_hart0() {
             crate::kernel::timer::elapsed_ms() as usize,
             Ordering::Relaxed,
         );
-        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        CPU_OBSERVED.store(crate::arch::hart_id(), Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
     }
 
     ensure_partner_spawned();
-    let test_runner_hart_before = crate::arch::cpu_id();
+    let test_runner_hart_before = crate::arch::hart_id();
     let spawn_ms = crate::kernel::timer::elapsed_ms();
     let id = crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
         .with_affinity(0)
         .spawn(pinned_hart0);
     assert!(id.is_some(), "spawn failed");
-    let test_runner_hart_after = crate::arch::cpu_id();
+    let test_runner_hart_after = crate::arch::hart_id();
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
@@ -1425,7 +1425,7 @@ fn affinity_hart0_runs_on_hart0() {
                 crate::kernel::timer::elapsed_ms(),
                 test_runner_hart_before,
                 test_runner_hart_after,
-                crate::arch::cpu_id(),
+                crate::arch::hart_id(),
                 START_MS.load(Ordering::Relaxed),
                 CPU_OBSERVED.load(Ordering::Relaxed),
                 DONE.load(Ordering::Relaxed),
@@ -1446,7 +1446,7 @@ fn affinity_hart0_runs_on_hart0() {
 /// full cross-hart wake-up chain: spawn fires an IPI; HART1 (in wfi)
 /// takes a software-interrupt trap; trap handler clears MSIP and runs
 /// preempt; affinity filter accepts the new thread on HART1; switch
-/// happens. Inside the thread `cpu_id() == 1` proves it landed on the
+/// happens. Inside the thread `hart_id() == 1` proves it landed on the
 /// right hart. If the thread never completes, the IPI delivery or
 /// trap-handler arm is broken.
 #[test_case]
@@ -1458,7 +1458,7 @@ fn affinity_hart1_runs_on_hart1() {
     DONE.store(0, Ordering::Relaxed);
 
     fn pinned_hart1() {
-        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        CPU_OBSERVED.store(crate::arch::hart_id(), Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
     }
 
@@ -1510,7 +1510,7 @@ fn affinity_unpark_wakes_via_ipi() {
 
     fn waiter_on_hart1() {
         C.wait();
-        CPU_OBSERVED.store(crate::arch::cpu_id(), Ordering::Relaxed);
+        CPU_OBSERVED.store(crate::arch::hart_id(), Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
     }
 

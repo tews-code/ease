@@ -11,6 +11,8 @@ pub mod clint {
 // Virtio block device
 pub mod virtio_blk {
     pub const BASE: usize = 0x10001000;
+    pub const BLOCK_SIZE: usize = 512;
+    pub const PAGE_SIZE: usize = 4096;
 }
 
 // Platform Level Interrupt Controller

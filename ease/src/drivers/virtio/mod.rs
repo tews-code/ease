@@ -13,7 +13,6 @@ use ease_macros::profile;
 use crate::arch::mmio;
 use crate::board::{plic, virtio_blk};
 use crate::drivers::plic::with_plic;
-use crate::hal::BLOCK_SIZE;
 use crate::kernel::sync::{Completion, IrqSpinLock, Mutex, TimedOut};
 
 mod queue;
@@ -60,7 +59,7 @@ struct VirtioBlkReq {
     req_type: u32,
     reserved: u32,
     sector: u64,
-    data: [u8; BLOCK_SIZE],
+    data: [u8; virtio_blk::BLOCK_SIZE],
     status: u8,
 }
 
@@ -109,7 +108,7 @@ impl VirtioBlkDev {
         // Get the disk capacity.
         let cap_lo = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG) as u64;
         let cap_hi = mmio::read32(virtio_blk::BASE, VIRTIO_REG_DEVICE_CONFIG + 4) as u64;
-        let capacity = (cap_hi << 32 | cap_lo) * BLOCK_SIZE as u64;
+        let capacity = (cap_hi << 32 | cap_lo) * virtio_blk::BLOCK_SIZE as u64;
 
         crate::println!("virtio-blk: capacity is {} bytes", capacity);
 
@@ -177,7 +176,7 @@ impl VirtioBlkDev {
                 &raw mut vq.descs[1],
                 VirtqDesc {
                     addr: (addr + mem::offset_of!(VirtioBlkReq, data)) as u64,
-                    len: BLOCK_SIZE as u32,
+                    len: virtio_blk::BLOCK_SIZE as u32,
                     flags: (VIRTQ_DESC_F_NEXT | flags) as u16,
                     next: 2,
                 },
@@ -202,7 +201,7 @@ impl VirtioBlkDev {
     }
 
     pub fn block_count(&self) -> u32 {
-        (self.capacity / BLOCK_SIZE as u64) as u32
+        (self.capacity / virtio_blk::BLOCK_SIZE as u64) as u32
     }
 
     // Bounds check, clear VIRTIO_COMPLETE, set up sector/type, call queue_submit
@@ -211,7 +210,7 @@ impl VirtioBlkDev {
         unsafe {
             VIRTIO_COMPLETE.reset();
         }
-        if block as u64 >= self.capacity / BLOCK_SIZE as u64 {
+        if block as u64 >= self.capacity / virtio_blk::BLOCK_SIZE as u64 {
             return Err(BlkError::SectorOutOfRange);
         }
         unsafe { write_volatile(&raw mut self.req.sector, block as u64) };
@@ -221,7 +220,7 @@ impl VirtioBlkDev {
     }
 
     // Check status byte, copy data out
-    fn finish_read(&mut self, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    fn finish_read(&mut self, buf: &mut [u8; virtio_blk::BLOCK_SIZE]) -> Result<(), BlkError> {
         let status = unsafe { read_volatile(&raw const self.req.status) };
         if status != 0 {
             return Err(BlkError::DeviceError(status));
@@ -232,12 +231,16 @@ impl VirtioBlkDev {
     }
 
     // Bounds check, clear flag, copy data in, set up sector/type, queue_submit
-    fn submit_write(&mut self, block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    fn submit_write(
+        &mut self,
+        block: u32,
+        buf: &[u8; virtio_blk::BLOCK_SIZE],
+    ) -> Result<(), BlkError> {
         //  Safe in Virtio's use because IO_IN_PROGRESS serialises I/O.
         unsafe {
             VIRTIO_COMPLETE.reset();
         }
-        if block as u64 >= self.capacity / BLOCK_SIZE as u64 {
+        if block as u64 >= self.capacity / virtio_blk::BLOCK_SIZE as u64 {
             return Err(BlkError::SectorOutOfRange);
         }
         unsafe { write_volatile(&raw mut self.req.sector, block as u64) };
@@ -262,7 +265,7 @@ const IO_TIMEOUT_MS: u64 = 1_000;
 // Lock held when IO is in progress (interrupts enabled)
 static IO_IN_PROGRESS: Mutex<()> = Mutex::new(());
 
-pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+pub fn read_block(block: u32, buf: &mut [u8; virtio_blk::BLOCK_SIZE]) -> Result<(), BlkError> {
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_read(block))?;
 
@@ -272,7 +275,7 @@ pub fn read_block(block: u32, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError
     Ok(())
 }
 
-pub fn write_block(block: u32, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+pub fn write_block(block: u32, buf: &[u8; virtio_blk::BLOCK_SIZE]) -> Result<(), BlkError> {
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_write(block, buf))?;
 
@@ -349,7 +352,7 @@ mod test {
     #[test_case]
     fn read_block_zero_fat16_signature() {
         // Block 0 of a FAT16 volume has "FAT16" at byte offset 54
-        let mut buf = [0u8; BLOCK_SIZE];
+        let mut buf = [0u8; virtio_blk::BLOCK_SIZE];
         read_block(0, &mut buf).unwrap();
         assert_eq!(&buf[54..59], b"FAT16");
     }
@@ -357,11 +360,11 @@ mod test {
     #[test_case]
     fn write_and_read_back() {
         let s = "hello from kernel!!!";
-        let mut buf = [0u8; BLOCK_SIZE];
+        let mut buf = [0u8; virtio_blk::BLOCK_SIZE];
         buf[..s.len()].copy_from_slice(s.as_bytes());
         write_block(1, &buf).unwrap();
 
-        let mut buf2 = [0u8; BLOCK_SIZE];
+        let mut buf2 = [0u8; virtio_blk::BLOCK_SIZE];
         read_block(1, &mut buf2).unwrap();
         assert_eq!(&buf2[..s.len()], s.as_bytes());
     }
@@ -397,7 +400,7 @@ mod benchmarks {
             baselines::READ_BLOCK,
             ITERATIONS,
             || {
-                let mut buf = [0u8; BLOCK_SIZE];
+                let mut buf = [0u8; virtio_blk::BLOCK_SIZE];
                 read_block(0, &mut buf).unwrap();
             },
         );
@@ -409,7 +412,7 @@ mod benchmarks {
             baselines::WRITE_BLOCK,
             ITERATIONS,
             || {
-                let buf = [0u8; BLOCK_SIZE];
+                let buf = [0u8; virtio_blk::BLOCK_SIZE];
                 write_block(1, &buf).unwrap();
             },
         );
@@ -421,7 +424,7 @@ mod benchmarks {
             baselines::WRITE_READ_BLOCK,
             ITERATIONS,
             || {
-                let mut buf = [0u8; BLOCK_SIZE];
+                let mut buf = [0u8; virtio_blk::BLOCK_SIZE];
                 write_block(1, &buf).unwrap();
                 read_block(1, &mut buf).unwrap();
             },

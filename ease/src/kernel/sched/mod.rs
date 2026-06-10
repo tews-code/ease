@@ -83,7 +83,7 @@ pub fn idle_thread() -> ! {
     loop {
         with_interrupts_disabled(|_cs| {
             if !percpu::needs_reschedule() {
-                crate::arch::wait_for_interrupt();
+                crate::arch::interrupts::wait_for_interrupt();
             }
         });
         schedule();

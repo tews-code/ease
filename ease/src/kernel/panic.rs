@@ -1,6 +1,6 @@
 //! Panic handler
 
-use crate::hal::wait_for_interrupt;
+use crate::arch::interrupts::wait_for_interrupt;
 use crate::kernel::percpu;
 use crate::kernel::stack::check_canary;
 #[cfg(feature = "paint-stack")]

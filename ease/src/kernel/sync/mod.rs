@@ -4,7 +4,7 @@
 use core::marker::PhantomData;
 
 #[cfg(target_os = "none")]
-use crate::arch::{disable_interrupts, restore_interrupts};
+use crate::arch::interrupts;
 
 #[cfg(target_os = "none")]
 mod completion;
@@ -74,9 +74,9 @@ pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce(CriticalSection<'_>) -> R,
 {
-    let prev = disable_interrupts();
+    let prev = interrupts::disable();
     let result = f(unsafe { CriticalSection::new() });
-    restore_interrupts(prev);
+    interrupts::restore(prev);
 
     result
 }

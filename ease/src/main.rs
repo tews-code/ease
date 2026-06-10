@@ -36,7 +36,6 @@ mod bench;
 mod board;
 mod drivers;
 mod fs;
-mod hal;
 mod kernel;
 mod qemu;
 mod shell;
@@ -66,7 +65,7 @@ fn kernel_init() {
     drivers::uart::init();
     kernel::ipi::init();
     sched::bootstrap(0);
-    arch::enable_interrupts();
+    arch::interrupts::enable();
 
     // Spawn a profiler thread early if we want to profile the initialisation
     #[cfg(feature = "profile")]
@@ -106,7 +105,7 @@ extern "C" fn secondary_main() -> ! {
     sched::bootstrap(1);
     kernel::ipi::init();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
-    arch::enable_interrupts();
+    arch::interrupts::enable();
     // Drop into idle
     sched::idle_thread();
 }

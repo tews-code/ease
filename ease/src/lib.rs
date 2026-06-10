@@ -58,22 +58,14 @@ macro_rules! println {
 // `riscv32imac-unknown-none-elf`.
 #[allow(dead_code)]
 mod arch {
-    #[inline]
-    pub fn disable_interrupts() -> usize {
-        0
+    pub mod interrupts {
+        #[inline]
+        pub fn disable() -> usize {
+            0
+        }
+        #[inline]
+        pub fn restore(_prev: usize) {}
     }
-    #[inline]
-    pub fn restore_interrupts(_prev: usize) {}
-
-    // Stubs for `kernel::profile` so the lib crate can compile profiled
-    // functions in shared modules (e.g. `kernel::collection::spsc`). The
-    // profile module itself is never exercised from host tests; these
-    // stubs just satisfy the type checker.
-    #[inline]
-    pub fn cpu_id() -> usize {
-        0
-    }
-
     pub mod csr {
         #[inline]
         pub fn rdcycles() -> u64 {
@@ -85,6 +77,15 @@ mod arch {
                 0
             }
         }
+    }
+
+    // Stubs for `kernel::profile` so the lib crate can compile profiled
+    // functions in shared modules (e.g. `kernel::collection::spsc`). The
+    // profile module itself is never exercised from host tests; these
+    // stubs just satisfy the type checker.
+    #[inline]
+    pub fn hart_id() -> usize {
+        0
     }
 }
 
@@ -106,7 +107,7 @@ mod drivers {
             Timeout,
         }
 
-        // Must match crate::hal::BLOCK_SIZE in the kernel binary.
+        // Must match crate::board::virtio_blk::BLOCK_SIZE in the kernel binary.
         pub fn read_block(_block: u32, _buf: &mut [u8; 512]) -> Result<(), BlkError> {
             panic!("virtio::read_block stub: must not be called from the lib crate")
         }

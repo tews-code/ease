@@ -1,10 +1,10 @@
 //! Trap handler for both interrupts and exceptions
-use crate::arch::cpu_id;
 use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::mstatus;
 use crate::arch::csr::{mepc, mtval};
+use crate::arch::hart_id;
 use crate::arch::trap::TrapFrame;
 use crate::arch::usermode;
 use crate::board;
@@ -40,7 +40,7 @@ pub(crate) extern "C" fn trap_handler_h1(frame: &mut TrapFrame) {
 fn trap_handler_impl(frame: &mut TrapFrame) {
     // Check if IRQ stack canary is in place
     // Safety: Address is safe to read and aligned from linker script
-    let irq_stack_base = if cpu_id() == 0 {
+    let irq_stack_base = if hart_id() == 0 {
         &raw const __hart0_irq_stack_base as *const usize
     } else {
         &raw const __hart1_irq_stack_base as *const usize
@@ -74,7 +74,7 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
         percpu::set_preempt_mepc(frame.mepc);
         percpu::set_preempt_mstatus(frame.mstatus);
         // Set up frame for trampoline
-        frame.mepc = if cpu_id() == 0 {
+        frame.mepc = if hart_id() == 0 {
             preempt_trampoline_h0 as *const () as usize
         } else {
             preempt_trampoline_h1 as *const () as usize
@@ -150,7 +150,7 @@ fn irq_panic() -> ! {
     );
     panic!(
         "IRQ stack canary not found for HART {}",
-        crate::arch::cpu_id()
+        crate::arch::hart_id()
     );
 }
 

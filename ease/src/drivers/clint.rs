@@ -1,6 +1,6 @@
 //! SiFive CLINT Driver
 
-use crate::arch::{cpu_id, mmio};
+use crate::arch::{hart_id, mmio};
 use crate::board::clint;
 use crate::kernel::sync::IrqSpinLock;
 
@@ -17,11 +17,11 @@ impl SiFiveClint {
     /// Get the timer comparison 'mtimecmp'
     #[expect(dead_code)]
     pub fn get_mtimecmp(&self) -> u64 {
-        let cpu_id = cpu_id();
+        let hart = hart_id();
         loop {
-            let hi = mmio::read32(clint::BASE, Self::MTIMECMP + cpu_id * 8 + 4);
-            let lo = mmio::read32(clint::BASE, Self::MTIMECMP + cpu_id * 8);
-            let hi_again = mmio::read32(clint::BASE, Self::MTIMECMP + cpu_id * 8 + 4);
+            let hi = mmio::read32(clint::BASE, Self::MTIMECMP + hart * 8 + 4);
+            let lo = mmio::read32(clint::BASE, Self::MTIMECMP + hart * 8);
+            let hi_again = mmio::read32(clint::BASE, Self::MTIMECMP + hart * 8 + 4);
             if hi == hi_again {
                 return ((hi as u64) << 32) | (lo as u64);
             }
@@ -30,16 +30,16 @@ impl SiFiveClint {
 
     /// Set the timer comparison `mtimecmp` to trigger interrupt at given ticks count
     pub fn set_mtimecmp(&mut self, ticks_trigger_value: u64) {
-        let cpu_id = cpu_id();
+        let hart = hart_id();
         // Safety: CLINT MTIMECMP is a valid MMIO register at BASE + MTIMECMP.
         let hi = (ticks_trigger_value >> 32) as u32;
         let lo = ticks_trigger_value as u32;
         // Step 1: Set high word to MAX so mtimecmp is impossibly large (no spurious interrupt)
-        mmio::write32(clint::BASE, Self::MTIMECMP + cpu_id * 8 + 4, u32::MAX);
+        mmio::write32(clint::BASE, Self::MTIMECMP + hart * 8 + 4, u32::MAX);
         // Step 2: Write the actual low word (mtimecmp still huge due to MAX high word)
-        mmio::write32(clint::BASE, Self::MTIMECMP + cpu_id * 8, lo);
+        mmio::write32(clint::BASE, Self::MTIMECMP + hart * 8, lo);
         // Step 3: Write the actual high word (mtimecmp is now the correct value)
-        mmio::write32(clint::BASE, Self::MTIMECMP + cpu_id * 8 + 4, hi);
+        mmio::write32(clint::BASE, Self::MTIMECMP + hart * 8 + 4, hi);
     }
 
     /// Read the current mtime counter tick value
@@ -67,7 +67,7 @@ impl SiFiveClint {
     /// Clear the Machine Software Interrupt Pending for the current HART
     pub fn clear_msip(&mut self) {
         // Safety: CLINT MSIP is valid for writes at BASE + MSIP
-        mmio::write32(clint::BASE, MSIP + cpu_id() * 4, 0);
+        mmio::write32(clint::BASE, MSIP + hart_id() * 4, 0);
     }
 }
 

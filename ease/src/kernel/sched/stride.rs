@@ -11,7 +11,7 @@ use super::types::{
 };
 use crate::arch::context::Context;
 use crate::arch::trap::TrapFrame;
-use crate::arch::{cpu_id, csr};
+use crate::arch::{csr, hart_id};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
 use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
@@ -337,7 +337,7 @@ impl ThreadsInner {
     )> {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
-        let this_hart = crate::arch::cpu_id() as u8;
+        let this_hart = crate::arch::hart_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
         for (idx, tcb) in self.thread_blocks.iter().enumerate() {
@@ -373,7 +373,7 @@ impl ThreadsInner {
     )> {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
-        let this_hart = crate::arch::cpu_id() as u8;
+        let this_hart = crate::arch::hart_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
         for (idx, tcb) in self.thread_blocks.iter().enumerate() {
@@ -445,7 +445,7 @@ impl ThreadsInner {
             pmp_config.activate();
         } else {
             // Kernel thread has IRQ stack top in mscratch
-            if cpu_id() == 0 {
+            if hart_id() == 0 {
                 unsafe {
                     csr::mscratch::write(&raw const __hart0_irq_stack_top as usize);
                 }
@@ -578,7 +578,7 @@ impl Scheduler {
                                         State::Running => {
                                             threads.thread_blocks[idx].marked_for_exit = true;
                                             // IPI is an MMIO write safe under lock
-                                            crate::kernel::ipi::send(cpu_id() ^ 1);
+                                            crate::kernel::ipi::send(hart_id() ^ 1);
                                         }
                                     }
                                 }
@@ -642,7 +642,7 @@ impl Scheduler {
         // If the spawned thread has affinity for the other hart, send an IPI
         drop(threads);
         if let Some(h) = affinity
-            && h as usize != crate::arch::cpu_id()
+            && h as usize != crate::arch::hart_id()
         {
             crate::kernel::ipi::send(h as usize);
         } else {
@@ -727,7 +727,7 @@ impl Scheduler {
 
         // If the spawned thread has affinity for the other hart, send an IPI
         if let Some(h) = affinity
-            && h as usize != crate::arch::cpu_id()
+            && h as usize != crate::arch::hart_id()
         {
             crate::kernel::ipi::send(h as usize);
         } else {
@@ -796,7 +796,7 @@ impl Scheduler {
         drop(sched);
         // If the spawned thread has affinity for the other hart, send an IPI
         if let Some(h) = affinity
-            && h as usize != crate::arch::cpu_id()
+            && h as usize != crate::arch::hart_id()
         {
             crate::kernel::ipi::send(h as usize);
         } else {
@@ -864,7 +864,7 @@ impl Scheduler {
             threads.set_next_timer(earliest_deadline, ready_count);
             drop(threads);
 
-            if cpu_id() == 0 {
+            if hart_id() == 0 {
                 //Safety: Option<NonNull<u8>> is bit for bit identical to *mut u8
                 //  - Same size, same alignment (both one pointer-word).
                 // - None is represented by the all-zeroes / null bit pattern.
@@ -954,7 +954,7 @@ impl Scheduler {
                 threads.activate_thread(next_idx, Some(curr_idx));
                 drop(threads);
 
-                if cpu_id() == 0 {
+                if hart_id() == 0 {
                     unsafe {
                         switch_to_h0(prev_sp_ptr as *mut *mut u8, next_sp_ptr as *mut *mut u8);
                     }
@@ -1059,7 +1059,7 @@ impl Scheduler {
         if did_unpark {
             // If the unparked thread has affinity for the other hart, send an IPI
             if let Some(h) = affinity
-                && h as usize != crate::arch::cpu_id()
+                && h as usize != crate::arch::hart_id()
             {
                 crate::kernel::ipi::send(h as usize);
             } else {
