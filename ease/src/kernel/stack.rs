@@ -111,3 +111,48 @@ pub(crate) unsafe fn print_stack_watermark(
         id
     );
 }
+
+// Display stack depth used
+#[cfg(feature = "paint-stack")]
+pub(crate) fn print_irq_idle_stacks() {
+    // Safety: Linker ensures stack addresses are aligned and available for reads
+    unsafe {
+        unsafe extern "C" {
+            static __hart0_irq_stack_base: u8;
+            static __hart0_irq_stack_top: u8;
+            static __hart1_irq_stack_base: u8;
+            static __hart1_irq_stack_top: u8;
+            static __hart0_idle_stack_base: u8;
+            static __hart0_idle_stack_top: u8;
+            static __hart1_idle_stack_base: u8;
+            static __hart1_idle_stack_top: u8;
+        }
+
+        use crate::kernel::stack::print_stack_watermark;
+
+        print_stack_watermark(
+            "IRQ Hart",
+            0,
+            &raw const __hart0_irq_stack_base as usize,
+            &raw const __hart0_irq_stack_top as usize,
+        );
+        print_stack_watermark(
+            "IRQ Hart",
+            1,
+            &raw const __hart1_irq_stack_base as usize,
+            &raw const __hart1_irq_stack_top as usize,
+        );
+        print_stack_watermark(
+            "Idle Hart",
+            0,
+            &raw const __hart0_idle_stack_base as usize,
+            &raw const __hart0_idle_stack_top as usize,
+        );
+        print_stack_watermark(
+            "Idle Hart",
+            1,
+            &raw const __hart1_idle_stack_base as usize,
+            &raw const __hart1_idle_stack_top as usize,
+        );
+    }
+}

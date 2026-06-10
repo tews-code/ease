@@ -53,8 +53,11 @@ where
     f(&mut plic)
 }
 
+pub struct PlicInitToken(());
+
 /// Initialise by enabling interrupts on this HART
-pub fn init() {
+pub fn init() -> PlicInitToken {
     with_plic(|p| p.set_threshold(0));
     mie::enable_bits(mie::MEIE);
+    PlicInitToken(())
 }

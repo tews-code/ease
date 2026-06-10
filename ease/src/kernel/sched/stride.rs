@@ -471,6 +471,8 @@ unsafe extern "C" {
     static __hart1_idle_stack_base: u8;
 }
 
+pub struct SchedInitToken(());
+
 impl Scheduler {
     const fn new() -> Self {
         Self {
@@ -483,7 +485,7 @@ impl Scheduler {
     }
 
     // Set up the boot thread for each hart
-    pub(super) fn bootstrap(&self, hartid: usize) {
+    pub(super) fn bootstrap(&self, hartid: usize) -> SchedInitToken {
         let id = next_thread_id();
         let idx = slot_for_boot(hartid);
         let mut threads = self.threads.lock();
@@ -510,6 +512,7 @@ impl Scheduler {
         };
         percpu::set_idle_thread_idx(idx);
         threads.activate_thread(idx, None);
+        SchedInitToken(())
     }
 
     /// Helper function to clean up post switch threads

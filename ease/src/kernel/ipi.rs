@@ -3,8 +3,11 @@
 use crate::arch::csr::mie;
 use crate::drivers::clint::with_clint;
 
-pub fn init() {
+pub struct IpiInitToken(());
+
+pub fn init() -> IpiInitToken {
     mie::enable_bits(mie::MSIE);
+    IpiInitToken(())
 }
 
 pub fn send(hart_id: usize) {

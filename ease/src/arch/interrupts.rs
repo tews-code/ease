@@ -6,7 +6,7 @@ use super::csr;
 pub(crate) fn enable() {
     unsafe {
         // Write mstatus to set MIE
-        core::arch::asm!("csrw mstatus, {}", in(reg) csr::mstatus::MIE);
+        core::arch::asm!("csrsi mstatus, {}", const csr::mstatus::MIE);
     }
 }
 
@@ -36,6 +36,7 @@ pub(crate) fn restore(prev: usize) {
 }
 
 /// Checks if interrupts are enabled
+#[allow(dead_code)]
 pub(crate) fn enabled() -> bool {
     let mstatus: usize;
     unsafe { core::arch::asm!("csrr {}, mstatus", out(reg) mstatus) };

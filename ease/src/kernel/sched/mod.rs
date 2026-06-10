@@ -23,7 +23,7 @@ use stride::SCHEDULER;
 pub use types::THREADS_MAX;
 
 #[allow(unused_imports)]
-pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
+pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN, SchedInitToken};
 #[allow(unused_imports)]
 pub(crate) use types::{ExitReason, Qos, State, ThreadHandle};
 
@@ -95,9 +95,11 @@ pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
     Builder::new().spawn(entry)
 }
 
+use crate::kernel::timer::TimerInitToken;
+
 /// Set up the boot thread
-pub fn bootstrap(hartid: usize) {
-    SCHEDULER.bootstrap(hartid);
+pub fn bootstrap(hartid: usize, _timer_token: TimerInitToken) -> SchedInitToken {
+    SCHEDULER.bootstrap(hartid)
 }
 
 /// Voluntarily yield the current thread

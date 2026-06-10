@@ -8,10 +8,13 @@ use crate::drivers::clint::{Clint, with_clint};
 pub const CYCLES_PER_MS: u64 = TIMER_FREQ_HZ / 1_000;
 pub const CYCLES_PER_US: u64 = TIMER_FREQ_HZ / 1_000_000;
 
+pub struct TimerInitToken(());
+
 /// Initialise the timer for a HART
-pub fn init() {
+pub fn init() -> TimerInitToken {
     with_clint(|c| c.set_mtimecmp(u64::MAX));
     csr::mie::enable_bits(csr::mie::MTIE);
+    TimerInitToken(())
 }
 
 /// Set the next timer interrupt deadline in clint cycles

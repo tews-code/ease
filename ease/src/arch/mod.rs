@@ -4,7 +4,6 @@ pub mod boot;
 pub mod context;
 #[allow(dead_code)]
 pub mod csr;
-#[allow(dead_code)]
 pub mod interrupts;
 pub mod mmio;
 pub mod percore_text;

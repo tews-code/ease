@@ -134,8 +134,12 @@ pub fn enable_rx_interrupt() {
     mmio::write8(uart::BASE, IER, 1);
 }
 
+use crate::drivers::plic::PlicInitToken;
+
+pub struct UartInitToken(());
+
 /// Initialise the UART
-pub fn init() {
+pub fn init(_token: PlicInitToken) -> UartInitToken {
     // Plic setup
     with_plic(|p| {
         p.set_priority(plic::UART0_IRQ, 1);
@@ -143,4 +147,5 @@ pub fn init() {
     });
     // Uart enable
     enable_rx_interrupt();
+    UartInitToken(())
 }
