@@ -68,7 +68,7 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
         Trap::Exception(
             code @ (INSTRUCTION_ACCESS_FAULT | LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT),
         ) => handle_access_fault(frame, code),
-        Trap::Exception(code) => handle_exception(code),
+        Trap::Exception(code) => handle_exception(frame, code),
     }
     if percpu::needs_reschedule() {
         percpu::set_preempt_mepc(frame.mepc);
@@ -132,7 +132,7 @@ fn handle_access_fault(frame: &mut TrapFrame, code: usize) {
     if frame.is_from_user() {
         exit_from_user(frame, ExitReason::Fault);
     } else {
-        handle_exception(code);
+        handle_exception(frame, code);
     }
 }
 
@@ -184,14 +184,22 @@ fn handle_unknown_interrupt(code: usize) {
 #[inline(never)]
 #[cold]
 #[cfg_attr(feature = "profile", profile)]
-fn handle_exception(code: usize) {
+fn handle_exception(frame: &TrapFrame, code: usize) {
     match code {
         ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
-        LOAD_ACCESS_FAULT => panic!(
-            "Load access fault {} (=mcause) attempting to load address {:x} (=mtval) from instruction {:x} (=mepc)",
+        LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => panic!(
+            "{} access fault {} (=mcause) attempted at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
+            match code {
+                LOAD_ACCESS_FAULT => "Load",
+                STORE_ACCESS_FAULT => "Store",
+                _ => {
+                    ""
+                }
+            },
             code,
             mtval::read(),
-            mepc::read()
+            mepc::read(),
+            frame.ra,
         ),
         _ => panic!(
             "Unknown exception code {:x} mepc {:x} mtval {:x}",
