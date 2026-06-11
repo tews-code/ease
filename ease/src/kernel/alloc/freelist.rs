@@ -78,9 +78,6 @@
 // 0x8001_0024/ +-----------+
 // __heap_end
 
-#![allow(dead_code)]
-
-use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -231,10 +228,7 @@ impl FreeBlockList {
         sentinel_guard.next = new;
         sentinel_guard.size = 0;
     }
-}
 
-// Safety: Allocations and deallocations are implemented in these functions
-unsafe impl GlobalAlloc for FreeBlockList {
     //   FREE_BLOCK_LIST.sentinel | alloc  | free_block |  alloc  | (de)alloc | alloc | free_block |
     //            .size: 0                 ^     .size                                ^    .size
     //            .next -------------------+     .next -------------------------------+    .next: None
@@ -258,45 +252,52 @@ unsafe impl GlobalAlloc for FreeBlockList {
         // Walk the free list looking for a valid slot to reuse; block at end is all remaining memory; otherwise OOM
         // Use pointers to keep heap provenance
         // At start the current needs to be the `.next` of the sentinel, while prev is the sentinel itself
+        // let mut prev = &raw mut sentinel_guard;
         let mut prev = core::ptr::addr_of_mut!(*sentinel_guard);
         let mut current = unsafe { (*prev).next };
-        // Work out the aligned size
-        let alloc_size = align_up(layout.size(), BASE_ALIGN);
+        // Work out the aligned size needed
+        if let Some(alloc_size) = layout.size().checked_next_multiple_of(BASE_ALIGN) {
+            while !current.is_null() {
+                // Check if both alignment padding and minimum layout size would fit into this block
+                let aligned_size_fits_padding = align_up(
+                    current.addr(),
+                    BASE_ALIGN.max(layout.align()),
+                )
+                .map(|aligned_addr| aligned_addr - current.addr())
+                .filter(|&bottom_padding| unsafe { (*current).size } > bottom_padding + alloc_size);
 
-        while !current.is_null() {
-            // Padding requirement if we were reuse this free block to allocate
-            let mut padding_size =
-                align_up(current.addr(), BASE_ALIGN.max(layout.align())) - current.addr();
-            // Can padding and alloc fit into the free block?
-            if unsafe { (*current).size } >= padding_size + alloc_size {
-                // It fits!
-                // Is the padding large enough to split off as its own block?
-                if padding_size >= core::mem::size_of::<FreeBlock>() {
-                    // We can split off the padding as a new free block - waste not, want not
-                    (prev, current) = unsafe { FreeBlock::split_right(current, padding_size) };
-                    padding_size = 0;
+                if let Some(mut bottom_padding_size) = aligned_size_fits_padding {
+                    // It fits!
+                    if bottom_padding_size >= core::mem::size_of::<FreeBlock>() {
+                        // We can split off the padding as a new free block - waste not, want not
+                        (prev, current) =
+                            unsafe { FreeBlock::split_right(current, bottom_padding_size) };
+                        bottom_padding_size = 0;
+                    }
+
+                    if unsafe { (*current).size } - alloc_size > core::mem::size_of::<FreeBlock>() {
+                        // There is size at the end of the free block to spare
+                        // Split that off as a new free block
+                        (current, _) = unsafe { FreeBlock::split_right(current, alloc_size) };
+                    }
+
+                    // Now link previous to next, skipping over current which will be allocated
+                    unsafe { (*prev).next = (*current).next };
+
+                    #[cfg(test)]
+                    let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(test)]
+                    let _ = ALLOCATED_BYTES.fetch_add(alloc_size as u32, Ordering::Relaxed);
+                    #[cfg(test)]
+                    let _ = PADDING_BYTES.fetch_add(bottom_padding_size as u32, Ordering::Relaxed);
+                    #[cfg(test)]
+                    let _ = HEAP_TOP
+                        .fetch_max(unsafe { FreeBlock::end_addr(current) }, Ordering::Relaxed);
+
+                    // Return a pointer to the start of the allocated region
+                    return unsafe { current.byte_add(bottom_padding_size) } as *mut u8;
                 }
-                // Is there enough left over space at the end of the allocation to fit another free block?
-                if unsafe { (*current).size } - alloc_size >= core::mem::size_of::<FreeBlock>() {
-                    // We can add a free block after the allocation
-                    (current, _) = unsafe { FreeBlock::split_right(current, alloc_size) };
-                }
-                // Now link previous to next, skipping over current which will be allocated
-                unsafe { (*prev).next = (*current).next };
-
-                #[cfg(test)]
-                let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-                #[cfg(test)]
-                let _ = ALLOCATED_BYTES.fetch_add(alloc_size as u32, Ordering::Relaxed);
-                #[cfg(test)]
-                let _ = PADDING_BYTES.fetch_add(padding_size as u32, Ordering::Relaxed);
-                #[cfg(test)]
-                let _ =
-                    HEAP_TOP.fetch_max(unsafe { FreeBlock::end_addr(current) }, Ordering::Relaxed);
-
-                // Return the allocated pointer
-                return unsafe { current.byte_add(padding_size) } as *mut u8;
-            } else {
+                // Block can't host this allocation (overflow or too small) — advance.
                 // Move the cursor forward
                 prev = current;
                 current = unsafe { (*current).next };
@@ -315,6 +316,11 @@ unsafe impl GlobalAlloc for FreeBlockList {
         if layout.size() == 0 {
             return;
         }
+        debug_assert!(BASE_ALIGN.is_power_of_two());
+        debug_assert!(
+            dealloc_ptr.addr() & (BASE_ALIGN - 1) == 0,
+            "dealloc: misaligned/foreign pointer"
+        );
         let mut sentinel_guard = self.sentinel.lock();
         // Walk the free list looking for the address-related position to free;
         // Use pointers to keep heap provenance
@@ -322,7 +328,7 @@ unsafe impl GlobalAlloc for FreeBlockList {
         let mut prev = core::ptr::addr_of_mut!(*sentinel_guard);
         let mut current = unsafe { (*prev).next };
         // Deallocation size we're trying to fit
-        let dealloc_size = align_up(layout.size(), BASE_ALIGN);
+        let dealloc_size = align_up(layout.size(), BASE_ALIGN).unwrap(); // Size was created successfully by alloc
 
         while !current.is_null() {
             // Check if current free block address is after the dealloc address

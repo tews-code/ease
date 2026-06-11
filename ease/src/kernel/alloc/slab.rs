@@ -1,13 +1,8 @@
 //! Slab allocator
 
 use crate::kernel::sync::AllocatorLock;
-use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-
-// Heap is divided into equal sized slots
-// const SLOT_SIZE: usize = 64; // 64 bytes per slot - this sets the minimum allocation
-// const SLOT_COUNT: usize = 4096; // 4096 x 64 = 256KB - matches linker script
 
 #[cfg(test)]
 pub(crate) static ALLOC_COUNT: AtomicU32 = AtomicU32::new(0);
@@ -106,8 +101,8 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
     ///   - Each additional slab is the same size as the first slab
     /// # Panics
     /// Panics if:
-    ///   - `size` is not a multiple of and greater than `SLOT_SIZE`
-    ///   - The slot size is too small for the slab header list (8 bytes)
+    ///   - `size` is not a power of two
+    ///   - The slot size is too small for the slab header list
     ///   - Additional slab size is not the same as the first slab size
     pub unsafe fn add_slab(&self, start: *mut u8, size: usize) {
         // Heap size of the slab must must be a multiple of the slot size
@@ -131,14 +126,12 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
 
         slab.size = size; // Will be overwritten but with the same value each time
         let slot_count = size / SLOT_SIZE;
-        // We can insert the new slab into the list by pointing the head to
-        // the begining of the new slab, and point the end of the new slab
-        // to the current free slot (what head was pointing to)
+        // We can insert the new slab header into our slab header list
         //
         // If we being called the first time (init) then the head is null
         // and the logic remains the same.
 
-        // Update the header of the previous slab to point to the new slab
+        // Update the header of the previous slab to point to the new slab header
         unsafe {
             core::ptr::write(
                 start as *mut SlabHeader,
@@ -186,12 +179,14 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
     /// to confirm and unlink.
     pub unsafe fn reclaim_slab(&self, reclaim_slab: *mut u8) -> Option<(*mut u8, usize)> {
         let mut slab = self.inner.lock();
-
         // Fast path: peek at the slab's free_count via the bitmask-derived
         // header pointer. If any slot is still in use, return None without
         // touching the slab list at all.
         let header = reclaim_slab as *mut SlabHeader;
         let slot_count = slab.size / SLOT_SIZE;
+        if slab.next.is_null() {
+            return None;
+        }
         if unsafe { (*header).free_count } != slot_count - 1 {
             return None;
         }
@@ -218,10 +213,8 @@ impl<const SLOT_SIZE: usize> Slab<SLOT_SIZE> {
         // this is the conservative response.
         None
     }
-}
 
-unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
-    unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+    pub(super) unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
         // Zero-size requests get a dangling, non-null, aligned pointer
         // per the GlobalAlloc convention. No slot is consumed, which
         // keeps the slab's full capacity available for real
@@ -271,7 +264,7 @@ unsafe impl<const SLOT_SIZE: usize> GlobalAlloc for Slab<SLOT_SIZE> {
         core::ptr::null_mut()
     }
 
-    unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
+    pub(super) unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
         // Mirror alloc's zero-size path: the pointer is dangling (not
         // in the heap), so there's nothing to free and the free-list
         // must not be touched. Callers that received a dangling

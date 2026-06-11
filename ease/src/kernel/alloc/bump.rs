@@ -1,8 +1,6 @@
 //! Bump Allocator
 
-#![allow(dead_code)]
-
-use core::alloc::{GlobalAlloc, Layout};
+use core::alloc::Layout;
 #[cfg(test)]
 use core::sync::atomic::AtomicU32;
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -71,9 +69,7 @@ impl Bump {
         PADDING_BYTES.store(0, Ordering::Relaxed);
         HEAP_TOP.store(0, Ordering::Relaxed);
     }
-}
 
-unsafe impl GlobalAlloc for Bump {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // Zero-size requests get a dangling, non-null, aligned pointer
         // per the GlobalAlloc convention. No heap space is reserved, so
@@ -87,32 +83,36 @@ unsafe impl GlobalAlloc for Bump {
         debug_assert!(!current.is_null());
         let end = self.end.load(Ordering::Relaxed);
         loop {
-            let next_padding = align_up(current.addr(), layout.align()) - current.addr();
-            let next = current.wrapping_add(next_padding);
-            // OOM check
-            let new = next.wrapping_add(layout.size());
-            if new.addr() > end {
-                return core::ptr::null_mut();
-            }
-            match self.next.compare_exchange_weak(
-                current,
-                new,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    #[cfg(test)]
-                    let _ = ALLOCATED_BYTES.fetch_add(layout.size() as u32, Ordering::Relaxed);
-                    #[cfg(test)]
-                    let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-                    #[cfg(test)]
-                    let _ = PADDING_BYTES.fetch_add((next_padding) as u32, Ordering::Relaxed);
-                    #[cfg(test)]
-                    HEAP_TOP.store(new.addr(), Ordering::Relaxed);
-
-                    return next;
+            if let Some(mut next_padding) = align_up(current.addr(), layout.align()) {
+                next_padding -= current.addr();
+                let next = current.wrapping_add(next_padding);
+                // OOM check
+                let new = next.wrapping_add(layout.size());
+                if new.addr() > end {
+                    return core::ptr::null_mut();
                 }
-                Err(actual) => current = actual,
+                match self.next.compare_exchange_weak(
+                    current,
+                    new,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        #[cfg(test)]
+                        let _ = ALLOCATED_BYTES.fetch_add(layout.size() as u32, Ordering::Relaxed);
+                        #[cfg(test)]
+                        let _ = ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        let _ = PADDING_BYTES.fetch_add((next_padding) as u32, Ordering::Relaxed);
+                        #[cfg(test)]
+                        HEAP_TOP.store(new.addr(), Ordering::Relaxed);
+
+                        return next;
+                    }
+                    Err(actual) => current = actual,
+                }
+            } else {
+                return core::ptr::null_mut();
             }
         }
     }

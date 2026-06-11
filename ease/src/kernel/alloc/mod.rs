@@ -12,19 +12,28 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 mod buddy;
+#[cfg(all(test, not(target_os = "none")))]
 mod bump;
+#[cfg(all(test, not(target_os = "none")))]
 mod freelist;
 mod kalloc;
 mod region;
 mod slab;
 
+use crate::kernel::alloc::buddy::{BuddyPd0, BuddyPsram};
+use crate::kernel::alloc::kalloc::KAlloc;
+// Needs to be used by bin compile but not lib compile
 #[allow(unused_imports)]
 pub(crate) use region::{MemRegion, Order};
 
+#[cfg_attr(target_os = "none", global_allocator)]
+static KALLOC_PD1: KAlloc = KAlloc::new();
+static BUDDY_PD0: BuddyPd0 = BuddyPd0::new();
+static BUDDY_PSRAM: BuddyPsram = BuddyPsram::new();
+
 #[cfg(target_os = "none")]
 mod bare_metal_alloc {
-    use crate::kernel::alloc::buddy::{BuddyPd0, BuddyPsram};
-    use crate::kernel::alloc::kalloc::KAlloc;
+    use super::*;
 
     // =============================================================================
     // Heap and Global Allocator
@@ -50,18 +59,21 @@ mod bare_metal_alloc {
     /// heap-used in benchmarks). Only referenced from the `#[cfg(test)]`
     /// allocator benchmarks.
     #[cfg(all(test, feature = "bench"))]
-    pub(crate) fn heap_start_addr() -> usize {
+    pub(crate) fn heap_pd1_start_addr() -> usize {
         &raw const __heap_pd1_start as usize
     }
-
-    #[global_allocator]
-    pub(crate) static KALLOC_PD1: KAlloc = KAlloc::new();
-    pub(crate) static BUDDY_PD0: BuddyPd0 = BuddyPd0::new();
-    pub(crate) static BUDDY_PSRAM: BuddyPsram = BuddyPsram::new();
 
     /// Initialise the global allocator from the linker-defined heap region.
     /// Must be called exactly once during boot, before any allocations.
     pub fn init_global_allocator() {
+        use core::sync::atomic::{AtomicBool, Ordering};
+        static INIT: AtomicBool = AtomicBool::new(false);
+
+        // Return early if we've already been initialised
+        if INIT.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
         let start_pd0 = &raw const __heap_pd0_start as *mut u8;
         let size_pd0 = &raw const __heap_pd0_end as usize - start_pd0 as usize;
         let start_pd1 = &raw const __heap_pd1_start as *mut u8;
@@ -77,7 +89,6 @@ mod bare_metal_alloc {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub(crate) enum Pool {
     UserPd0,
     KernelPd1,
@@ -88,14 +99,13 @@ pub(crate) enum Pool {
 ///
 /// Safety: Caller must ensure allocators are initialised
 #[cfg(target_os = "none")]
-#[allow(dead_code)]
 fn alloc_in(pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
     // Safety: Caller ensures allocators have been initialised
     NonNull::new(unsafe {
         match pool {
-            Pool::UserPd0 => bare_metal_alloc::BUDDY_PD0.alloc(layout),
-            Pool::KernelPd1 => bare_metal_alloc::KALLOC_PD1.alloc(layout),
-            Pool::Psram => bare_metal_alloc::BUDDY_PSRAM.alloc(layout),
+            Pool::UserPd0 => BUDDY_PD0.alloc(layout),
+            Pool::KernelPd1 => KALLOC_PD1.alloc(layout),
+            Pool::Psram => BUDDY_PSRAM.alloc(layout),
         }
     })
 }
@@ -104,38 +114,36 @@ fn alloc_in(pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
 ///
 /// Safety: Caller must ensure the region base pointer and layout are from a valid allocation
 #[cfg(target_os = "none")]
-#[allow(dead_code)]
 fn dealloc_in(pool: Pool, base: NonNull<u8>, layout: Layout) {
     unsafe {
         match pool {
-            Pool::UserPd0 => bare_metal_alloc::BUDDY_PD0.dealloc(base.as_ptr(), layout),
-            Pool::KernelPd1 => bare_metal_alloc::KALLOC_PD1.dealloc(base.as_ptr(), layout),
-            Pool::Psram => bare_metal_alloc::BUDDY_PSRAM.dealloc(base.as_ptr(), layout),
+            Pool::UserPd0 => BUDDY_PD0.dealloc(base.as_ptr(), layout),
+            Pool::KernelPd1 => KALLOC_PD1.dealloc(base.as_ptr(), layout),
+            Pool::Psram => BUDDY_PSRAM.dealloc(base.as_ptr(), layout),
         }
     };
 }
 
 /// Requests allocation from the specified pool - required for host testing
 #[cfg(not(target_os = "none"))]
-#[allow(dead_code)]
 fn alloc_in(_pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
     NonNull::new(unsafe { alloc::alloc::alloc(layout) })
 }
 
 ///  Deallocates from the specified pool - required for host testing
 #[cfg(not(target_os = "none"))]
-#[allow(dead_code)]
 fn dealloc_in(_pool: Pool, base: NonNull<u8>, layout: Layout) {
     unsafe {
         alloc::alloc::dealloc(base.as_ptr(), layout);
     }
 }
 
+#[cfg(all(test, target_os = "none", feature = "bench"))]
+pub(crate) use bare_metal_alloc::heap_pd1_start_addr;
+// main.rs consumes this but isn't part of the lib check
 #[cfg(target_os = "none")]
-#[cfg(all(test, feature = "bench"))]
-pub(crate) use bare_metal_alloc::heap_start_addr;
-#[cfg(target_os = "none")]
-#[allow(unused_imports)] // main.rs consumes this but isn't part of the lib check
+#[allow(unused_imports)]
+// `init_global_allocator()` is called from main.rs during early boot.
 pub use bare_metal_alloc::init_global_allocator;
 
 // QEMU benchmark suite for KAlloc. The `bench` feature is opt-in (not
@@ -144,10 +152,8 @@ pub use bare_metal_alloc::init_global_allocator;
 #[cfg(all(test, target_os = "none", feature = "bench"))]
 mod bench;
 
-// `init_global_allocator()` is called from main.rs during early boot.
-
-#[allow(dead_code)]
-fn align_up(addr: usize, align: usize) -> usize {
+#[cfg(not(target_os = "none"))]
+pub(super) fn align_up(addr: usize, align: usize) -> Option<usize> {
     debug_assert!(align.is_power_of_two());
-    (addr + align - 1) & !(align - 1)
+    addr.checked_add(align - 1).map(|a| a & !(align - 1))
 }

@@ -9,7 +9,7 @@ use core::alloc::Layout;
 use core::hint::black_box;
 use core::sync::atomic::Ordering;
 
-use crate::kernel::alloc::heap_start_addr;
+use crate::kernel::alloc::heap_pd1_start_addr;
 
 // kalloc dispatches small allocs to slab and large allocs to buddy. The
 // bench workloads (alloc_one_byte, alloc_small_mix) are all ≤ 64 bytes,
@@ -106,7 +106,7 @@ fn alloc_benchmarks() {
         "  Allocated: {} bytes",
         ALLOCATED_BYTES.load(Ordering::Relaxed) - DEALLOCATED_BYTES.load(Ordering::Relaxed)
     );
-    let heap_used = HEAP_TOP.load(Ordering::Relaxed) - heap_start_addr();
+    let heap_used = HEAP_TOP.load(Ordering::Relaxed) - heap_pd1_start_addr();
     println!("  Heap used: {} bytes", heap_used);
 
     println!();

@@ -46,7 +46,6 @@ macro_rules! define_buddy {
     ($mod_name:ident, $min_block_size:literal, $max_order:literal) => {
         pub mod $mod_name {
 
-            use core::alloc::GlobalAlloc;
             #[cfg(test)]
             use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -74,7 +73,7 @@ macro_rules! define_buddy {
             pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
 
             struct BuddyInner {
-                list_heads: [*mut FreeBlock; $max_order + 1],
+                list_heads: [*mut FreeBlock; ORDERS_COUNT],
                 heap_addr: usize,
                 pair_bits: Bitmap<BITS, { bitmap_words_for(BITS) }>,
                 // Highest order usable for this heap. Equals `MAX_ORDER` when the heap
@@ -86,7 +85,7 @@ macro_rules! define_buddy {
             impl BuddyInner {
                 // Safety: Caller must ensure list is not empty
                 // In other words, block.next is fine to dereference
-                pub unsafe fn pop(&mut self, order: usize) -> *mut FreeBlock {
+                unsafe fn pop(&mut self, order: usize) -> *mut FreeBlock {
                     let block = self.list_heads[order];
                     // Find the new head block and attach
                     let new_head = unsafe { (*block).next };
@@ -110,7 +109,7 @@ macro_rules! define_buddy {
                 //
                 // Safety: Caller must ensure that block is non-null and points at writable FreeBlock-sized memory
 
-                pub unsafe fn push(&mut self, order: usize, block: *mut FreeBlock) -> bool {
+                unsafe fn push(&mut self, order: usize, block: *mut FreeBlock) -> bool {
                     let old_head = self.list_heads[order];
                     unsafe {
                         (*block).next = old_head;
@@ -179,11 +178,12 @@ macro_rules! define_buddy {
             }
 
             impl Buddy {
-                // Make sure a FreeBlock can always fit
                 const _FREEBLOCK_SIZE_CHECK: () =
-                    assert!(core::mem::size_of::<FreeBlock>() >= $min_block_size);
+                    assert!(core::mem::size_of::<FreeBlock>() <= $min_block_size);
 
                 pub const fn new() -> Self {
+                    // Make sure a FreeBlock can always fit
+                    let _ = Self::_FREEBLOCK_SIZE_CHECK;
                     Self {
                         inner: AllocatorLock::new(BuddyInner {
                             list_heads: [core::ptr::null_mut(); ORDERS_COUNT],
@@ -246,21 +246,22 @@ macro_rules! define_buddy {
                     let block = start as *mut FreeBlock;
                     unsafe { inner.push(top_order, block) };
                 }
-            }
 
-            unsafe impl GlobalAlloc for Buddy {
-                unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-                    // Take lock on the allocator free list
-                    let mut inner = self.inner.lock();
-                    // Ensure already initialised
-                    assert!(inner.heap_addr != 0);
+                pub(crate) unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
                     // If allocation size is zero return a dangling, provenance-free
                     // sentinel. The GlobalAlloc contract forbids dereferencing it.
                     if layout.size() == 0 {
                         return core::ptr::without_provenance_mut(layout.align());
                     }
+                    // Take lock on the allocator free list
+                    let mut inner = self.inner.lock();
+                    // Ensure already initialised
+                    assert!(inner.heap_addr != 0);
                     // Calculate the order of the allocation request, bearing in mind it must be rounded up to MIN_BLOCK_SIZE
                     let alloc_size = layout.size().max(layout.align()).max($min_block_size);
+                    if alloc_size > ($min_block_size << $max_order) {
+                        return core::ptr::null_mut();
+                    };
                     let alloc_order =
                         (alloc_size.next_power_of_two() / $min_block_size).ilog2() as usize;
                     // Walk the array of list heads starting at the desired order
@@ -298,7 +299,11 @@ macro_rules! define_buddy {
                     block as *mut u8
                 }
 
-                unsafe fn dealloc(&self, dealloc_ptr: *mut u8, layout: core::alloc::Layout) {
+                pub(crate) unsafe fn dealloc(
+                    &self,
+                    dealloc_ptr: *mut u8,
+                    layout: core::alloc::Layout,
+                ) {
                     if layout.size() == 0 {
                         return;
                     }
@@ -316,10 +321,6 @@ macro_rules! define_buddy {
                         }
                         let block_off = block.addr() - inner.heap_addr;
                         let buddy_off = Self::buddy_offset(order, block_off);
-                        // let buddy = inner
-                        //     .heap
-                        //     .with_addr(inner.heap.addr() + buddy_off)
-                        //     .cast::<FreeBlock>();
                         let buddy = block.with_addr(inner.heap_addr + buddy_off);
                         unsafe { inner.remove_from_list(order, buddy) };
                         unsafe { inner.remove_from_list(order, block) };
@@ -332,10 +333,10 @@ macro_rules! define_buddy {
                     let _ = DEALLOCATED_BYTES.fetch_add(alloc_size as u32, Ordering::Relaxed);
                 }
             }
+
             #[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
             mod host_tests {
                 use super::*;
-                use core::alloc::GlobalAlloc;
                 use core::alloc::Layout;
 
                 /// Owns a chunk of host memory that the test allocator treats as the heap.
@@ -721,8 +722,8 @@ macro_rules! define_buddy {
     };
 }
 
-define_buddy!(pd0, 8, 15); // Power Domain 0 has SRAM0, 1, 2, 3 of 64KB each, full 256 KB treated as one buddy domain
-define_buddy!(pd1, 8, 14); // Power Domain 1 has SRAM4, 5, 6, 7 as well as scratch RAM SRAM8 and SRAM9. Use Buddy over SRAM6 and SRAM7, while SRAM4 and SRAM5 are used for .bss / .data and buffers.
+define_buddy!(pd0, 16, 15); // Power Domain 0 has SRAM0, 1, 2, 3 of 64KB each, full 256 KB treated as one buddy domain
+define_buddy!(pd1, 16, 14); // Power Domain 1 has SRAM4, 5, 6, 7 as well as scratch RAM SRAM8 and SRAM9. Use Buddy over SRAM6 and SRAM7, while SRAM4 and SRAM5 are used for .bss / .data and buffers.
 define_buddy!(psram, 4096, 10); // PSRAM is 8MB, of which 4MB is used by Buddy
 
 #[allow(unused_imports)]

@@ -6,7 +6,11 @@ use core::alloc::Layout;
 use crate::kernel::alloc::buddy::BuddyPd1;
 use crate::kernel::alloc::slab::Slab;
 
-const BASE_SIZE: usize = 4096;
+pub(super) const BASE_SIZE: usize = 4096;
+const BASE_LAYOUT: Layout = match Layout::from_size_align(BASE_SIZE, BASE_SIZE) {
+    Ok(layout) => layout,
+    Err(_) => panic!("BASE_SIZE is not a valid power-of-two alignment"),
+};
 
 pub struct KAlloc {
     pool_32: Slab<32>,
@@ -34,13 +38,19 @@ impl KAlloc {
 
 impl KAlloc {
     unsafe fn alloc_via<const N: usize>(&self, pool: &Slab<N>, layout: Layout) -> *mut u8 {
+        // If zero-sized allocation short circuit with a non-null ptr return
+        if layout.size() == 0 {
+            return core::ptr::without_provenance_mut(layout.align());
+        }
         let p = unsafe { pool.alloc(layout) };
         if !p.is_null() {
             return p;
         };
         // Need a new slab
-        let region_layout = Layout::from_size_align(BASE_SIZE, BASE_SIZE).unwrap();
-        let region = unsafe { self.buddy.alloc(region_layout) };
+        // In the case where two Harts race, each will take a valid buddy region,
+        // each will add that region to the slab (duplicated waste), but this will
+        // self correct on deallocation and does not cause any corruption
+        let region = unsafe { self.buddy.alloc(BASE_LAYOUT) };
         if region.is_null() {
             return core::ptr::null_mut();
         }; // Buddy has no slabs to give
@@ -53,6 +63,10 @@ impl KAlloc {
     /// Dealloc to a pool, then ask the pool whether the slab containing
     /// the freed slot is now empty. If so, hand its page back to buddy.
     unsafe fn dealloc_via<const N: usize>(&self, pool: &Slab<N>, ptr: *mut u8, layout: Layout) {
+        // If zero-sized allocation just return
+        if layout.size() == 0 {
+            return;
+        }
         unsafe { pool.dealloc(ptr, layout) };
         // The slab that owns this slot starts at the BASE_SIZE-aligned
         // address below ptr. Round down with the bitmask trick.
@@ -77,9 +91,6 @@ unsafe impl GlobalAlloc for KAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-        if layout.size() == 0 {
-            return;
-        }
         let needed = layout.size().max(layout.align());
         match needed {
             0..=32 => unsafe { self.dealloc_via(&self.pool_32, ptr, layout) },
@@ -147,6 +158,16 @@ mod host_tests {
     /// Round an address down to the slab-page boundary.
     fn page_of(ptr: *mut u8) -> usize {
         (ptr as usize) & !(BASE_SIZE - 1)
+    }
+
+    #[test]
+    fn kalloc_zero_size_round_trips() {
+        let heap = TestHeap::new();
+        let k = make_kalloc(&heap);
+        let z = Layout::from_size_align(0, 8).unwrap();
+        let p = unsafe { k.alloc(z) };
+        assert!(!p.is_null());
+        unsafe { k.dealloc(p, z) }; // <-- would fault/Miri-error today
     }
 
     #[test]
@@ -274,5 +295,89 @@ mod host_tests {
         );
 
         unsafe { k.dealloc(p, layout) };
+    }
+
+    #[test]
+    fn reclaim_returns_emptied_slab_page_to_buddy() {
+        // Fill one pool_32 slab page, free every slot, and confirm the
+        // page went back to buddy: a page-sized buddy allocation must then
+        // reuse that exact address. Without the reclaim path the page would
+        // stay owned by the slab and buddy could never hand it out again.
+        let heap = TestHeap::new();
+        let k = make_kalloc(&heap);
+        let layout = Layout::from_size_align(32, 8).unwrap();
+
+        // Allocate 32-byte slots until one spills into a second page — that
+        // marks the first page full. Free the spill immediately so only the
+        // first page stays populated.
+        let first = unsafe { k.alloc(layout) };
+        assert!(!first.is_null());
+        let page = page_of(first);
+        let mut ptrs = vec![first];
+        loop {
+            let p = unsafe { k.alloc(layout) };
+            assert!(!p.is_null());
+            if page_of(p) != page {
+                unsafe { k.dealloc(p, layout) };
+                break;
+            }
+            ptrs.push(p);
+        }
+
+        // Free every slot in the page. The final free empties the slab, so
+        // reclaim hands the 4 KiB page back to buddy.
+        for p in ptrs {
+            unsafe { k.dealloc(p, layout) };
+        }
+
+        // A page-sized buddy allocation should now reuse the reclaimed page.
+        let page_layout = Layout::from_size_align(BASE_SIZE, BASE_SIZE).unwrap();
+        let reused = unsafe { k.alloc(page_layout) };
+        assert!(!reused.is_null());
+        assert_eq!(
+            reused as usize, page,
+            "emptied slab page 0x{:x} was not reclaimed to buddy (got 0x{:x})",
+            page, reused as usize
+        );
+        unsafe { k.dealloc(reused, page_layout) };
+    }
+
+    #[test]
+    fn size_class_boundaries_route_distinctly() {
+        // Probe the two size-class edges. A misrouted boundary lands the
+        // two probe sizes in the same slab page; correct routing keeps them
+        // apart (different pool, or pool vs buddy).
+        let heap = TestHeap::new();
+        let k = make_kalloc(&heap);
+        let l = |s| Layout::from_size_align(s, 8).unwrap();
+
+        // 32 vs 33: last slot of pool_32 vs first of pool_64 — different
+        // pools, hence different slab pages.
+        let p32 = unsafe { k.alloc(l(32)) };
+        let p33 = unsafe { k.alloc(l(33)) };
+        assert!(!p32.is_null() && !p33.is_null());
+        assert_ne!(
+            page_of(p32),
+            page_of(p33),
+            "sizes 32 and 33 share a page — the pool_32/pool_64 boundary is wrong"
+        );
+
+        // 256 vs 257: last slab class vs first buddy size. 257 must come
+        // from buddy, not the pool_256 slab page (whose page buddy gave away).
+        let p256 = unsafe { k.alloc(l(256)) };
+        let p257 = unsafe { k.alloc(l(257)) };
+        assert!(!p256.is_null() && !p257.is_null());
+        assert_ne!(
+            page_of(p256),
+            page_of(p257),
+            "size 257 landed in the pool_256 slab page — slab/buddy boundary off by one"
+        );
+
+        unsafe {
+            k.dealloc(p32, l(32));
+            k.dealloc(p33, l(33));
+            k.dealloc(p256, l(256));
+            k.dealloc(p257, l(257));
+        }
     }
 }
