@@ -84,6 +84,36 @@ pub(crate) struct UserMemMap {
 }
 
 impl UserMemMap {
+    pub(crate) fn load_user_image() {
+        // Copy the user .text from flash to PSRAM
+        // Safety: Linker script sets up symbols to an aligned writeable region
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &raw const __user_text_lma,
+                &raw mut __user_text_start,
+                &raw const __user_text_end as usize - &raw const __user_text_start as usize,
+            );
+        }
+        // Copy the user .data from flash to PSRAM
+        // Safety: Linker script sets up symbols to an aligned writeable region
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                &raw const __user_data_lma,
+                &raw mut __user_data_start,
+                &raw const __user_data_end as usize - &raw const __user_data_start as usize,
+            );
+        }
+        // Zero the user .bss
+        // Safety: Linker script sets up symbols to an aligned writeable region
+        unsafe {
+            core::ptr::write_bytes(
+                &raw mut __user_bss_start,
+                0,
+                &raw const __user_bss_end as usize - &raw const __user_bss_start as usize,
+            );
+        }
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             map: [const { None }; board::PMP_ADDR_COUNT],
@@ -134,39 +164,10 @@ impl UserMemMap {
 
     // Creates a memory map for a user process
     pub(crate) fn for_process() -> Result<UserMemMap, ()> {
+        Self::load_user_image();
         let mut memmap = Self::new();
         memmap.add_region(Role::Text, Order::KB4)?;
         memmap.add_region(Role::DataBss, Order::KB4)?;
         Ok(memmap)
-    }
-}
-
-pub(crate) fn init() {
-    // Copy the user .text from flash to PSRAM
-    // Safety: Linker script sets up symbols to an aligned writeable region
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &raw const __user_text_lma,
-            &raw mut __user_text_start,
-            &raw const __user_text_end as usize - &raw const __user_text_start as usize,
-        );
-    }
-    // Copy the user .data from flash to PSRAM
-    // Safety: Linker script sets up symbols to an aligned writeable region
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            &raw const __user_data_lma,
-            &raw mut __user_data_start,
-            &raw const __user_data_end as usize - &raw const __user_data_start as usize,
-        );
-    }
-    // Zero the user .bss
-    // Safety: Linker script sets up symbols to an aligned writeable region
-    unsafe {
-        core::ptr::write_bytes(
-            &raw mut __user_bss_start,
-            0,
-            &raw const __user_bss_end as usize - &raw const __user_bss_start as usize,
-        );
     }
 }

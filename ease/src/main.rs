@@ -100,7 +100,6 @@ fn kernel_init() {
         drivers::virtio::virtio_blk_init();
         fs::volume::fat16_init();
         let fb = FrameBuffer::init();
-        sched::usermemmap::init();
         sched::Builder::new()
             .with_stack_class(Order::KB16)
             .spawn(move || shell_main(fb))

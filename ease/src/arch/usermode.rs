@@ -187,6 +187,9 @@ mod test {
         use crate::arch::csr::pmp::{NAPOT, R, W, X};
         use crate::arch::pmp::Pmp;
 
+        // Initialise a user memory map - copy .text, .data and zero .bss
+        crate::kernel::sched::usermemmap::UserMemMap::load_user_image();
+
         let text_base = &raw const __user_text_start as usize;
         let text_size = &raw const __user_text_end as usize - text_base;
         let heap_base = &raw const __heap_pd0_start as usize;
