@@ -195,7 +195,7 @@ unsafe extern "C" {
 /// On RP2350 this is the boot ROM
 pub(crate) extern "C" fn protect_null_ptr_deref() {
     let mut pmp = Pmp::new();
-    pmp.set_region(0, 0, 4096, pmp::NAPOT, 0); // Set a 4096 size region to no access starting at address 0
+    pmp.set_region(0, 0, 4096, pmp::NAPOT, pmp::NO_ACCESS); // Set a 4096 size region to no access starting at address 0
     pmp.set_lock(0);
     pmp.activate();
 }
