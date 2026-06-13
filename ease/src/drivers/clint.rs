@@ -15,6 +15,10 @@ const CLEAR: u32 = 0;
 
 /// Set the timer comparison `mtimecmp` to trigger interrupt at given ticks count
 pub fn set_mtimecmp(ticks_trigger_value: u64) {
+    debug_assert!(
+        !crate::arch::interrupts::enabled(),
+        "set mtimecmp must be run with interrupts disabled"
+    );
     let hart = hart_id();
     let hi = (ticks_trigger_value >> 32) as u32;
     let lo = ticks_trigger_value as u32;
