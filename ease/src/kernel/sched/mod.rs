@@ -95,10 +95,8 @@ pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
     Builder::new().spawn(entry)
 }
 
-use crate::kernel::timer::TimerInitToken;
-
 /// Set up the boot thread
-pub fn bootstrap(hartid: usize, _timer_token: TimerInitToken) -> SchedInitToken {
+pub fn bootstrap(hartid: usize) -> SchedInitToken {
     SCHEDULER.bootstrap(hartid)
 }
 

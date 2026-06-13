@@ -1,21 +1,21 @@
 //! Inter processor interrupts
+//!
+//! All IPIs are bare wakeups
+//! Memory ordering is not enforced by the IPI and
+//! assumes that shared structures (e.g. TCBs) are
+//! protected by an IRQ lock
 
 use crate::arch::csr::mie;
-use crate::drivers::clint::with_clint;
+use crate::drivers::clint;
 
-pub struct IpiInitToken(());
-
-pub fn init() -> IpiInitToken {
+pub fn init() {
     mie::enable_bits(mie::MSIE);
-    IpiInitToken(())
 }
 
-pub fn send(hart_id: usize) {
-    with_clint(|c| {
-        c.set_msip(hart_id);
-    })
+pub fn send(hart: usize) {
+    clint::set_msip(hart);
 }
 
 pub fn clear_self() {
-    with_clint(|c| c.clear_msip())
+    clint::clear_msip()
 }

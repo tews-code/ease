@@ -39,11 +39,6 @@ unsafe extern "C" {
     static __hart1_percpu_end: u8;
 }
 
-// Access CLINT software interrupt without locking for early boot only
-const fn clint_hart1_msip(hart_id: usize) -> usize {
-    crate::board::clint::BASE + crate::drivers::clint::MSIP + 4 * hart_id
-}
-
 // Copy memory region
 // Safety: Caller must ensure that the stack is set up with a valid stack pointer
 extern "C" fn copy_region(lma_addr: usize, vma_start_addr: usize, vma_end_addr: usize) {
@@ -87,14 +82,14 @@ extern "C" fn wait_on_doorbell() {
             "bnez t0, 2f",
             "j 1b",
         "2:",
-            // Clear interrupt - note not using CLINT locking at boot
+            // Clear interrupt
             "li t0, {clint_hart1_msip}",
             "sw zero, 0(t0)",
             "csrw mie, zero",
             "ret",
             mie_MSIE = const crate::arch::csr::mie::MSIE,
             mip_MSIP = const crate::arch::csr::mip::MSIP,
-            clint_hart1_msip = const clint_hart1_msip(1),
+            clint_hart1_msip = const crate::drivers::clint::clint_msip_addr(1),
     );
 }
 
@@ -343,7 +338,7 @@ extern "C" fn _start() -> ! {
         sram9_text_end = sym __sram9_text_end,
 
         launch_mailbox = sym LAUNCH_MAILBOX,
-        clint_hart1_msip = const clint_hart1_msip(1),
+        clint_hart1_msip = const crate::drivers::clint::clint_msip_addr(1),
         main = sym crate::main,
         secondary_main = sym crate::secondary_main,
     );

@@ -43,7 +43,6 @@ mod user;
 use drivers::ramfb::FrameBuffer;
 use drivers::uart::UartInitToken;
 use kernel::alloc::Order;
-use kernel::ipi::IpiInitToken;
 use kernel::sched::{self, SchedInitToken};
 
 use crate::board::uart;
@@ -61,15 +60,11 @@ fn shell_main(fb: FrameBuffer) {
     shell.run();
 }
 
-fn interrupts_init_hart0(
-    _ipi_token: IpiInitToken,
-    _sched_token: SchedInitToken,
-    _uart_token: UartInitToken,
-) {
+fn interrupts_init_hart0(_sched_token: SchedInitToken, _uart_token: UartInitToken) {
     arch::interrupts::enable();
 }
 
-fn interrupts_init_hart1(_ipi_token: IpiInitToken, _sched_token: SchedInitToken) {
+fn interrupts_init_hart1(_sched_token: SchedInitToken) {
     arch::interrupts::enable();
 }
 
@@ -79,13 +74,13 @@ fn kernel_init() {
     #[cfg(feature = "profile")]
     kernel::profile::init();
     kernel::alloc::init_global_allocator();
-    let timer_init_token = kernel::timer::init();
+    kernel::timer::init();
     drivers::plic::init();
     drivers::plic::enable(uart::IRQ);
     let uart_init_token = drivers::uart::init();
-    let sched_init_token = sched::bootstrap(0, timer_init_token);
-    let ipi_init_token = kernel::ipi::init();
-    interrupts_init_hart0(ipi_init_token, sched_init_token, uart_init_token);
+    let sched_init_token = sched::bootstrap(0);
+    kernel::ipi::init();
+    interrupts_init_hart0(sched_init_token, uart_init_token);
 
     // Spawn a profiler thread early if we want to profile the initialisation
     #[cfg(feature = "profile")]
@@ -121,11 +116,11 @@ extern "C" fn secondary_main() -> ! {
         core::hint::spin_loop();
     }
     // Perform Hart-specific initialisation
-    let timer_init_token = kernel::timer::init();
-    let sched_init_token = sched::bootstrap(1, timer_init_token);
-    let ipi_init_token = kernel::ipi::init();
+    kernel::timer::init();
+    let sched_init_token = sched::bootstrap(1);
+    kernel::ipi::init();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
-    interrupts_init_hart1(ipi_init_token, sched_init_token);
+    interrupts_init_hart1(sched_init_token);
     // Drop into idle
     sched::idle_thread();
 }

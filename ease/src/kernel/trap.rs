@@ -53,6 +53,11 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
         Trap::Interrupt(TIMER) => sched::mark_for_preempt(),
         Trap::Interrupt(SOFTWARE) => {
             ipi::clear_self();
+            // Note - if the other hart raises an IPI at this point
+            // it will be ignored until after this trap returns,
+            // at which point it will trigger.
+            //
+            // Invariant: we always scan all of threads under lock after the IPI
             sched::mark_for_preempt();
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
