@@ -46,6 +46,9 @@ use kernel::alloc::Order;
 use kernel::ipi::IpiInitToken;
 use kernel::sched::{self, SchedInitToken};
 
+use crate::board::uart;
+use crate::board::virtio_blk;
+
 static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
@@ -77,8 +80,9 @@ fn kernel_init() {
     kernel::profile::init();
     kernel::alloc::init_global_allocator();
     let timer_init_token = kernel::timer::init();
-    let plic_init_token = drivers::plic::init();
-    let uart_init_token = drivers::uart::init(plic_init_token);
+    drivers::plic::init();
+    drivers::plic::enable(uart::IRQ);
+    let uart_init_token = drivers::uart::init();
     let sched_init_token = sched::bootstrap(0, timer_init_token);
     let ipi_init_token = kernel::ipi::init();
     interrupts_init_hart0(ipi_init_token, sched_init_token, uart_init_token);
@@ -98,6 +102,7 @@ fn kernel_init() {
     // Spawn a thread with a deeper stack to complete initialisation
     sched::spawn(|| {
         drivers::virtio::virtio_blk_init();
+        drivers::plic::enable(virtio_blk::IRQ);
         fs::volume::fat16_init();
         let fb = FrameBuffer::init();
         sched::Builder::new()

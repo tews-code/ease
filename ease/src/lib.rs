@@ -58,6 +58,11 @@ macro_rules! println {
 // `riscv32imac-unknown-none-elf`.
 #[allow(dead_code)]
 mod arch {
+    pub mod regs {
+        pub fn sp() -> usize {
+            0
+        }
+    }
     pub mod interrupts {
         #[inline]
         pub fn disable() -> usize {
@@ -70,12 +75,6 @@ mod arch {
         #[inline]
         pub fn rdcycles() -> u64 {
             0
-        }
-        pub mod regs {
-            #[inline]
-            pub fn sp() -> usize {
-                0
-            }
         }
     }
 

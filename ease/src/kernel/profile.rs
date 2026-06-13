@@ -8,8 +8,8 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 
-use crate::arch::csr::regs::sp;
 use crate::arch::hart_id;
+use crate::arch::regs::sp;
 
 const RECORDS_MAX: usize = 1024; // Note that less is useable. We silently drop any others.
 // Using a 16 bit counter

@@ -6,8 +6,7 @@
 use ease_macros::profile;
 
 use crate::arch::mmio;
-use crate::board::{plic, uart};
-use crate::drivers::plic::with_plic;
+use crate::board::uart;
 use crate::kernel::collection::SpscRingBuf;
 use crate::kernel::sync::IrqSpinLock;
 
@@ -134,18 +133,10 @@ pub fn enable_rx_interrupt() {
     mmio::write8(uart::BASE, IER, 1);
 }
 
-use crate::drivers::plic::PlicInitToken;
-
 pub struct UartInitToken(());
 
 /// Initialise the UART
-pub fn init(_token: PlicInitToken) -> UartInitToken {
-    // Plic setup
-    with_plic(|p| {
-        p.set_priority(plic::UART0_IRQ, 1);
-        p.enable(plic::UART0_IRQ);
-    });
-    // Uart enable
+pub fn init() -> UartInitToken {
     enable_rx_interrupt();
     UartInitToken(())
 }

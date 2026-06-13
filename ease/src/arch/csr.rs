@@ -164,18 +164,6 @@ pub mod mip {
     pub const MSIP: usize = 1 << 3;
 }
 
-/// Main registers
-pub mod regs {
-    #[inline(always)]
-    pub fn sp() -> usize {
-        let sp: usize;
-        unsafe {
-            core::arch::asm!("mv {}, sp", out(reg) sp);
-        }
-        sp
-    }
-}
-
 /// Read the RISC-V cycle counter (64-bit)
 ///
 /// Returns the number of clock cycles since reset.

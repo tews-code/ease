@@ -158,19 +158,19 @@ fn irq_panic() -> ! {
 #[cold]
 #[cfg_attr(feature = "profile", profile)]
 fn handle_external_irq() {
-    let irq = plic::with_plic(|p| p.claim());
+    let irq = plic::claim();
     match irq {
         0 => {} // Spurious interrupt
-        board::plic::UART0_IRQ => {
+        board::uart::IRQ => {
             uart::handle_interrupt();
         }
-        board::plic::VIRTIO0_IRQ => {
+        board::virtio_blk::IRQ => {
             virtio::handle_virtio_interrupt();
         }
         _ => panic!("Unknown external interrupt: {}", irq),
     }
     if irq != 0 {
-        plic::with_plic(|p| p.complete(irq));
+        plic::complete(irq);
     }
 }
 

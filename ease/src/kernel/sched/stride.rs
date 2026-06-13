@@ -497,7 +497,7 @@ impl Scheduler {
         threads.thread_blocks[idx] = ThreadControlBlock {
             id,
             state: State::Running,
-            sp: NonNull::new(crate::arch::csr::regs::sp() as *mut u8),
+            sp: NonNull::new(crate::arch::regs::sp() as *mut u8),
             kernel_stack: Some(MemRegion::from_fixed(
                 NonNull::new(match hartid {
                     0 => &raw const __hart0_idle_stack_base as *mut u8,
