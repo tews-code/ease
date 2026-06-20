@@ -54,6 +54,8 @@ static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 // Entry Points
 // =============================================================================
 
+// Not spawned in test builds (see kernel_init), so it would be dead there.
+#[cfg(not(test))]
 fn shell_main(fb: FrameBuffer) {
     let console = shell::console::Console::new(fb);
     let mut shell = shell::Shell::new(console);
@@ -82,6 +84,20 @@ fn kernel_init() {
     kernel::ipi::init();
     interrupts_init_hart0(sched_init_token, uart_init_token);
 
+    // Spawn the trace sampler on HART0 BEFORE the init thread, so it is
+    // already sampling while the init thread runs (and exits) on this hart.
+    // #[cfg(feature = "trace")]
+    // sched::Builder::new()
+    //     .with_stack_class(Order::KB2)
+    //     .spawn(|| {
+    //         use crate::kernel::sched::trace;
+    //         loop {
+    //             crate::sched::sleep(1);
+    //             trace::take_snapshot("timed sample");
+    //         }
+    //     })
+    //     .expect("spawn trace thread");
+
     // Spawn a profiler thread early if we want to profile the initialisation
     #[cfg(feature = "profile")]
     sched::Builder::new()
@@ -95,19 +111,29 @@ fn kernel_init() {
         .expect("unable to spawn profiler thread");
 
     // Spawn a thread with a deeper stack to complete initialisation
-    sched::spawn(|| {
-        drivers::virtio::virtio_blk_init();
-        drivers::plic::enable(virtio_blk::IRQ);
-        fs::volume::fat16_init();
-        let fb = FrameBuffer::init();
-        sched::Builder::new()
-            .with_stack_class(Order::KB16)
-            .spawn(move || shell_main(fb))
-            .expect("spawn shell");
-        // Set the flag to allow HART1 to progress
-        INIT_COMPLETE.store(true, Ordering::Release);
-    })
-    .expect("could not spawn initialisation thread");
+    sched::Builder::new()
+        .with_stack_class(Order::KB16)
+        .spawn(|| {
+            drivers::virtio::virtio_blk_init();
+            drivers::plic::enable(virtio_blk::IRQ);
+            fs::volume::fat16_init();
+            let fb = FrameBuffer::init();
+            // The interactive shell is a permanent runnable thread (its idle
+            // loop WFIs while still the Running thread on its hart). In test
+            // builds it's pure background contention — the runner never feeds
+            // it input — so it skews the latency-sensitive scheduler tests.
+            // Spawn it only outside test builds.
+            #[cfg(not(test))]
+            sched::Builder::new()
+                .with_stack_class(Order::KB16)
+                .spawn(move || shell_main(fb))
+                .expect("spawn shell");
+            #[cfg(test)]
+            let _ = fb; // framebuffer still initialised; shell just not spawned
+            // Set the flag to allow HART1 to progress
+            INIT_COMPLETE.store(true, Ordering::Release);
+        })
+        .expect("could not spawn initialisation thread");
 }
 
 extern "C" fn secondary_main() -> ! {

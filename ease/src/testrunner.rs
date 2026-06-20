@@ -21,7 +21,15 @@ pub(super) trait Testable {
 
 impl<T: Fn()> Testable for T {
     fn run(&self) {
-        print!("{}...\t", core::any::type_name::<T>());
+        let name = core::any::type_name::<T>();
+        // Report live threads entering this test: a leftover from a prior
+        // test shows as an elevated runnable count here.
+        #[cfg(feature = "trace")]
+        crate::kernel::sched::trace::report_live(name);
+        print!("{name}...\t");
+        // Clear the scheduler trace so a panic dump reflects only this test.
+        #[cfg(feature = "trace")]
+        crate::kernel::sched::trace::reset();
         self();
         println!("[\x1b[32mok\x1b[0m]");
     }

@@ -56,10 +56,25 @@ fn this_cpu() -> &'static PerCpu {
     }
 }
 
+// Tracing thread behaviour requires reading cross-Hart PerCpu details
+fn that_cpu() -> &'static PerCpu {
+    match hart_id() {
+        1 => &PERCPU_HART0,
+        0 => &PERCPU_HART1,
+        _ => unreachable!("only have two HARTs"),
+    }
+}
+
 /// Get the idle thread TCB index.
 pub fn idle_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().idle_thread_idx.get() as usize }
+}
+
+// Tracing thread behaviour requires reading cross-Hart PerCpu details
+pub fn other_idle_thread_idx() -> usize {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *that_cpu().idle_thread_idx.get() as usize }
 }
 
 /// Set the idle thread TCB index.
@@ -76,6 +91,12 @@ pub fn set_idle_thread_idx(thread_idx: usize) {
 pub fn current_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().current_thread_idx.get() as usize }
+}
+
+// Tracing thread behaviour requires reading cross-Hart PerCpu details
+pub fn other_current_thread_idx() -> usize {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *that_cpu().current_thread_idx.get() as usize }
 }
 
 /// Set the current TCB index.
@@ -108,6 +129,13 @@ pub fn switching_from_thread_idx() -> Option<usize> {
     unsafe { *this_cpu().switching_from_thread_idx.get() }.map(|i| i as usize)
 }
 
+// Tracing thread behaviour requires reading cross-Hart PerCpu details
+#[cfg(feature = "trace")]
+pub fn other_switching_from_thread_idx() -> Option<usize> {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *that_cpu().switching_from_thread_idx.get() }.map(|i| i as usize)
+}
+
 /// Set the switching thread index
 pub fn set_switching_from_thread_idx(thread_idx: Option<usize>) {
     let idx = thread_idx.map(|i| {
@@ -136,6 +164,12 @@ pub fn take_switching_from_thread_idx() -> Option<usize> {
 /// Check the needs_reschedule state of this thread
 pub fn needs_reschedule() -> bool {
     this_cpu().needs_reschedule.load(Ordering::Acquire)
+}
+
+// Tracing thread behaviour requires reading cross-Hart PerCpu details
+#[cfg(feature = "trace")]
+pub fn other_needs_reschedule() -> bool {
+    that_cpu().needs_reschedule.load(Ordering::Acquire)
 }
 
 /// Check if this thread needs to be rescheduled

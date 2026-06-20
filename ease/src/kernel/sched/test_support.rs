@@ -18,9 +18,19 @@ pub(super) static PARTNER_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PARTNER_SPAWNED: AtomicUsize = AtomicUsize::new(0);
 
 fn partner_thread() {
+    // Background load for the "under partner load" tests. Two pitfalls to avoid:
+    //  - a bare `yield_now()` loop now busy-spins through `reschedule` (a lone
+    //    yielder correctly keeps the CPU), burning a hart and flooding the trace;
+    //  - a pure busy loop *permanently pegs* a hart, which starves tests that
+    //    don't expect a busy sibling (e.g. fault_kills_whole_process already has
+    //    a spin-forever process saturating the other hart → the poll loop hangs).
+    // So: do a little work, then RELINQUISH via a short sleep. This keeps a
+    // runnable thread cycling for contention without saturating a core.
     loop {
-        PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
-        crate::kernel::sched::yield_now();
+        for _ in 0..10_000 {
+            PARTNER_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        crate::kernel::sched::sleep(1);
     }
 }
 

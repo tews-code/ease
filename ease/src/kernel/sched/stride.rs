@@ -14,10 +14,10 @@ use crate::arch::trap::TrapFrame;
 use crate::arch::{csr, hart_id};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
+use crate::kernel::paintstack::{STACK_CANARY, check_canary, set_canary};
 use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
 use crate::kernel::sched::usermemmap::UserMemMap;
 use crate::kernel::sched::{ExitReason, MemRegion};
-use crate::kernel::stack::{STACK_CANARY, check_canary, set_canary};
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::{paint_stack, print_stack_watermark};
 use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
@@ -50,6 +50,13 @@ pub const PRIORITY_MIN: u8 = u8::MAX - 1;
 // Under contention use this time slice per thread
 const SLICE_US: u64 = 16_000;
 const SLICE: u64 = SLICE_US * timer::CYCLES_PER_US;
+const BONUS: u64 = 500 * timer::CYCLES_PER_US;
+
+// A Ready thread waiting longer than this is anomalous (longer than a full
+// slice means it lost to something it should have beaten); the trace records
+// a `ready-stall` snapshot when it happens.
+#[cfg(feature = "trace")]
+const READY_STALL: u64 = 10 * timer::CYCLES_PER_MS;
 // Default slack period
 const LEEWAY_BASE_US: u64 = 100;
 const LEEWAY_BASE: u64 = LEEWAY_BASE_US * timer::CYCLES_PER_US;
@@ -184,6 +191,7 @@ impl ThreadControlBlock {
             affinity: None,
             user: None,
             marked_for_exit: false,
+            ready_since: 0,
         }
     }
 
@@ -249,18 +257,21 @@ impl ThreadsInner {
         best.unwrap_or(0)
     }
 
-    // Wakes any threads past their deadlines
+    // Wakes any threads past their deadlines and sets their pass to pass_baseline so they
+    // do not monopolise their Hart as their pass catches up with threads that were running
     //
     // Returns a count of the ready threads
     fn wake_sleeping_threads(&mut self) -> usize {
         let now = timer::elapsed();
-        let running_idx = percpu::current_thread_idx();
         let mut ready_count: usize = 0;
-        for (idx, tcb) in self.thread_blocks.iter_mut().enumerate() {
-            if idx == running_idx {
+        let pass_baseline = self.pass_baseline();
+        let other_curr_idx = percpu::other_current_thread_idx();
+        let tcbs = &mut self.thread_blocks;
+        for idx in 0..THREADS_MAX {
+            if idx == percpu::current_thread_idx() {
                 continue;
             }
-            match tcb.state {
+            match tcbs[idx].state {
                 State::Sleeping(Deadline {
                     min,
                     fixed_leeway: _,
@@ -269,9 +280,20 @@ impl ThreadsInner {
                     min,
                     fixed_leeway: _,
                 }) if min <= now => {
-                    // If we are waking threads ignore slack and wake any passed min deadline
-                    tcb.state = State::Ready;
+                    tcbs[idx].state = State::Ready;
+                    tcbs[idx].ready_since = now; // stamp Ready entry (wake-latency tracing)
+                    tcbs[idx].pass = tcbs[idx].pass.max(pass_baseline.saturating_sub(BONUS)); // Catch up the pass
                     ready_count += 1;
+                    // Stash the timer overshoot
+                    self.wake_overshoot[idx] = now.saturating_sub(min);
+                    // Interrupt other hart if appropriate
+                    if tcbs[other_curr_idx].pass >= tcbs[idx].pass
+                        && tcbs[idx]
+                            .affinity
+                            .is_none_or(|affinity| affinity != hart_id() as u8)
+                    {
+                        crate::kernel::ipi::send(hart_id() ^ 1);
+                    }
                 }
                 State::Ready => ready_count += 1,
                 _ => {} // Ignore switching, even if passed deadline
@@ -407,7 +429,7 @@ impl ThreadsInner {
         // Safety: base address is aligned and valid for reads either from linker script or buddy allocation
         if let Err(val) = unsafe { check_canary(base_addr) } {
             panic!(
-                "kernel stack canary corrupted in thread {}: sp={:?}, base={}, read={:#x}, expected={:#x}",
+                "kernel stack canary corrupted in thread {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
                 curr.id, curr.sp, base_addr, val, STACK_CANARY
             )
         };
@@ -462,8 +484,9 @@ impl ThreadsInner {
 unsafe impl Send for ThreadsInner {}
 
 pub(super) struct Scheduler {
-    threads: IrqSpinLock<ThreadsInner>,
-    run_cycles: [CounterU64; THREADS_MAX], // Outside of threads for lock-free read
+    pub(super) threads: IrqSpinLock<ThreadsInner>,
+    // Outside of threads for lock-free read
+    run_cycles: [CounterU64; THREADS_MAX],
 }
 
 unsafe extern "C" {
@@ -479,6 +502,7 @@ impl Scheduler {
             threads: IrqSpinLock::new(ThreadsInner {
                 thread_blocks: [const { ThreadControlBlock::new() }; THREADS_MAX],
                 process_blocks: [const { None }; PROCS_MAX],
+                wake_overshoot: [0; THREADS_MAX],
             }),
             run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
@@ -522,6 +546,10 @@ impl Scheduler {
         let mut threads = self.threads.lock();
         let switched_from_idx = percpu::take_switching_from_thread_idx()
             .expect("should have a Switching thread to set back to Ready");
+        debug_assert!(
+            switched_from_idx != percpu::current_thread_idx(),
+            "post_switch_cleanup marking the CURRENT thread Ready: idx={switched_from_idx}"
+        );
         let new_state = {
             match threads.thread_blocks[switched_from_idx].state {
                 State::Switching(PostSwitch::Ready) => State::Ready,
@@ -595,9 +623,21 @@ impl Scheduler {
             }
         };
         threads.thread_blocks[switched_from_idx].state = new_state;
+        if new_state == State::Ready {
+            threads.thread_blocks[switched_from_idx].ready_since = timer::elapsed(); // stamp Ready entry
+            // Capture the instant a real (non-idle) thread becomes Ready via a
+            // switch-out, so we can see what each hart is doing right when the
+            // later-stalled thread enters the run queue. Skip idle (PRI_MIN) to
+            // avoid flooding.
+            #[cfg(feature = "trace")]
+            if threads.thread_blocks[switched_from_idx].priority != PRIORITY_MIN {
+                threads.snapshot_raw("ps-ready");
+            }
+        }
     }
 
     // Set up kernel thread initial thread block and stack for a new thread
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn<F: FnOnce() + Send + 'static>(
         &self,
         entry: F,
@@ -634,6 +674,7 @@ impl Scheduler {
             priority,
             pass: baseline,
             affinity,
+            ready_since: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
         // Local variables to drop threads
@@ -656,6 +697,7 @@ impl Scheduler {
 
     // Add an additional user thread to a process
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_user(
         &self,
         process: &ProcessHandle,
@@ -715,6 +757,7 @@ impl Scheduler {
                 user_entry,
                 process_idx: process.idx as u8,
             }),
+            ready_since: timer::elapsed(),
             ..ThreadControlBlock::new()
         };
         // Local variables to allow dropping the threads lock
@@ -741,6 +784,7 @@ impl Scheduler {
 
     // Spawn a new user process
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_process(
         &self,
         name: &'static str,
@@ -765,6 +809,7 @@ impl Scheduler {
         tcb.id = next_thread_id();
         tcb.sp = sp;
         tcb.state = State::Ready;
+        tcb.ready_since = timer::elapsed(); // stamp Ready entry
         tcb.qos = qos;
         tcb.priority = priority;
         tcb.kernel_stack = Some(kernel_stack);
@@ -813,6 +858,7 @@ impl Scheduler {
     // If `currrent_state` is Some(State), reschedule only takes place if the
     // current thread state matches; if `current_state` is None then reschedule
     // unconditionally
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn reschedule(&self, current_state: Option<State>, new_state: PostSwitch) {
         // Note - the closure body will contain switch_to, which is unusual
         // It's a non-local control transfer wearing the disguise of a function call.
@@ -826,17 +872,43 @@ impl Scheduler {
             // across the switch and block other harts/threads from rescheduling.
             let mut threads = self.threads.lock();
             threads.check_curr_canary();
+            let now_cycles = timer::elapsed();
+            let curr_idx = percpu::current_thread_idx();
+            {
+                let curr = &mut threads.thread_blocks[curr_idx];
+                let ran = now_cycles - curr.last_started_cycles;
+                curr.last_started_cycles = now_cycles;
+                unsafe { self.run_cycles[curr_idx].add(ran) };
+                curr.stride(ran);
+            }
             // First check if current state matches pre-condition
             if let Some(state) = current_state {
                 let idx = percpu::current_thread_idx();
                 if threads.thread_blocks[idx].state != state {
+                    /*If a racing unpark
+                    f lips the thread to Ready just before the lock, the precondition fails and you bail — but without your line the thread is lef*t marked Ready
+                    while it's actually executing on this hart. The other hart could then pick_next it and switch to it → the same thread running on two harts →
+                        stack corruption. Forcing it back to Running on the abort path is correct (the current thread always continues running here).*/
+                    threads.thread_blocks[idx].state = State::Running;
                     return;
                 }
             }
             // Check if any threads have reached or passed their deadline
             let ready_count = threads.wake_sleeping_threads();
-            // Get current and next TCBs
-            let Some((curr, curr_idx, next, next_idx)) = threads.pick_next_ready_mut() else {
+            // A yield hands off to a ready peer but never idles: if the pick
+            // fell back to idle (no ready peer), keep running curr instead. For
+            // sleep/block/exit curr is leaving, so the idle fallback is correct;
+            // marked_for_exit likewise must switch out (so the thread can die).
+            // Capture these before the pick so reading marked_for_exit doesn't
+            // alias the &mut refs pick_next_ready_mut hands back.
+            let idle_idx = percpu::idle_thread_idx();
+            let is_yield =
+                new_state == PostSwitch::Ready && !threads.thread_blocks[curr_idx].marked_for_exit;
+            let mut disjoint_threads = threads.pick_next_ready_mut();
+            if is_yield && matches!(&disjoint_threads, Some((.., n)) if *n == idle_idx) {
+                disjoint_threads = None;
+            }
+            let Some((curr, curr_idx, next, next_idx)) = disjoint_threads else {
                 let earliest_deadline = threads.earliest_deadline();
                 threads.set_next_timer(earliest_deadline, ready_count);
                 drop(threads);
@@ -849,11 +921,6 @@ impl Scheduler {
             } else {
                 State::Switching(new_state)
             };
-            // Safety: Only writing to current within locked threads array - single writer
-            let now_cycles = timer::elapsed();
-            let ran = now_cycles - curr.last_started_cycles;
-            unsafe { self.run_cycles[curr_idx].add(ran) };
-            curr.stride(ran);
 
             next.state = State::Running;
             next.last_started_cycles = now_cycles;
@@ -861,6 +928,17 @@ impl Scheduler {
             // Create local variables before dropping the lock
             let prev_sp_ptr = &raw mut curr.sp;
             let next_sp_ptr = &raw mut next.sp;
+
+            // Diagnostic: we're about to switch a still-runnable (yielding)
+            // thread out to the IDLE thread while it stays Ready — the strand.
+            // Detected here (not in the pick) because `new_state` is known: the
+            // pick excludes the still-Running current thread, so a yield with no
+            // other Ready thread falls to idle and the yielder lands Ready behind
+            // an idle hart.
+            #[cfg(feature = "trace")]
+            if next_idx == percpu::idle_thread_idx() && new_state == PostSwitch::Ready {
+                threads.snapshot_raw("idle-pick");
+            }
 
             threads.activate_thread(next_idx, Some(curr_idx));
             let earliest_deadline = threads.earliest_deadline(); // Re-run after setting up sleeper
@@ -883,6 +961,12 @@ impl Scheduler {
 
             self.post_switch_cleanup();
             //mret has restored MIE via the thread trampoline
+            // Diagnostic: the FIRST point a just-switched-in thread executes
+            // after resuming here. Lets us timestamp when a picked thread really
+            // starts running on its hart (vs merely being marked Running), to
+            // catch a "current in bookkeeping but not executing" stall.
+            #[cfg(feature = "trace")]
+            self.threads.lock().snapshot_raw("post-resume");
         });
     }
 
@@ -892,6 +976,24 @@ impl Scheduler {
         threads.check_curr_canary();
         let ready_count = threads.wake_sleeping_threads();
         let earliest_deadline = threads.earliest_deadline();
+
+        // Flag any Ready thread that's been waiting longer than a slice — it
+        // should have been scheduled by now. Snapshot why (which thread holds
+        // the CPU it out-ranks).
+        #[cfg(feature = "trace")]
+        {
+            let now = timer::elapsed();
+            for idx in 0..THREADS_MAX {
+                let tcb = &threads.thread_blocks[idx];
+                if tcb.state == State::Ready
+                    && tcb.priority != PRIORITY_MIN
+                    && now.saturating_sub(tcb.ready_since) > READY_STALL
+                {
+                    threads.snapshot_ready_stall(idx);
+                    break;
+                }
+            }
+        }
 
         // Apply current's stride upfront so pass comparisons in
         // pick_next_if_fairer_mut see a fresh value —
@@ -1010,13 +1112,32 @@ impl Scheduler {
         self.run_cycles[tcb_idx].get()
     }
 
+    /// Cycles by which the current thread's last timer wake overshot its
+    /// deadline (set in `wake_sleeping_threads`). Distinguishes a late timer
+    /// wake from on-time-wake-but-late-to-run.
+    #[cfg(feature = "trace")]
+    #[allow(dead_code)] // used only by test probes
+    pub(super) fn current_wake_overshoot(&self) -> u64 {
+        let threads = self.threads.lock();
+        threads.wake_overshoot[percpu::current_thread_idx()]
+    }
+
     pub(super) fn exit(&self, reason: ExitReason) -> ! {
         self.reschedule(None, PostSwitch::Dead(reason));
         // reschedule switches away. If we get here, no other thread was
         // available to switch to, which means this thread is the only one
         // alive on this hart and we can't actually die. Panic — it's a
         // programmer error to call exit() on the last thread.
-        unreachable!("exit() called but no other thread to switch to");
+        unreachable!(
+            "exit() called but no other thread to switch to on hart {}
+            percpu::current_thread_idx is {}
+            percpu::idle_thread_idx is {}
+            {:?}",
+            hart_id(),
+            percpu::current_thread_idx(),
+            percpu::idle_thread_idx(),
+            self.threads.lock().thread_blocks
+        );
     }
 
     // Park the current thread
@@ -1043,6 +1164,7 @@ impl Scheduler {
     }
 
     // Unpark the thread at index
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
         let mut did_unpark: bool = false;
@@ -1054,10 +1176,13 @@ impl Scheduler {
             did_unpark = true;
             // Note - does not deal with lost wakeup yet
             threads.thread_blocks[handle.idx].state = State::Ready;
+            threads.thread_blocks[handle.idx].ready_since = timer::elapsed(); // stamp Ready entry
             threads.thread_blocks[handle.idx].affinity
         } else {
             None
         };
+        #[cfg(feature = "trace")]
+        threads.snapshot_raw("unpark");
         drop(threads);
         if did_unpark {
             // If the unparked thread has affinity for the other hart, send an IPI
@@ -1102,10 +1227,12 @@ impl Scheduler {
 
     /// Unpark a thread by TCB index
     #[allow(dead_code)]
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub fn unpark_by_index(&self, idx: usize) {
         let mut threads = self.threads.lock();
         if threads.thread_blocks[idx].state == State::Blocked {
             threads.thread_blocks[idx].state = State::Ready;
+            threads.thread_blocks[idx].ready_since = timer::elapsed(); // stamp Ready entry
             // Ask for immediate reschedule to avoid waiting for a time slice
             percpu::set_needs_reschedule();
         }

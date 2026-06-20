@@ -12,19 +12,25 @@
 #   ./scripts/ci.sh --paint-stack            # also paint stacks and print
 #                                            # high-watermarks in the QEMU
 #                                            # stage; off by default
+#   ./scripts/ci.sh --trace                  # build the QEMU stage with the
+#                                            # `trace` feature (scheduler
+#                                            # trace points + panic dump);
+#                                            # off by default
 #   ./scripts/ci.sh --help                   # this message
 
 set -e
 
 TEST_SET="test-all"
 PAINT_STACK=0
+TRACE=0
 
 for arg in "$@"; do
     case "$arg" in
         --test=*)      TEST_SET="${arg#*=}" ;;
         --paint-stack) PAINT_STACK=1 ;;
+        --trace)       TRACE=1 ;;
         --help|-h)
-            sed -n '2,15p' "$0"
+            sed -n '2,19p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -50,7 +56,13 @@ FEATURES="$TEST_SET"
 # code is QEMU-only — so host tests, miri and docs keep the base feature
 # set. Off unless --paint-stack is passed.
 RISCV_FEATURES="$FEATURES"
-[ $PAINT_STACK -eq 1 ] && RISCV_FEATURES="$FEATURES paint-stack"
+[ $PAINT_STACK -eq 1 ] && RISCV_FEATURES="$RISCV_FEATURES paint-stack"
+
+# Scheduler tracing (the `trace` feature) is likewise a QEMU-only diagnostic:
+# it relies on the panic-handler dump and percpu/arch reads, so it's scoped
+# to the RISC-V build and kept out of host tests, miri and docs. Off unless
+# --trace is passed.
+[ $TRACE -eq 1 ] && RISCV_FEATURES="$RISCV_FEATURES trace"
 
 # The bump and freelist allocator modules are kept in-tree as reference
 # implementations (with host_tests) but aren't wired into the kernel
@@ -61,6 +73,7 @@ CLIPPY_EXTRA="-A dead-code"
 echo "Test set                : $TEST_SET"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 [ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
+[ $TRACE -eq 1 ] && echo "Tracing                 : on (trace feature in QEMU stage)"
 
 # Unconditionally reformat to pass clippy
 cargo fmt

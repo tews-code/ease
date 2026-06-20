@@ -1,4 +1,7 @@
 //! Trap handler for both interrupts and exceptions
+
+use core::sync::atomic::Ordering;
+
 use crate::arch::csr::mcause::exception::*;
 use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
@@ -9,8 +12,9 @@ use crate::arch::trap::TrapFrame;
 use crate::arch::usermode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
+use crate::kernel::paintstack::check_canary;
+use crate::kernel::panic;
 use crate::kernel::sched::ExitReason;
-use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
@@ -35,9 +39,16 @@ pub(crate) extern "C" fn trap_handler_h1(frame: &mut TrapFrame) {
     trap_handler_impl(frame);
 }
 
-// trap_handler is kept as small as possible to fit into SRAM8 .text
 #[inline(always)]
 fn trap_handler_impl(frame: &mut TrapFrame) {
+    // Check if other hart has triggered a panic
+    if panic::STOP.load(Ordering::Relaxed) {
+        panic::PARKED.store(true, Ordering::Release);
+        loop {
+            crate::arch::interrupts::wait_for_interrupt();
+            core::hint::spin_loop();
+        }
+    }
     // Check if IRQ stack canary is in place
     // Safety: Address is safe to read and aligned from linker script
     let irq_stack_base = if hart_id() == 0 {
@@ -58,6 +69,10 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
             // at which point it will trigger.
             //
             // Invariant: we always scan all of threads under lock after the IPI
+            // Mark IPI receipt in the trace so we can tell a delivered-but-no-
+            // preempt from a never-sent kick during a wake stall.
+            #[cfg(feature = "trace")]
+            crate::kernel::sched::trace::take_snapshot("ipi-recv");
             sched::mark_for_preempt();
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),

@@ -1,12 +1,17 @@
 //! Panic handler
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
 use crate::arch::interrupts::wait_for_interrupt;
+use crate::kernel::paintstack::check_canary;
 use crate::kernel::percpu;
-use crate::kernel::stack::check_canary;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_stack_watermark;
 #[cfg(test)]
 use crate::qemu;
+
+pub(super) static STOP: AtomicBool = AtomicBool::new(false);
+pub(super) static PARKED: AtomicBool = AtomicBool::new(false);
 
 mod fb_panic_writer {
     unsafe extern "C" {
@@ -97,6 +102,18 @@ impl core::fmt::Write for DirectConsoleWriter {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     {
+        // No more interrupts
+        crate::arch::interrupts::disable();
+        // Tell other hart to stop
+        STOP.store(true, Ordering::Relaxed);
+        crate::kernel::ipi::send(crate::arch::hart_id() ^ 1);
+        // Wait until other hart has parked
+        let mut counter = 0;
+        while !PARKED.load(Ordering::Acquire) && counter < 1_000 {
+            counter += 1;
+            core::hint::spin_loop();
+        }
+        // Now go ahead with panic info dump
         // Check that the stack canary has been set up
         let stack_base = percpu::current_stack_base();
         let stack_ok = if stack_base.is_null() {
@@ -172,6 +189,11 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             }
         );
     }
+    // Dump the trace before any path that exits/loops, so it appears in
+    // both the test build (which exit_failure()s below) and normal runs.
+    #[cfg(feature = "trace")]
+    crate::sched::trace::dump_trace();
+
     #[cfg(test)]
     {
         use crate::io::DirectWriter;
@@ -184,5 +206,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     #[allow(unreachable_code)]
     loop {
         wait_for_interrupt();
+        core::hint::spin_loop();
     }
 }

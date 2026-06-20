@@ -1,10 +1,31 @@
 //! Stack
 
-use core::arch::naked_asm;
+use core::{arch::naked_asm, ptr::NonNull};
+
+use crate::kernel::alloc::MemRegion;
 
 /// Sentinel placed at the bottom word of each stack.
 /// Checked by the scheduler / panic path to detect stack overflow.
 pub(crate) const STACK_CANARY: usize = 0xDEAD_BEEF;
+
+#[allow(dead_code)]
+#[repr(align(16))]
+struct Stack {
+    region: MemRegion,
+    sp: NonNull<u8>,
+}
+
+#[allow(dead_code)]
+impl Stack {
+    fn set_stack_canary(&self) {
+        unsafe { set_canary(self.region.base_addr()) };
+    }
+
+    #[cfg(feature = "paint-stack")]
+    fn paint_full_stack(&self) {
+        unsafe { paint_stack(self.region.base_addr(), self.region.top()) };
+    }
+}
 
 /// Add a canary at the bottom of a stack
 /// Using naked_asm as we may not yet have a stack pointer

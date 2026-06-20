@@ -2,12 +2,14 @@
 
 #[cfg(all(test, feature = "bench"))]
 mod bench;
+mod deadline;
 mod process;
 mod stride;
 #[cfg(all(test, any(feature = "test-sched", feature = "bench")))]
 mod test_support;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
+mod threads;
 #[cfg(feature = "trace")]
 pub mod trace;
 mod types;
@@ -91,6 +93,7 @@ pub fn idle_thread() -> ! {
 }
 
 /// Spawn a new thread
+#[allow(dead_code)]
 pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
     Builder::new().spawn(entry)
 }
@@ -202,6 +205,13 @@ pub fn mark_for_preempt() {
 /// Schedule the next thread
 pub fn schedule() {
     SCHEDULER.schedule();
+}
+
+/// Cycles the current thread's last timer wake overshot its deadline.
+#[cfg(feature = "trace")]
+#[allow(dead_code)] // used only by test probes
+pub fn current_wake_overshoot() -> u64 {
+    SCHEDULER.current_wake_overshoot()
 }
 
 /// Spawn a user process

@@ -1,5 +1,6 @@
 //! Types for the scheduler
 
+use core::fmt::Debug;
 use core::ptr::NonNull;
 
 use crate::kernel::alloc::MemRegion;
@@ -22,7 +23,7 @@ pub(crate) enum ExitReason {
 const _: () = assert!(ExitReason::Exit as u8 == 0);
 const _: () = assert!(ExitReason::Fault as u8 == 1);
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Copy, Clone)]
 pub(crate) enum PostSwitch {
     Blocked,
     BlockedUntil(Deadline),
@@ -31,7 +32,7 @@ pub(crate) enum PostSwitch {
     Dead(ExitReason),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Copy, Clone)]
 pub(crate) enum State {
     Avail,
     Blocked,
@@ -42,6 +43,7 @@ pub(crate) enum State {
     Sleeping(Deadline),
 }
 
+#[derive(Debug, Copy, Clone)]
 pub enum Qos {
     High,
     Low,
@@ -67,11 +69,33 @@ pub(super) struct ThreadControlBlock {
     pub(super) affinity: Option<u8>,              // Affinity to a particular HART
     pub(super) user: Option<UserContext>, // If is Some then this TCB is supporting a user thread
     pub(super) marked_for_exit: bool, // If set then thread will be forced to exit on next schedule
+    pub(super) ready_since: u64, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
+}
+
+impl Debug for ThreadControlBlock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if self.state == State::Avail {
+            writeln!(f, "id: {} - Avail", self.id)
+        } else {
+            writeln!(f, "id: {}", self.id)?;
+            writeln!(f, "state: {:?}", self.state)?;
+            writeln!(f, "QoS: {:?}", self.qos)?;
+            writeln!(f, "priority: {}", self.priority)?;
+            writeln!(f, "pass: {}", self.pass)?;
+            writeln!(f, "last_started_cycles: {}", self.last_started_cycles)?;
+            writeln!(f, "next_waiter: {:?}", self.next_waiter)?;
+            writeln!(f, "affinity: {:?}", self.affinity)?;
+            writeln!(f, "user thread? {}", self.user.is_some())?;
+            writeln!(f, "marked_for_exit: {}", self.marked_for_exit)?;
+            writeln!(f, "ready_since: {}", self.ready_since)
+        }
+    }
 }
 
 pub(super) struct ThreadsInner {
     pub(super) thread_blocks: [ThreadControlBlock; THREADS_MAX],
     pub(super) process_blocks: [Option<ProcessControlBlock>; PROCS_MAX], // Two thread control blocks are taken up by idle so can't be used for a process
+    pub(super) wake_overshoot: [u64; THREADS_MAX],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
