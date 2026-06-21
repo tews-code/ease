@@ -140,7 +140,6 @@ extern "C" fn _start() -> ! {
 
             hart0:
 
-            # HART0 setup
             # Set up a temporary trap vector - will not recover
             la t0, {park_loop}
             csrw mtvec, t0"#,

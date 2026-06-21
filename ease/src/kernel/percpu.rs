@@ -11,6 +11,7 @@ use crate::sched::THREADS_MAX;
 #[repr(C)]
 #[allow(dead_code)]
 struct PerCpu {
+    online: UnsafeCell<bool>,
     idle_thread_idx: UnsafeCell<u8>,
     current_thread_idx: UnsafeCell<u8>,
     current_stack_base: UnsafeCell<*mut u8>,
@@ -29,6 +30,7 @@ unsafe impl Sync for PerCpu {}
 impl PerCpu {
     pub const fn new() -> Self {
         Self {
+            online: UnsafeCell::new(false),
             idle_thread_idx: UnsafeCell::new(0),
             current_thread_idx: UnsafeCell::new(0),
             current_stack_base: UnsafeCell::new(core::ptr::null_mut()),
@@ -63,6 +65,24 @@ fn that_cpu() -> &'static PerCpu {
         0 => &PERCPU_HART1,
         _ => unreachable!("only have two HARTs"),
     }
+}
+
+/// Get this hart's online status
+pub fn online() -> bool {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().online.get() }
+}
+
+// Get the other hart's online status
+pub fn other_online() -> bool {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *that_cpu().online.get() }
+}
+
+/// Set the online status
+pub fn set_online() {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_cpu().online.get() = true }
 }
 
 /// Get the idle thread TCB index.

@@ -43,12 +43,13 @@ mod user;
 use drivers::ramfb::FrameBuffer;
 use drivers::uart::UartInitToken;
 use kernel::alloc::Order;
+use kernel::percpu;
 use kernel::sched::{self, SchedInitToken};
 
 use crate::board::uart;
 use crate::board::virtio_blk;
 
-static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
+pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
 // Entry Points
@@ -75,6 +76,7 @@ fn kernel_init() {
     // The initialisation functions panic or succeed
     #[cfg(feature = "profile")]
     kernel::profile::init();
+    percpu::set_online();
     kernel::alloc::init_global_allocator();
     kernel::timer::init();
     drivers::plic::init();
@@ -145,6 +147,7 @@ extern "C" fn secondary_main() -> ! {
     kernel::timer::init();
     let sched_init_token = sched::bootstrap(1);
     kernel::ipi::init();
+    percpu::set_online();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
     interrupts_init_hart1(sched_init_token);
     // Drop into idle

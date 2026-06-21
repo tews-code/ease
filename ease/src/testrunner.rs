@@ -7,6 +7,16 @@
 /// Wrap `test_main` so it can be spawned as a thread entry.
 #[cfg(test)]
 pub(super) fn test_runner_thread() {
+    // Wait for the init thread (spawned by `kernel_init`) to finish bringing up
+    // drivers/filesystem before running tests — otherwise virtio/fs tests can
+    // race ahead of `virtio_blk_init`/`fat16_init` and see uninitialised state.
+    // Sleep (don't busy-spin): until INIT_COMPLETE is set, HART1 is still parked
+    // in its boot spin, so every thread runs on HART0 — busy-spinning here would
+    // compete with the init thread on the same hart and only yield at slice
+    // boundaries; sleeping lets the init thread run and set the flag promptly.
+    while !crate::INIT_COMPLETE.load(core::sync::atomic::Ordering::Acquire) {
+        crate::kernel::sched::sleep(1);
+    }
     crate::test_main();
     // `test_main` calls `qemu::exit_success` once all tests pass, so under
     // normal circumstances this never returns. If it ever does, the

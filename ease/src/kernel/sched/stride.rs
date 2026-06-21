@@ -365,8 +365,13 @@ impl ThreadsInner {
         for (idx, tcb) in self.thread_blocks.iter().enumerate() {
             let candidate = tcb.state == State::Ready;
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
+            // Don't pick the thread the OTHER hart is currently running (that
+            // would run it on two harts → corruption). Only applies when the
+            // other hart is online: during boot it isn't, and its (zeroed)
+            // current_thread_idx would otherwise wrongly exclude slot 0.
+            let not_stealing = !percpu::other_online() || idx != percpu::other_current_thread_idx();
             let pri_ok = tcb.priority != PRIORITY_MIN;
-            if candidate && affinity_ok && pri_ok && tcb.pass < best_pass {
+            if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                 best_pass = tcb.pass;
                 best_idx = Some(idx);
             }
@@ -401,8 +406,13 @@ impl ThreadsInner {
         for (idx, tcb) in self.thread_blocks.iter().enumerate() {
             let candidate = tcb.state == State::Ready || idx == curr_idx;
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
+            // Don't pick the thread the OTHER hart is currently running (that
+            // would run it on two harts → corruption). Only applies when the
+            // other hart is online: during boot it isn't, and its (zeroed)
+            // current_thread_idx would otherwise wrongly exclude slot 0.
+            let not_stealing = !percpu::other_online() || idx != percpu::other_current_thread_idx();
             let pri_ok = tcb.priority != PRIORITY_MIN;
-            if candidate && affinity_ok && pri_ok && tcb.pass < best_pass {
+            if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                 best_pass = tcb.pass;
                 best_idx = Some(idx);
             }
@@ -632,6 +642,27 @@ impl Scheduler {
             #[cfg(feature = "trace")]
             if threads.thread_blocks[switched_from_idx].priority != PRIORITY_MIN {
                 threads.snapshot_raw("ps-ready");
+            }
+            // Cross-hart wakeup preemption: kick the other hart only if this
+            // newly-Ready thread out-ranks what that hart is running — i.e. it
+            // is genuinely more deserving (lower pass). This subsumes the idle
+            // case (the idle thread strides fastest, so it is always out-ranked)
+            // while avoiding the busy-case churn of kicking on every switch-out.
+            // Compare against the other current's EFFECTIVE pass (stored pass +
+            // unstrided run since switch-in); the field alone is stale because a
+            // running thread only re-strides when it reschedules. Skip when the
+            // other hart isn't online (boot) — can't engage it anyway.
+            if percpu::other_online() {
+                let other_idx = percpu::other_current_thread_idx();
+                let other = &threads.thread_blocks[other_idx];
+                let now = timer::elapsed();
+                let other_effective_pass = other.pass.saturating_add(
+                    now.saturating_sub(other.last_started_cycles)
+                        .saturating_mul(other.priority as u64),
+                );
+                if threads.thread_blocks[switched_from_idx].pass < other_effective_pass {
+                    crate::kernel::ipi::send(hart_id() ^ 1);
+                }
             }
         }
     }
@@ -1168,18 +1199,31 @@ impl Scheduler {
     pub(super) fn unpark(&self, handle: &ThreadHandle) {
         let mut threads = self.threads.lock();
         let mut did_unpark: bool = false;
-        let affinity = if matches!(
-            threads.thread_blocks[handle.idx].state,
-            State::Blocked | State::BlockedUntil(_)
-        ) && threads.thread_blocks[handle.idx].id == handle.id
-        {
-            did_unpark = true;
-            // Note - does not deal with lost wakeup yet
-            threads.thread_blocks[handle.idx].state = State::Ready;
-            threads.thread_blocks[handle.idx].ready_since = timer::elapsed(); // stamp Ready entry
-            threads.thread_blocks[handle.idx].affinity
-        } else {
-            None
+        let id_ok = threads.thread_blocks[handle.idx].id == handle.id;
+        let affinity = match threads.thread_blocks[handle.idx].state {
+            State::Blocked | State::BlockedUntil(_) if id_ok => {
+                did_unpark = true;
+                threads.thread_blocks[handle.idx].state = State::Ready;
+                threads.thread_blocks[handle.idx].ready_since = timer::elapsed(); // stamp Ready entry
+                threads.thread_blocks[handle.idx].affinity
+            }
+            // Lost-wakeup guard: the thread decided to block but is still
+            // mid-switch-out (its context is being saved by another hart). It
+            // isn't `Blocked` yet, so the arm above misses it. Redirect its
+            // post-switch target to `Ready` — `post_switch_cleanup` then
+            // finalises it to `Ready` instead of `Blocked`, so the wake is not
+            // dropped. (post_switch and this unpark are serialised by the lock,
+            // so whichever runs first, the thread ends up Ready.)
+            State::Switching(PostSwitch::Blocked)
+            | State::Switching(PostSwitch::BlockedUntil(_))
+                if id_ok =>
+            {
+                did_unpark = true;
+                threads.thread_blocks[handle.idx].state = State::Switching(PostSwitch::Ready);
+                threads.thread_blocks[handle.idx].ready_since = timer::elapsed();
+                threads.thread_blocks[handle.idx].affinity
+            }
+            _ => None,
         };
         #[cfg(feature = "trace")]
         threads.snapshot_raw("unpark");
