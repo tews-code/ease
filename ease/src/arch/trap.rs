@@ -2,7 +2,10 @@
 //!
 //! Saves context and calls handler, returns with `mret`.
 
+use core::ptr::NonNull;
+
 #[repr(C, align(16))]
+#[derive(Default)]
 pub(crate) struct TrapFrame {
     pub(crate) ra: usize,
     gp: usize,
@@ -47,6 +50,20 @@ impl TrapFrame {
 
     pub(crate) fn is_from_user(&self) -> bool {
         (self.mstatus & crate::arch::csr::mstatus::MPP) == 0
+    }
+
+    pub(crate) fn init_for_user_entry(
+        user_entry: extern "C" fn(),
+        user_stack_top: NonNull<u8>,
+        user_exit: usize,
+    ) -> Self {
+        Self {
+            ra: user_exit,
+            mepc: user_entry as usize,
+            mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
+            user_sp: user_stack_top.addr().into(),
+            ..Default::default()
+        }
     }
 }
 

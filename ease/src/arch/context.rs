@@ -3,8 +3,14 @@
 // so keep a lightweight yield function
 
 use core::arch::naked_asm;
+use core::ptr::NonNull;
 
 use super::usermode::user_first_run;
+use crate::arch::trap::TrapFrame;
+use crate::kernel::alloc::MemRegion;
+#[cfg(feature = "paint-stack")]
+use crate::kernel::stack::paint_stack;
+use crate::kernel::stack::set_canary;
 
 // The RISC-V psABI requires 16 byte alignment, and it splits regs
 // into callee-saved and caller-saved.
@@ -34,6 +40,95 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(Context, ra) == 0);
 
 impl Context {
+    // Forges a thread Context for a kernel thread
+    // The thread entry function is stored in s0
+    // Returns the stack pointer
+    // Safety: stack_base must be class.size()-aligned and point to
+    // writeable memory of at least class.size() bytes
+    pub unsafe fn init_kernel_stack(
+        stack: &mut MemRegion,
+        closure_run: extern "C" fn(*mut u8) -> !,
+        closure_ptr: *mut u8,
+    ) -> Option<NonNull<u8>> {
+        debug_assert!(
+            stack.size() > core::mem::size_of::<Context>(),
+            "stack memory region too small for context switch"
+        );
+        // Safety: Caller has ensured base and top addresses are aligned and valid for writes
+        unsafe {
+            #[cfg(feature = "paint-stack")]
+            paint_stack(stack.base_addr(), stack.top().addr().into());
+            set_canary(stack.base_addr());
+        }
+        let context_ptr = unsafe {
+            stack
+                .base()
+                .as_ptr()
+                .add(stack.size() - core::mem::size_of::<Context>()) as *mut Context
+        };
+        // Safety: context_ptr is derived from stack_base, and
+        // aligned because sizeof(Context) is a multiple of align(Context).
+        unsafe {
+            *context_ptr = Context::init_for_kernel_entry(closure_run, closure_ptr);
+        }
+
+        NonNull::new(context_ptr as *mut u8)
+    }
+
+    // Forges a thread Context for a user thread
+    // Returns the stack pointer
+    // Safety:
+    // - stack_base must be class.size()-aligned and point to
+    // writeable memory of at least class.size() bytes.
+    // - user stack top must be the top of a live, U-mode-accessible region
+    pub unsafe fn init_user_stack(
+        kernel_stack: &mut MemRegion,
+        user_entry: extern "C" fn(),
+        user_stack_top: NonNull<u8>,
+        user_exit: usize,
+    ) -> Option<NonNull<u8>> {
+        debug_assert!(
+            kernel_stack.size()
+                > core::mem::size_of::<Context>() + core::mem::size_of::<TrapFrame>(),
+            "kernel stack memory region too small for context switch and trap return"
+        );
+        // Safety: kernel stack has aligned addresses and region is valid for writes
+        unsafe {
+            #[cfg(feature = "paint-stack")]
+            paint_stack(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+            set_canary(kernel_stack.base_addr());
+        }
+        // Safety: trap_frame_ptr is derived from stack_base and aligned
+        unsafe {
+            // Set up a trap frame so trap return arrives in U-mode
+            let trap_frame_ptr = kernel_stack
+                .base()
+                .as_ptr()
+                .add(kernel_stack.size() - core::mem::size_of::<TrapFrame>())
+                as *mut TrapFrame;
+            core::ptr::write(
+                trap_frame_ptr,
+                TrapFrame::init_for_user_entry(user_entry, user_stack_top, user_exit),
+            );
+        }
+
+        // Set up a switch context
+        // Safety: context_ptr is derived from stack_base, and
+        // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
+        let context_ptr = unsafe {
+            kernel_stack.base().as_ptr().add(
+                kernel_stack.size()
+                    - core::mem::size_of::<TrapFrame>()
+                    - core::mem::size_of::<Context>(),
+            ) as *mut Context
+        };
+        unsafe {
+            *context_ptr = Context::init_for_user_entry();
+        }
+
+        NonNull::new(context_ptr as *mut u8) // Return pointer to the context which is below the trap frame
+    }
+
     pub fn init_for_kernel_entry(
         run_closure_thread: extern "C" fn(*mut u8) -> !,
         closure_ptr: *mut u8,

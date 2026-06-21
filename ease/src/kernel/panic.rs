@@ -3,8 +3,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::interrupts::wait_for_interrupt;
-use crate::kernel::paintstack::check_canary;
 use crate::kernel::percpu;
+use crate::kernel::stack::check_canary;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_stack_watermark;
 #[cfg(test)]

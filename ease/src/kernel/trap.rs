@@ -12,9 +12,9 @@ use crate::arch::trap::TrapFrame;
 use crate::arch::usermode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
-use crate::kernel::paintstack::check_canary;
 use crate::kernel::panic;
 use crate::kernel::sched::ExitReason;
+use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
 
 #[cfg(feature = "profile")]
