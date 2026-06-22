@@ -68,6 +68,7 @@ fn that_cpu() -> &'static PerCpu {
 }
 
 /// Get this hart's online status
+#[allow(dead_code)]
 pub fn online() -> bool {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().online.get() }
@@ -92,6 +93,7 @@ pub fn idle_thread_idx() -> usize {
 }
 
 // Tracing thread behaviour requires reading cross-Hart PerCpu details
+#[allow(dead_code)]
 pub fn other_idle_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *that_cpu().idle_thread_idx.get() as usize }
