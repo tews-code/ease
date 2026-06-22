@@ -6,13 +6,14 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::types::{
-    Deadline, PostSwitch, Qos, State, THREADS_MAX, ThreadControlBlock, ThreadHandle, ThreadsInner,
+    PostSwitch, Qos, State, THREADS_MAX, ThreadControlBlock, ThreadHandle, ThreadsInner,
     UserContext,
 };
 use crate::arch::context::Context;
 use crate::arch::{csr, hart_id};
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::Order;
+use crate::kernel::sched::deadline::Deadline;
 use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, ProcessHandle};
 use crate::kernel::sched::usermemmap::UserMemMap;
 use crate::kernel::sched::{ExitReason, MemRegion};
@@ -56,12 +57,6 @@ const BONUS: u64 = 500 * timer::CYCLES_PER_US;
 // a `ready-stall` snapshot when it happens.
 #[cfg(feature = "trace")]
 const READY_STALL: u64 = 10 * timer::CYCLES_PER_MS;
-// Default slack period
-const LEEWAY_BASE_US: u64 = 100;
-const LEEWAY_BASE: u64 = LEEWAY_BASE_US * timer::CYCLES_PER_US;
-// Maximum slack period - used to cap the maximum requested leeway to sensible values
-const LEEWAY_MAX_US: u64 = 1_000_000;
-const LEEWAY_MAX: u64 = LEEWAY_MAX_US * timer::CYCLES_PER_US;
 
 // User thread constants
 #[allow(dead_code)]
@@ -70,22 +65,6 @@ const USER_MEM_REGION_8KB: u8 = 13; // Order is log2(N)
 const USER_MEM_REGION_16KB: u8 = 14;
 
 pub(super) static SCHEDULER: Scheduler = Scheduler::new();
-
-impl Deadline {
-    // Helper function - returns the leeway in clint cycles
-    fn leeway(&self, qos: &Qos) -> u64 {
-        if let Some(l) = self.fixed_leeway {
-            l
-        } else {
-            let now = crate::kernel::timer::elapsed();
-            let remaining = self.min.saturating_sub(now);
-            match qos {
-                Qos::High => (remaining >> 16).min(LEEWAY_BASE),
-                Qos::Low => (remaining >> 3).min(LEEWAY_MAX),
-            }
-        }
-    }
-}
 
 impl ThreadControlBlock {
     pub(super) const fn new() -> Self {
@@ -133,7 +112,7 @@ impl ThreadControlBlock {
             | State::BlockedUntil(deadline)
             | State::Switching(PostSwitch::BlockedUntil(deadline)) => {
                 let leeway = deadline.leeway(&self.qos);
-                Some(deadline.min.saturating_add(leeway))
+                Some(deadline.at_cycles.saturating_add(leeway))
             }
             _ => None,
         }
@@ -184,19 +163,19 @@ impl ThreadsInner {
             }
             match tcbs[idx].state {
                 State::Sleeping(Deadline {
-                    min,
+                    at_cycles,
                     fixed_leeway: _,
                 })
                 | State::BlockedUntil(Deadline {
-                    min,
+                    at_cycles,
                     fixed_leeway: _,
-                }) if min <= now => {
+                }) if at_cycles <= now => {
                     tcbs[idx].state = State::Ready;
                     tcbs[idx].ready_since = now; // stamp Ready entry (wake-latency tracing)
                     tcbs[idx].pass = tcbs[idx].pass.max(pass_baseline.saturating_sub(BONUS)); // Catch up the pass
                     ready_count += 1;
                     // Stash the timer overshoot
-                    self.wake_overshoot[idx] = now.saturating_sub(min);
+                    self.wake_overshoot[idx] = now.saturating_sub(at_cycles);
                     // Interrupt other hart if appropriate
                     if tcbs[other_curr_idx].pass >= tcbs[idx].pass
                         && tcbs[idx]
@@ -243,8 +222,8 @@ impl ThreadsInner {
                     &mut tcb.state
                 {
                     let leeway = d.leeway(&tcb.qos);
-                    if b >= d.min && b <= d.min.saturating_add(leeway) {
-                        d.min = b;
+                    if b >= d.at_cycles && b <= d.at_cycles.saturating_add(leeway) {
+                        d.at_cycles = b;
                         d.fixed_leeway = Some(0);
                     } else if d.fixed_leeway.is_none() {
                         d.fixed_leeway = Some(leeway);
@@ -1041,7 +1020,7 @@ impl Scheduler {
     /// Time is measured in milliseconds
     pub(super) fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
         let deadline = Deadline {
-            min: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
+            at_cycles: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
             fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(timer::CYCLES_PER_MS)),
         };
         self.reschedule(None, PostSwitch::Sleeping(deadline));
@@ -1110,7 +1089,7 @@ impl Scheduler {
     // Park the current thread if it is in blocked until deadline state
     pub(super) fn park_if_blocked_until(&self, deadline_ms: u64) {
         let deadline = Deadline {
-            min: deadline_ms * timer::CYCLES_PER_MS,
+            at_cycles: deadline_ms * timer::CYCLES_PER_MS,
             fixed_leeway: None,
         };
         self.reschedule(
@@ -1217,7 +1196,7 @@ impl Scheduler {
     /// Set this thread to blocked state without rescheduling with a wake up deadline
     pub fn set_self_blocked_until(&self, deadline_ms: u64) {
         let deadline = Deadline {
-            min: deadline_ms * timer::CYCLES_PER_MS,
+            at_cycles: deadline_ms * timer::CYCLES_PER_MS,
             fixed_leeway: None,
         };
         let current = self.current_thread();
