@@ -44,10 +44,10 @@ use drivers::ramfb::FrameBuffer;
 use drivers::uart::UartInitToken;
 use kernel::alloc::Order;
 use kernel::percpu;
-use kernel::sched::{self, SchedInitToken};
 
 use crate::board::uart;
 use crate::board::virtio_blk;
+use crate::kernel::sched;
 
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -63,11 +63,11 @@ fn shell_main(fb: FrameBuffer) {
     shell.run();
 }
 
-fn interrupts_init_hart0(_sched_token: SchedInitToken, _uart_token: UartInitToken) {
+fn interrupts_init_hart0(_uart_token: UartInitToken) {
     arch::interrupts::enable();
 }
 
-fn interrupts_init_hart1(_sched_token: SchedInitToken) {
+fn interrupts_init_hart1() {
     arch::interrupts::enable();
 }
 
@@ -82,9 +82,9 @@ fn kernel_init() {
     drivers::plic::init();
     drivers::plic::enable(uart::IRQ);
     let uart_init_token = drivers::uart::init();
-    let sched_init_token = sched::bootstrap(0);
+    sched::bootstrap(0);
     kernel::ipi::init();
-    interrupts_init_hart0(sched_init_token, uart_init_token);
+    interrupts_init_hart0(uart_init_token);
 
     // Spawn the trace sampler on HART0 BEFORE the init thread, so it is
     // already sampling while the init thread runs (and exits) on this hart.
@@ -145,11 +145,11 @@ extern "C" fn secondary_main() -> ! {
     }
     // Perform Hart-specific initialisation
     kernel::timer::init();
-    let sched_init_token = sched::bootstrap(1);
+    sched::bootstrap(1);
     kernel::ipi::init();
     percpu::set_online();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
-    interrupts_init_hart1(sched_init_token);
+    interrupts_init_hart1();
     // Drop into idle
     sched::idle_thread();
 }

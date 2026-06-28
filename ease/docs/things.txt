@@ -451,4 +451,54 @@ That's it — 2KB stereo i16 buffer living in SRAM5, zero flash footprint, no st
   null guard and proper stack dead-zone guards in one go.
 
 
-  29.
+  29.A closure is an anonymous struct + a generated call-function. When you write move || use(x, y), the compiler synthesises a hidden struct — call it AnonF { x: …, y: … } — whose
+  fields are exactly the captured variables. Calling the closure is calling a compiler-generated FnOnce::call_once(self: AnonF) that runs the body, reading self.x, self.y. So a
+  closure value is just those captured bytes laid out as a struct, and "invoking" it is "hand that struct to its call-function." That's the whole trick: storing the closure =
+  storing that struct's bytes; presenting it to you = giving the trampoline a *mut F and letting it call F's call-once.
+
+  The stack layout. The stack grows downward (high → low address). You forge the initial frame from the top down, placing the closure first (highest), then the register-restore
+  frame below it:
+
+   high addr
+   ┌───────────────────────────┐ ← stack_region.top()
+   │  closure F (captured env)  │   ptr::write the moved-in closure here
+   ├───────────────────────────┤ ← closure_addr (aligned to align_of::<F>())
+   │  forged register frame:    │   the bytes your switch-in code restores
+   │    ra = run_closure_thread │     ← entry PC: where the thread "returns" to
+   │    a0 = closure_addr        │     ← first arg: pointer to the closure
+   │    s0..s11 = 0 (callee-saved)│
+   ├───────────────────────────┤ ← sp  (16-byte aligned)
+   │      ... free stack ...     │
+   └───────────────────────────┘ ← stack_region.base()  (canary lives here)
+    low addr
+
+  The relationship you asked about: sp does not point at the closure. sp points at the bottom of the register frame — the thing your context-switch restore pops when it first
+  schedules the thread. The closure sits above that frame. The link between them is one register slot: the forged a0 (RISC-V's first-argument register) holds closure_addr. So sp →
+  frame, and frame → (via a0) → closure.
+
+  How it "presents the struct to you": your trampoline is run_closure_thread::<F>(closure_ptr: *mut F). When the switch restores the frame and the thread starts executing at the
+  forged ra (= run_closure_thread::<F>), the calling convention says the first parameter arrives in a0. Since you forged a0 = closure_addr, the function's closure_ptr parameter is
+  the address of the on-stack closure. Inside, you core::ptr::read(closure_ptr) to move the F out of the stack slot into a local, then call it. It's monomorphised, so this exact
+  instance of run_closure_thread statically knows F's size, alignment, and call-function — the stored function pointer is your "type-erased handle," and entering it re-establishes
+  the type.
+
+  Construction order (forging downward):
+  1. Start at top = stack_region.top().
+  2. closure_addr = align_down(top - size_of::<F>(), align_of::<F>()); ptr::write(closure_addr as *mut F, entry) — this moves the closure onto the stack.
+  3. Build the register frame below it, setting ra = run_closure_thread::<F> and a0 = closure_addr.
+  4. Round sp down to a 16-byte boundary (RISC-V ABI requires sp 16-aligned at function entry) and store it in the TCB.
+
+  Two alignments to respect independently: the closure slot needs align_of::<F>(), and sp needs 16.
+
+  Notice the payoff: the TCB needs no closure field at all — sp plus the closure-address-baked-into-the-frame is the entire mechanism. No Box, no into_raw, no separate pointer.
+
+  One Drop subtlety, connecting to our leak discussion. Step 2 moves F into raw stack bytes via ptr::write. If spawn then hits an early-exit (no slot) and you just drop
+  stack_region, the memory is freed but F's destructor never runs — if the closure captured something with Drop, you leak it, exactly like the Box case. The clean fix is the same
+  "commit last" move: do the ptr::write of the closure after the slot is secured, so on any failure path entry is still a normal owned local that drops naturally — no manual undo.
+  If you must forge before the slot check, the undo is ptr::drop_in_place(closure_addr as *mut F) before freeing the stack. Same lesson, new setting: keep the irreversible move
+  (into_raw then, ptr::write now) as the final committing step.
+
+  On the trampoline side, after f() returns the thread is done, so it tail-calls your thread-exit path. The closure slot up top is just stack space now — it gets reused as the
+  thread runs, no cleanup needed, because ptr::read already moved ownership into f and call_once consumed it.
+
+30.

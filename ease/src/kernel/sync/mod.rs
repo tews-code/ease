@@ -26,7 +26,7 @@ pub use counteru64::CounterU64;
 #[allow(unused_imports)]
 pub use mutex::Mutex;
 #[allow(unused_imports)]
-pub use spinlock::{IrqSpinLock, SpinLock};
+pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock};
 
 /// Lock used by kernel-wide singletons such as the global allocator.
 ///

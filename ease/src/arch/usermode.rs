@@ -3,8 +3,8 @@
 use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
+use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
-use crate::sched::ExitReason;
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;

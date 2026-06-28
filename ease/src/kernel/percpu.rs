@@ -5,8 +5,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::hart_id;
 #[cfg(all(test, feature = "test-user"))]
-use crate::sched::ExitReason;
-use crate::sched::THREADS_MAX;
+use crate::kernel::sched::ExitReason;
+use crate::kernel::sched::THREADS_MAX;
 
 #[repr(C)]
 #[allow(dead_code)]

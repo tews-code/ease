@@ -1,12 +1,15 @@
 //! Thread sleep deadline
 //!
-//! Thread can never sleep past its deadline, but it can coalesce to match earlier wakeups within a leeway
+//! Thread minimum sleep is its deadline, but the schedler actively looks to extend the sleep by the leeway
+//! unless it can coalesce to match another wake up between the deadline and the leeway
+//!
+//! Leeway can be fixed or system calculated. System caclulated leeways are set according to the QoS field
 
 use core::fmt::Debug;
 
 use crate::kernel::timer;
 
-use super::types::Qos;
+use super::Qos;
 
 const LEEWAY_DEFAULT_US: u64 = 100;
 const LEEWAY_DEFAULT_CYCLES: u64 = LEEWAY_DEFAULT_US * timer::CYCLES_PER_US;

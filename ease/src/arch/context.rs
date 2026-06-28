@@ -49,7 +49,7 @@ impl Context {
         stack: &mut MemRegion,
         closure_run: extern "C" fn(*mut u8) -> !,
         closure_ptr: *mut u8,
-    ) -> Option<NonNull<u8>> {
+    ) -> NonNull<u8> {
         debug_assert!(
             stack.size() > core::mem::size_of::<Context>(),
             "stack memory region too small for context switch"
@@ -63,16 +63,16 @@ impl Context {
         let context_ptr = unsafe {
             stack
                 .base()
-                .as_ptr()
-                .add(stack.size() - core::mem::size_of::<Context>()) as *mut Context
+                .add(stack.size() - core::mem::size_of::<Context>())
         };
-        // Safety: context_ptr is derived from stack_base, and
-        // aligned because sizeof(Context) is a multiple of align(Context).
+        // Safety: context_ptr is a multiple of Context's align
         unsafe {
-            *context_ptr = Context::init_for_kernel_entry(closure_run, closure_ptr);
+            context_ptr
+                .cast::<Context>()
+                .as_ptr()
+                .write(Context::init_for_kernel_entry(closure_run, closure_ptr));
         }
-
-        NonNull::new(context_ptr as *mut u8)
+        context_ptr
     }
 
     // Forges a thread Context for a user thread
@@ -86,7 +86,7 @@ impl Context {
         user_entry: extern "C" fn(),
         user_stack_top: NonNull<u8>,
         user_exit: usize,
-    ) -> Option<NonNull<u8>> {
+    ) -> NonNull<u8> {
         debug_assert!(
             kernel_stack.size()
                 > core::mem::size_of::<Context>() + core::mem::size_of::<TrapFrame>(),
@@ -111,22 +111,23 @@ impl Context {
                 TrapFrame::init_for_user_entry(user_entry, user_stack_top, user_exit),
             );
         }
-
         // Set up a switch context
         // Safety: context_ptr is derived from stack_base, and
         // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
         let context_ptr = unsafe {
-            kernel_stack.base().as_ptr().add(
-                kernel_stack.size()
-                    - core::mem::size_of::<TrapFrame>()
-                    - core::mem::size_of::<Context>(),
-            ) as *mut Context
+            kernel_stack
+                .base()
+                .add(
+                    kernel_stack.size()
+                        - core::mem::size_of::<TrapFrame>()
+                        - core::mem::size_of::<Context>(),
+                )
+                .cast()
         };
         unsafe {
-            *context_ptr = Context::init_for_user_entry();
+            context_ptr.write(Context::init_for_user_entry());
         }
-
-        NonNull::new(context_ptr as *mut u8) // Return pointer to the context which is below the trap frame
+        context_ptr.cast::<u8>()
     }
 
     pub fn init_for_kernel_entry(

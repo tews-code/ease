@@ -16,13 +16,14 @@ use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+use super::ExitReason;
+use super::deadline::Deadline;
+use super::stride::PRIORITY_MIN;
+use super::threads::{PostSwitch, ThreadControlBlock};
 use crate::arch::hart_id;
 use crate::board::HARTS_MAX;
 use crate::kernel::percpu;
-use crate::kernel::sched::stride::PRIORITY_MIN;
-use crate::kernel::sched::types::{
-    Deadline, ExitReason, PostSwitch, ThreadControlBlock, ThreadsInner,
-};
+use crate::kernel::sched::stride::SchedInner;
 use crate::kernel::sched::{Qos, SCHEDULER, State, THREADS_MAX};
 use crate::kernel::timer;
 
@@ -55,7 +56,7 @@ impl PerCpuTracePoint {
 #[allow(dead_code)]
 struct ThreadControlBlockTracePoint {
     state: State,
-    id: u32,
+    id: u16,
     qos: Qos,
     priority: u8,
     pass: u64,
@@ -73,9 +74,9 @@ struct ThreadControlBlockTracePoint {
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct PickMiss {
-    starved_id: u32,
+    starved_id: u16,
     ready_ms: u64,
-    blocker_id: u32,
+    blocker_id: u16,
     blocker_hart: u8,
     // True if the out-ranked runner is on the hart that DETECTED the stall —
     // that hart should have preempted locally (a local pick/reschedule bug);
@@ -137,24 +138,22 @@ unsafe fn stash_percpu(tp: *mut TracePoint) {
 }
 
 // Safety: Caller must provide a valid pointer to a TracePoint
-unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[ThreadControlBlock]) {
+unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[Option<ThreadControlBlock>]) {
     unsafe {
         for (i, tcb_array) in tcbs.iter().enumerate().take(THREADS_MAX) {
-            if tcb_array.state == State::Avail {
-                (*tp).threads[i] = None;
-            } else {
+            if let Some(tcb) = tcb_array {
                 let tcbtp = ThreadControlBlockTracePoint {
-                    state: tcb_array.state,
-                    id: tcb_array.id,
-                    qos: tcb_array.qos,
-                    priority: tcb_array.priority,
-                    pass: tcb_array.pass,
-                    last_started_cycles: tcb_array.last_started_cycles,
-                    next_waiter: tcb_array.next_waiter.map(|handle| handle.idx),
-                    affinity: tcb_array.affinity,
-                    user_thread: tcb_array.user.is_some(),
-                    marked_for_exit: tcb_array.marked_for_exit,
-                    ready_since: tcb_array.ready_since,
+                    state: tcb.state,
+                    id: tcb.id,
+                    qos: tcb.qos,
+                    priority: tcb.priority,
+                    pass: tcb.pass,
+                    last_started_cycles: tcb.last_started_cycles,
+                    next_waiter: tcb.next_waiter.map(|handle| handle.idx),
+                    affinity: tcb.affinity,
+                    user_thread: tcb.user.is_some(),
+                    marked_for_exit: tcb.marked_for_exit,
+                    ready_since: tcb.ready_since,
                 };
                 (*tp).threads[i] = Some(tcbtp); // copy
             }
@@ -166,7 +165,7 @@ unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[ThreadControlBlock]) {
 static TRACE_BUF: TraceBuf =
     TraceBuf([const { UnsafeCell::new(TracePoint::new()) }; TRACE_BUFFER_SIZE]);
 
-impl ThreadsInner {
+impl SchedInner {
     // Fill a trace point from the current state (lock already held).
     // Safety: caller provides a valid pointer to a TracePoint.
     unsafe fn write_snapshot(&self, tp: *mut TracePoint, label: &'static str) {
@@ -174,7 +173,7 @@ impl ThreadsInner {
             (*tp).label = label;
             (*tp).time_stamp = timer::elapsed();
             stash_percpu(tp);
-            stash_tcbs(tp, &self.thread_blocks);
+            stash_tcbs(tp, &self.thread_blocks.0);
             for i in 0..THREADS_MAX {
                 (*tp).wake_overshoot[i] = self.wake_overshoot[i];
             }
@@ -207,7 +206,9 @@ impl ThreadsInner {
     // live state: does it out-rank (lower pass) a thread currently running on
     // a hart it's allowed to use? If so that's a missed preemption.
     fn compute_pick_miss(&self, stalled_idx: usize) -> PickMiss {
-        let stalled = &self.thread_blocks[stalled_idx];
+        let stalled = &self.thread_blocks.0[stalled_idx]
+            .as_ref()
+            .expect("should be a valid thread");
         let now = timer::elapsed();
         let ready_ms = now.saturating_sub(stalled.ready_since) / timer::CYCLES_PER_MS;
         let this = hart_id();
@@ -228,7 +229,9 @@ impl ThreadsInner {
             } else {
                 percpu::other_current_thread_idx()
             };
-            let runner = &self.thread_blocks[cur_idx];
+            let runner = &self.thread_blocks.0[cur_idx]
+                .as_ref()
+                .expect("should be valid thread");
             let affinity_ok = stalled.affinity.is_none_or(|h| h as usize == hart);
             if affinity_ok && stalled.pass < runner.pass {
                 pm.blocker_id = runner.id;
@@ -254,7 +257,7 @@ impl ThreadsInner {
 // call sites do — percpu, the TCBs, AND `wake_overshoot` — in one consistent
 // pass. (The old with_tcbs path could not reach `wake_overshoot`.)
 pub(crate) fn take_snapshot(label: &'static str) {
-    SCHEDULER.threads.lock().snapshot_raw(label);
+    SCHEDULER.sched.lock().snapshot_raw(label);
 }
 
 /// Discard all buffered snapshots. The test runner calls this at each test
@@ -283,30 +286,30 @@ pub(crate) fn report_live(label: &'static str) {
     //    the rest of the test output, so it stays FIFO-ordered instead of
     //    racing ahead via the direct writer (the old `dprint!` garble).
     // State is Copy, so we can snapshot (id, state) into a local array.
-    let mut entries: [(u32, State); THREADS_MAX] = [(0, State::Avail); THREADS_MAX];
+    let mut entries: [Option<(u16, State)>; THREADS_MAX] = [None; THREADS_MAX];
     let mut n = 0;
     let mut runnable = 0usize;
     let mut live = 0usize;
     {
-        let threads = SCHEDULER.threads.lock();
-        for tcb in threads.thread_blocks.iter() {
-            if tcb.state == State::Avail || tcb.priority == PRIORITY_MIN {
+        let sched = SCHEDULER.sched.lock();
+        for tcb in sched.thread_blocks.0.iter().as_ref().iter().flatten() {
+            if tcb.priority == PRIORITY_MIN {
                 continue;
             }
             live += 1;
             if matches!(tcb.state, State::Ready | State::Running) {
                 runnable += 1;
             }
-            entries[n] = (tcb.id, tcb.state);
+            entries[n] = Some((tcb.id, tcb.state));
             n += 1;
         }
     }
     crate::drivers::uart::with_uart_writer(|w| {
         use core::fmt::Write;
         let _ = write!(w, "[live @ {label}]");
-        for &(id, state) in &entries[..n] {
+        for (id, state) in entries[..n].iter().flatten() {
             let mut cell = ColBuf::new();
-            write_state(&mut cell, &state);
+            write_state(&mut cell, state);
             let _ = write!(w, " id{id}={}", cell.as_str());
         }
         let _ = writeln!(w, "  ({runnable} runnable, {live} live)");
@@ -358,10 +361,10 @@ impl Write for ColBuf {
 /// Render a deadline as `tag@<wake-ms>`, matching the timestamp column, or
 /// `tag@MAX` for the park-forever sentinel (`u64::MAX`).
 fn write_deadline(w: &mut impl Write, tag: &str, d: &Deadline) {
-    if d.min == u64::MAX {
+    if d.at_cycles == u64::MAX {
         let _ = write!(w, "{tag}@MAX");
     } else {
-        let _ = write!(w, "{tag}@{}", d.min / timer::CYCLES_PER_MS);
+        let _ = write!(w, "{tag}@{}", d.at_cycles / timer::CYCLES_PER_MS);
     }
 }
 
@@ -381,7 +384,6 @@ fn write_post_switch(w: &mut impl Write, ps: &PostSwitch) {
 /// time in ms (see `write_deadline`).
 fn write_state(w: &mut impl Write, s: &State) {
     match s {
-        State::Avail => drop(write!(w, "----")),
         State::Blocked => drop(write!(w, "Blk")),
         State::BlockedUntil(d) => write_deadline(w, "BlkU", d),
         State::Ready => drop(write!(w, "Rdy")),

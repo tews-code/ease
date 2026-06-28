@@ -5,8 +5,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::interrupts::wait_for_interrupt;
 use crate::kernel::percpu;
 use crate::kernel::stack::check_canary;
-#[cfg(feature = "paint-stack")]
-use crate::kernel::stack::print_stack_watermark;
 #[cfg(test)]
 use crate::qemu;
 
@@ -137,43 +135,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         );
 
         #[cfg(feature = "paint-stack")]
-        // Safety: base and top addresses are aligned by linker and valid for reads
-        unsafe {
-            unsafe extern "C" {
-                static __hart0_irq_stack_base: u8;
-                static __hart0_irq_stack_top: u8;
-                static __hart1_irq_stack_base: u8;
-                static __hart1_irq_stack_top: u8;
-                static __hart0_idle_stack_base: u8;
-                static __hart0_idle_stack_top: u8;
-                static __hart1_idle_stack_base: u8;
-                static __hart1_idle_stack_top: u8;
-            }
-            print_stack_watermark(
-                "Irq Hart",
-                0,
-                &raw const __hart0_irq_stack_base as usize,
-                &raw const __hart0_irq_stack_top as usize,
-            );
-            print_stack_watermark(
-                "Irq Hart",
-                1,
-                &raw const __hart1_irq_stack_base as usize,
-                &raw const __hart1_irq_stack_top as usize,
-            );
-            print_stack_watermark(
-                "Idle",
-                0,
-                &raw const __hart0_idle_stack_base as usize,
-                &raw const __hart0_idle_stack_top as usize,
-            );
-            print_stack_watermark(
-                "Idle",
-                1,
-                &raw const __hart1_idle_stack_base as usize,
-                &raw const __hart1_idle_stack_top as usize,
-            );
-        }
+        crate::kernel::stack::print_irq_idle_stacks();
 
         use core::fmt::Write;
 

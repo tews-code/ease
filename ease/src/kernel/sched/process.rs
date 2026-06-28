@@ -4,7 +4,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::types::ThreadsInner;
+use super::stride::SchedInner;
 use crate::kernel::sched::{THREADS_MAX, usermemmap::UserMemMap};
 
 pub(super) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
@@ -58,7 +58,7 @@ impl ProcessControlBlock {
     }
 }
 
-impl ThreadsInner {
+impl SchedInner {
     pub(super) fn find_process_slot(&self) -> Option<usize> {
         self.process_blocks.iter().position(|pcb| pcb.is_none())
     }

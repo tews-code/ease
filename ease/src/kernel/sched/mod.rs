@@ -4,6 +4,7 @@
 mod bench;
 mod deadline;
 mod process;
+mod spawn;
 mod stride;
 #[cfg(all(test, any(feature = "test-sched", feature = "bench")))]
 mod test_support;
@@ -12,7 +13,6 @@ mod tests;
 mod threads;
 #[cfg(feature = "trace")]
 pub mod trace;
-mod types;
 pub(crate) mod usermemmap;
 
 use crate::board::HARTS_MAX;
@@ -22,12 +22,18 @@ use crate::kernel::sched::process::ProcessHandle;
 use crate::kernel::sync::with_interrupts_disabled;
 
 use stride::SCHEDULER;
-pub use types::THREADS_MAX;
+pub(crate) use threads::THREADS_MAX;
 
 #[allow(unused_imports)]
-pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN, SchedInitToken};
+pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
 #[allow(unused_imports)]
-pub(crate) use types::{ExitReason, Qos, State, ThreadHandle};
+pub(crate) use threads::{ExitReason, State, ThreadHandle};
+
+#[derive(Debug, Copy, Clone)]
+pub enum Qos {
+    High,
+    Low,
+}
 
 #[must_use = "Builder must be terminated with .spawn() to actually create a thread"]
 pub struct Builder {
@@ -99,7 +105,7 @@ pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
 }
 
 /// Set up the boot thread
-pub fn bootstrap(hartid: usize) -> SchedInitToken {
+pub fn bootstrap(hartid: usize) {
     SCHEDULER.bootstrap(hartid)
 }
 
