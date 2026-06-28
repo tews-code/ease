@@ -8,7 +8,7 @@ use crate::kernel::alloc::Order;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
-use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock};
+use crate::kernel::sched::process::{PROCS_MAX, Procs};
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
     Threads,
@@ -58,7 +58,7 @@ pub(super) static SCHEDULER: Scheduler = Scheduler::new();
 
 pub(super) struct SchedInner {
     pub(super) thread_blocks: super::threads::Threads,
-    pub(super) process_blocks: [Option<ProcessControlBlock>; PROCS_MAX], // Two thread control blocks are taken up by idle so can't be used for a process
+    pub(super) process_blocks: super::process::Procs, // Two thread control blocks are taken up by idle so can't be used for a process
     #[cfg(feature = "trace")]
     pub(super) wake_overshoot: [u64; THREADS_MAX],
 }
@@ -239,7 +239,7 @@ impl SchedInner {
                 }
 
                 // For user thread merge the thread's stack and set pmp
-                let pmp_config = self.process_blocks[user_context.process_idx as usize]
+                let pmp_config = self.process_blocks.0[user_context.process_idx as usize]
                     .as_ref()
                     .expect("process should be configured before this thread is scheduled")
                     .mem_map
@@ -280,7 +280,7 @@ impl Scheduler {
         Self {
             sched: IrqSpinLock::new(SchedInner {
                 thread_blocks: Threads([const { None }; THREADS_MAX]),
-                process_blocks: [const { None }; PROCS_MAX],
+                process_blocks: Procs([const { None }; PROCS_MAX]),
                 #[cfg(feature = "trace")]
                 wake_overshoot: [0; THREADS_MAX],
             }),

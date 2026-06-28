@@ -1,7 +1,5 @@
 //! Threads
 
-#![allow(dead_code)]
-
 use alloc::fmt::Debug;
 
 use core::ptr::NonNull;
@@ -10,7 +8,6 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::Qos;
 use crate::kernel::sched::stride::PRIORITY_MIN;
-use crate::kernel::stack;
 use crate::kernel::timer;
 
 use super::deadline::Deadline;
@@ -54,6 +51,7 @@ pub(crate) enum State {
 }
 
 // user_entry is read from assembly
+#[allow(dead_code)]
 pub(super) struct UserContext {
     pub(super) user_stack: MemRegion,
     pub(super) user_entry: extern "C" fn(),
@@ -118,22 +116,6 @@ impl ThreadControlBlock {
             _ => None,
         }
     }
-
-    #[inline(never)]
-    fn check_canary(&self) {
-        let base_addr = self.kernel_stack.base_addr();
-        // Safety: base address is aligned and valid for reads either from linker script or buddy allocation
-        if let Err(val) = unsafe { stack::check_canary(base_addr) } {
-            panic!(
-                "kernel stack canary corrupted in thread {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
-                self.id,
-                self.sp,
-                base_addr,
-                val,
-                stack::STACK_CANARY
-            )
-        };
-    }
 }
 
 impl Debug for ThreadControlBlock {
@@ -158,6 +140,7 @@ pub(super) struct Threads(pub(super) [Option<ThreadControlBlock>; THREADS_MAX]);
 
 impl Threads {
     // Helper function providing an iterator for the index and reference to valid threads
+    #[allow(dead_code)]
     pub(super) fn iter_indexed(&self) -> impl Iterator<Item = (usize, &ThreadControlBlock)> {
         self.0
             .iter()
@@ -168,11 +151,13 @@ impl Threads {
     // Helper function to get a reference to a TCB by index
     // Since the index comes from current_thread_idx/handle.idx and are
     // always valid — the Option here is about presence, not bounds.)
+    #[allow(dead_code)]
     pub(super) fn get(&self, idx: usize) -> Option<&ThreadControlBlock> {
         self.0[idx].as_ref()
     }
 
     // Helper function to get a mutable reference to a TCB by index
+    #[allow(dead_code)]
     pub(super) fn get_mut(&mut self, idx: usize) -> Option<&mut ThreadControlBlock> {
         self.0[idx].as_mut()
     }
@@ -326,6 +311,7 @@ impl Threads {
     }
 
     // Returns whether the thread belongs to a process `pid`
+    #[allow(dead_code)]
     pub(super) fn belongs_to_process(&self, idx: usize, pid: usize) -> bool {
         self.0[idx]
             .as_ref()

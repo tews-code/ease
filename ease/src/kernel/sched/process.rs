@@ -58,9 +58,11 @@ impl ProcessControlBlock {
     }
 }
 
+pub(super) struct Procs(pub(super) [Option<ProcessControlBlock>; PROCS_MAX]);
+
 impl SchedInner {
     pub(super) fn find_process_slot(&self) -> Option<usize> {
-        self.process_blocks.iter().position(|pcb| pcb.is_none())
+        self.process_blocks.0.iter().position(|pcb| pcb.is_none())
     }
 
     pub(super) fn install_process_control_block(
@@ -69,19 +71,19 @@ impl SchedInner {
         pcb: ProcessControlBlock,
     ) -> ProcessHandle {
         let pid = pcb.pid;
-        self.process_blocks[idx] = Some(pcb);
+        self.process_blocks.0[idx] = Some(pcb);
         ProcessHandle { pid, idx }
     }
 
     // Decrements the process thread count and releases the process control
     // block if the thread count reaches zero.
     pub(super) fn release_process_thread(&mut self, process_idx: u8) {
-        let thread_count = self.process_blocks[process_idx as usize]
+        let thread_count = self.process_blocks.0[process_idx as usize]
             .as_mut()
             .expect("should only be decrementing thread count on a valid process control block")
             .dec_thread_count();
         if thread_count == 0 {
-            self.process_blocks[process_idx as usize] = None;
+            self.process_blocks.0[process_idx as usize] = None;
         }
     }
 }

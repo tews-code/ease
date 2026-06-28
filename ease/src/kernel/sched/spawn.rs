@@ -89,7 +89,7 @@ impl Scheduler {
         // Now lock the scheduler
         let mut sched = self.sched.lock();
         // We should have a process control block already set up
-        if sched.process_blocks[process.idx]
+        if sched.process_blocks.0[process.idx]
             .as_ref()
             .is_none_or(|pcb| pcb.pid != process.pid)
         {
@@ -115,7 +115,7 @@ impl Scheduler {
             },
         )?;
         // Increment this process's thread count
-        if sched.process_blocks[process.idx]
+        if sched.process_blocks.0[process.idx]
             .as_mut()
             .expect("still holding the lock and verified this is Some above")
             .add_thread_count()
