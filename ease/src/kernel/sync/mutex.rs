@@ -125,8 +125,8 @@ impl<T> Mutex<T> {
         crate::kernel::sched::set_self_blocked();
         drop(head);
         crate::kernel::sched::park_if_blocked();
-        // Add an Acquire fence (matched by Release fence in Drop)
-        core::sync::atomic::fence(Ordering::Acquire);
+        // Add an Acquire atomic (matched by Release fence in Drop)
+        let _ = self.state.load(Ordering::Acquire);
         MutexGuard { lock: self }
     }
 }
@@ -176,13 +176,16 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
         let next_waiter_in_list = crate::kernel::sched::get_next_waiter(&popped);
         crate::kernel::sched::set_next_waiter(&popped, None);
         *head = next_waiter_in_list;
-        // Change the state
-        if next_waiter_in_list.is_none() {
-            self.lock
-                .state
-                .store(MutexState::Locked as u8, Ordering::Release);
-        }
-        core::sync::atomic::fence(Ordering::Release);
+        // Change the state using Release atomics to ensure unparked thread sees new state
+        self.lock.state.store(
+            if next_waiter_in_list.is_none() {
+                MutexState::Locked as u8
+            } else {
+                MutexState::LockedWithWaiters as u8
+            },
+            Ordering::Release,
+        );
+
         drop(head);
         crate::kernel::sched::unpark(&popped);
     }
