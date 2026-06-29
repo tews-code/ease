@@ -582,14 +582,37 @@ fn sleep_until_past_returns_quickly() {
     );
 }
 
+/// Poll `progress` until it reaches at least `target`, up to `cap_ms`, checking
+/// every few ms. Returns the last observed value (`>= target` on success, the
+/// stalled value on timeout).
+///
+/// The spawn/wake smoke tests gate on a child thread reaching a milestone, but a
+/// freshly spawned or just-woken thread's first run tails out under partner load
+/// + QEMU's timer jitter (see the QEMU TIMER JITTER NOTE at the top of the file):
+/// empirically <1 ms in the common case but occasionally 50+ ms. A fixed sleep
+/// must pick one threshold that is either still flaky or wastefully wide. Polling
+/// instead returns as soon as the thread makes progress, so the common case stays
+/// fast and only the rare tail approaches `cap_ms`; the cap is a backstop that
+/// still fails on a genuine hang/never-run.
+fn await_progress(progress: &AtomicUsize, target: usize, cap_ms: u64) -> usize {
+    let start = crate::kernel::timer::elapsed_ms();
+    loop {
+        let v = progress.load(Ordering::Relaxed);
+        if v >= target || crate::kernel::timer::elapsed_ms().saturating_sub(start) > cap_ms {
+            return v;
+        }
+        crate::kernel::sched::sleep(5);
+    }
+}
+
 /// Verify that `park()` actually blocks the calling thread and that
 /// `unpark()` wakes it. Spawns a child that records progress before
 /// parking and after waking. The test asserts the child is stuck at
 /// "parked" until `unpark()` runs, then advances to "resumed" afterward.
 ///
-/// Note: timing-dependent — the sleeps must be long enough for the
-/// child to be scheduled and reach `park`. Race-free guarantees come
-/// once the mutex layer is in place; this is a mechanism smoke test.
+/// Note: timing-dependent — the child must be scheduled and reach `park`
+/// within the poll cap. Race-free guarantees come once the mutex layer is
+/// in place; this is a mechanism smoke test.
 #[test_case]
 fn park_blocks_until_unpark() {
     static CHILD_PROGRESS: AtomicUsize = AtomicUsize::new(0);
@@ -605,19 +628,15 @@ fn park_blocks_until_unpark() {
         .with_stack_class(Order::KB2)
         .spawn(child_thread)
         .expect("spawn failed (no free slot?)");
-    // Give the child time to run and reach park().
-    crate::kernel::sched::sleep(50);
-    assert_eq!(
-        CHILD_PROGRESS.load(Ordering::Relaxed),
-        1,
-        "child did not reach park (progress != 1)"
-    );
+    // Poll for the child to be scheduled and reach park(); its first run can
+    // tail out under partner load + QEMU jitter (see await_progress).
+    let progress = await_progress(&CHILD_PROGRESS, 1, 120);
+    assert_eq!(progress, 1, "child did not reach park (progress != 1)");
     crate::kernel::sched::unpark(&handle);
-    // Give the child time to resume past park().
-    crate::kernel::sched::sleep(50);
+    // Poll for the child to resume past park() after the unpark.
+    let progress = await_progress(&CHILD_PROGRESS, 2, 120);
     assert_eq!(
-        CHILD_PROGRESS.load(Ordering::Relaxed),
-        2,
+        progress, 2,
         "child did not resume past park (progress != 2)"
     );
 }
@@ -1519,20 +1538,16 @@ fn completion_wait_then_signal() {
         .spawn(child);
     assert!(id.is_some(), "spawn failed (no free slot?)");
 
-    // Give the child time to reach C.wait() and actually park.
-    crate::kernel::sched::sleep(50);
-    assert_eq!(
-        CHILD_PROGRESS.load(Ordering::Relaxed),
-        1,
-        "child did not reach wait() (progress != 1)",
-    );
+    // Poll for the child to reach C.wait() and actually park; its first run can
+    // tail out under partner load + QEMU jitter (see await_progress).
+    let progress = await_progress(&CHILD_PROGRESS, 1, 120);
+    assert_eq!(progress, 1, "child did not reach wait() (progress != 1)");
 
     // Fire the signal — child should wake up and continue past wait().
     C.signal();
-    crate::kernel::sched::sleep(50);
+    let progress = await_progress(&CHILD_PROGRESS, 2, 120);
     assert_eq!(
-        CHILD_PROGRESS.load(Ordering::Relaxed),
-        2,
+        progress, 2,
         "child did not resume past wait() after signal (progress != 2)",
     );
 }
@@ -1568,16 +1583,18 @@ fn completion_signal_twice_is_idempotent() {
         .spawn(child_two_waits);
     assert!(id.is_some(), "spawn failed (no free slot?)");
 
-    // First wait should pass through immediately (pending was set).
-    crate::kernel::sched::sleep(50);
-    assert_eq!(
-        FIRST_DONE.load(Ordering::Relaxed),
-        1,
-        "first wait did not consume the pending signal",
-    );
+    // First wait should pass through immediately (pending was set); poll for it,
+    // since the child's first run can tail out under partner load + QEMU jitter
+    // (see await_progress).
+    let first = await_progress(&FIRST_DONE, 1, 120);
+    assert_eq!(first, 1, "first wait did not consume the pending signal");
 
-    // Second wait must BLOCK — the boolean pending was consumed by the
-    // first wait, and the second signal didn't add a second slot.
+    // Second wait must BLOCK — the boolean pending was consumed by the first
+    // wait, and the second signal didn't add a second slot. This is a NEGATIVE
+    // assertion (proving the absence of progress), so it can't be polled: give a
+    // buggy counter-like impl a fixed settle window to wrongly proceed, then
+    // confirm it didn't.
+    crate::kernel::sched::sleep(50);
     assert_eq!(
         SECOND_DONE.load(Ordering::Relaxed),
         0,
@@ -1586,11 +1603,10 @@ fn completion_signal_twice_is_idempotent() {
 
     // Send one more signal to release the child and clean up.
     C.signal();
-    crate::kernel::sched::sleep(50);
+    let second = await_progress(&SECOND_DONE, 1, 120);
     assert_eq!(
-        SECOND_DONE.load(Ordering::Relaxed),
-        1,
-        "second wait did not complete after explicit signal",
+        second, 1,
+        "second wait did not complete after explicit signal"
     );
 }
 
