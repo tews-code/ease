@@ -153,7 +153,7 @@ impl Scheduler {
         // Take the lock
         let mut sched = self.sched.lock();
         // Get a process slot
-        let pcb_idx = sched.find_process_slot()?;
+        let pcb_idx = sched.process_blocks.find_process_slot()?;
         let user_stack_top = user_stack.top();
         let user_exit = crate::user::user_exit as *const () as usize;
         let _ = sched.thread_blocks.acquire(
@@ -175,7 +175,9 @@ impl Scheduler {
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
-        let process_handle = sched.install_process_control_block(pcb_idx, pcb);
+        let process_handle = sched
+            .process_blocks
+            .install_process_control_block(pcb_idx, pcb);
         self.finish_spawn(sched, affinity);
         Some(process_handle)
     }

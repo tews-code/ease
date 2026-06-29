@@ -17,19 +17,18 @@ pub(crate) struct ProcessHandle {
     pub(super) idx: usize,
 }
 
-#[allow(dead_code)]
 pub(super) struct ProcessControlBlock {
     pub(super) pid: u32,
-    name: &'static str,
+    _name: &'static str,
     pub(super) mem_map: UserMemMap,
     thread_count: u8,
 }
 
 impl ProcessControlBlock {
-    pub(super) fn new(name: &'static str, mem_map: UserMemMap) -> Self {
+    pub(super) fn new(_name: &'static str, mem_map: UserMemMap) -> Self {
         Self {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            name,
+            _name,
             mem_map,
             thread_count: 0,
         }
@@ -60,9 +59,9 @@ impl ProcessControlBlock {
 
 pub(super) struct Procs(pub(super) [Option<ProcessControlBlock>; PROCS_MAX]);
 
-impl SchedInner {
+impl Procs {
     pub(super) fn find_process_slot(&self) -> Option<usize> {
-        self.process_blocks.0.iter().position(|pcb| pcb.is_none())
+        self.0.iter().position(|pcb| pcb.is_none())
     }
 
     pub(super) fn install_process_control_block(
@@ -71,10 +70,12 @@ impl SchedInner {
         pcb: ProcessControlBlock,
     ) -> ProcessHandle {
         let pid = pcb.pid;
-        self.process_blocks.0[idx] = Some(pcb);
+        self.0[idx] = Some(pcb);
         ProcessHandle { pid, idx }
     }
+}
 
+impl SchedInner {
     // Decrements the process thread count and releases the process control
     // block if the thread count reaches zero.
     pub(super) fn release_process_thread(&mut self, process_idx: u8) {
