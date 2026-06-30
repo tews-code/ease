@@ -106,6 +106,7 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
 
 #[inline(never)]
 #[cold]
+#[cfg_attr(feature = "profile", profile)]
 fn handle_ecall(frame: &mut TrapFrame) {
     match frame.syscall() {
         crate::syscall::EXIT => {

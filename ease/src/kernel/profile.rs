@@ -240,9 +240,9 @@ pub(crate) fn init() {
     // The statics live in `.psram_buf` which is NOLOAD, so const initialisers
     // are discarded. Set them explicitly here.
     unsafe extern "C" {
-        static __hart0_irq_stack_start: u8;
+        static __hart0_irq_stack_base: u8;
         static __hart0_irq_stack_top: u8;
-        static __hart1_irq_stack_start: u8;
+        static __hart1_irq_stack_base: u8;
         static __hart1_irq_stack_top: u8;
     }
 
@@ -253,14 +253,14 @@ pub(crate) fn init() {
     }
 
     PROFILE_HART0.irq_stack_lo.store(
-        &raw const __hart0_irq_stack_start as usize,
+        &raw const __hart0_irq_stack_base as usize,
         Ordering::Relaxed,
     );
     PROFILE_HART0
         .irq_stack_hi
         .store(&raw const __hart0_irq_stack_top as usize, Ordering::Relaxed);
     PROFILE_HART1.irq_stack_lo.store(
-        &raw const __hart1_irq_stack_start as usize,
+        &raw const __hart1_irq_stack_base as usize,
         Ordering::Relaxed,
     );
     PROFILE_HART1

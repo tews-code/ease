@@ -1,5 +1,8 @@
 //! Completion
 
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
 use crate::kernel::sched::{
     self, ThreadHandle, current_thread, park_if_blocked, set_self_blocked, unpark,
 };
@@ -28,6 +31,7 @@ impl Completion {
         }
     }
 
+    #[cfg_attr(feature = "profile", profile)]
     pub fn signal(&self) {
         let mut inner = self.inner.lock();
         inner.pending = true;

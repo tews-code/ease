@@ -16,7 +16,7 @@ use crate::kernel::sched::threads::{
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_stack_watermark;
 use crate::kernel::stack::{STACK_CANARY, check_canary};
-use crate::kernel::sync::{CounterU64, IrqSpinLock, with_interrupts_disabled};
+use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard, with_interrupts_disabled};
 use crate::kernel::{ipi, percpu, timer};
 
 #[cfg(feature = "profile")]
@@ -460,6 +460,24 @@ impl Scheduler {
         }
     }
 
+    // Helper function shared by `schedule` (preempt called from trap handler) and `reschedule` (voluntary) scheduler calls
+    // Performs common bookkeeping
+    fn slice_ended(
+        &self,
+        sched: &mut IrqSpinLockGuard<SchedInner>,
+        curr_idx: usize,
+        now_cycles: u64,
+    ) {
+        sched.check_curr_canary();
+        let curr = &mut sched.thread_blocks.0[curr_idx]
+            .as_mut()
+            .expect("current thread should be running with valid TCB");
+        let ran = now_cycles - curr.last_started_cycles;
+        curr.last_started_cycles = now_cycles;
+        unsafe { self.run_cycles[curr_idx].add(ran) };
+        curr.stride_forward(ran);
+    }
+
     // Set current thread state to `new_state` and next thread to `Ready` in round robin
     // If `currrent_state` is Some(State), reschedule only takes place if the
     // current thread state matches; if `current_state` is None then reschedule
@@ -477,18 +495,9 @@ impl Scheduler {
             // thread's stack frame, so switch_to would otherwise carry the lock
             // across the switch and block other harts/threads from rescheduling.
             let mut sched = self.sched.lock();
-            sched.check_curr_canary();
             let now_cycles = timer::elapsed();
             let curr_idx = percpu::current_thread_idx();
-            {
-                let curr = &mut sched.thread_blocks.0[curr_idx]
-                    .as_mut()
-                    .expect("current thread should be running with valid TCB");
-                let ran = now_cycles - curr.last_started_cycles;
-                curr.last_started_cycles = now_cycles;
-                unsafe { self.run_cycles[curr_idx].add(ran) };
-                curr.stride_forward(ran);
-            }
+            self.slice_ended(&mut sched, curr_idx, now_cycles);
             // First check if current state matches pre-condition
             if let Some(state) = current_state {
                 let idx = percpu::current_thread_idx();
@@ -588,90 +597,13 @@ impl Scheduler {
         });
     }
 
-    /// Perform switch accounting and set reschedule flag
-    pub(super) fn mark_for_preempt(&self) {
-        let mut sched = self.sched.lock();
-        sched.check_curr_canary();
-        sched.wake_sleeping_threads();
-
-        // Flag any Ready thread that's been waiting longer than a slice — it
-        // should have been scheduled by now. Snapshot why (which thread holds
-        // the CPU it out-ranks).
-        #[cfg(feature = "trace")]
-        {
-            let now = timer::elapsed();
-            for idx in 0..THREADS_MAX {
-                if let Some(tcb) = sched.thread_blocks.0[idx].as_ref()
-                    && tcb.state == State::Ready
-                    && tcb.priority != PRIORITY_MIN
-                    && now.saturating_sub(tcb.ready_since) > READY_STALL
-                {
-                    sched.snapshot_ready_stall(idx);
-                    break;
-                }
-            }
-        }
-
-        // Apply current's stride upfront so pass comparisons in
-        // pick_next_if_fairer_mut see a fresh value —
-        // otherwise a long-running
-        // thread keeps appearing to have its old (low) pass and
-        // never loses a comparison.
-        let now_cycles = timer::elapsed();
-        let curr_idx = percpu::current_thread_idx();
-        {
-            let curr = &mut sched.thread_blocks.0[curr_idx]
-                .as_mut()
-                .expect("current thread should have valid TCB");
-            let ran = now_cycles - curr.last_started_cycles;
-            curr.last_started_cycles = now_cycles;
-            unsafe { self.run_cycles[curr_idx].add(ran) };
-            curr.stride_forward(ran);
-        }
-
-        // If thread is marked for exit skip looking for fairer thread
-        if sched.thread_blocks.0[curr_idx]
-            .as_ref()
-            .is_some_and(|tcb| tcb.marked_for_exit)
-        {
-            timer::set_next_deadline(
-                sched
-                    .thread_blocks
-                    .next_timer_deadline(SLICE, timer::elapsed()),
-            );
-            percpu::set_needs_reschedule();
-            return;
-        }
-
-        let Some((_curr, _curr_idx, _next, _next_idx)) = sched.pick_next_if_fairer_mut() else {
-            // Same thread is running uncontended, increase slice deadline
-            timer::set_next_deadline(
-                sched
-                    .thread_blocks
-                    .next_timer_deadline(SLICE, timer::elapsed()),
-            );
-            return;
-        };
-        timer::set_next_deadline(
-            sched
-                .thread_blocks
-                .next_timer_deadline(SLICE, timer::elapsed()),
-        );
-        percpu::set_needs_reschedule();
-        // Recalculate the deadline after the reschedule completes
-        timer::set_next_deadline(
-            sched
-                .thread_blocks
-                .next_timer_deadline(SLICE, timer::elapsed()),
-        );
-        percpu::set_needs_reschedule();
-    }
-
     pub(super) fn schedule(&self) {
         if percpu::take_needs_reschedule() {
             with_interrupts_disabled(|_cs| {
                 let mut sched = self.sched.lock();
-                sched.check_curr_canary();
+                let now_cycles = timer::elapsed();
+                let curr_idx = percpu::current_thread_idx();
+                self.slice_ended(&mut sched, curr_idx, now_cycles);
 
                 // Check if thread is marked for exit
                 let marked_for_exit = sched.thread_blocks.0[percpu::current_thread_idx()]
@@ -682,8 +614,16 @@ impl Scheduler {
                     self.exit(ExitReason::Fault);
                 }
 
+                // Wake any sleeping threads before we pick the next (if fairer)
+                sched.wake_sleeping_threads();
+                // Pick the next thread to run (or keep running if has lowest pass)
                 let pick = sched.pick_next_if_fairer_mut();
                 let Some((curr, curr_idx, next, next_idx)) = pick else {
+                    timer::set_next_deadline(
+                        sched
+                            .thread_blocks
+                            .next_timer_deadline(SLICE, timer::elapsed()),
+                    );
                     return;
                 };
                 // Perform switch
@@ -716,6 +656,35 @@ impl Scheduler {
                 self.post_switch_cleanup();
             });
         }
+    }
+
+    /// Perform switch accounting and set reschedule flag
+    #[cfg_attr(feature = "profile", profile)]
+    pub(super) fn mark_for_preempt(&self) {
+        // Flag any Ready thread that's been waiting longer than a slice — it
+        // should have been scheduled by now. Snapshot why (which thread holds
+        // the CPU it out-ranks).
+        #[cfg(feature = "trace")]
+        {
+            let sched = self.sched.lock();
+            let now = timer::elapsed();
+            for idx in 0..THREADS_MAX {
+                if let Some(tcb) = sched.thread_blocks.0[idx].as_ref()
+                    && tcb.state == State::Ready
+                    && tcb.priority != PRIORITY_MIN
+                    && now.saturating_sub(tcb.ready_since) > READY_STALL
+                {
+                    sched.snapshot_ready_stall(idx);
+                    break;
+                }
+            }
+        }
+
+        // To avoid a timer IRQ storm, set the timer deadline to now + SLICE
+        // This will quickly be replaced by an accurate calculation in `schedule`.
+        timer::set_next_deadline(timer::elapsed() + SLICE);
+        // Flag that scheduling is needed
+        percpu::set_needs_reschedule();
     }
 
     /// Yields current thread
