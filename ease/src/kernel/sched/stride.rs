@@ -5,6 +5,7 @@ use core::ptr::NonNull;
 use super::Qos;
 use crate::arch::{csr, hart_id};
 use crate::kernel::alloc::Order;
+use crate::kernel::collection::{AtomicBitmap, bitmap_words_for};
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
@@ -64,39 +65,6 @@ pub(super) struct SchedInner {
 }
 
 impl SchedInner {
-    // Wakes any threads past their deadlines and sets their pass to pass_baseline so they
-    // do not monopolise their Hart as their pass catches up with threads that were running
-    //
-    // Returns a count of the ready threads
-    pub(super) fn wake_sleeping_threads(&mut self) -> bool {
-        let now = timer::elapsed();
-        let other_curr_idx = percpu::other_current_thread_idx();
-        let mut pass_baseline: Option<u64> = None; // This will be calculated by the Threads wake_if_due method if needed
-        let tcbs = &mut self.thread_blocks;
-        for idx in 0..THREADS_MAX {
-            if idx == percpu::current_thread_idx() {
-                continue;
-            }
-            if let Some((pass, _at_cycles, affinity)) =
-                tcbs.wake_if_due(idx, now, &mut pass_baseline, BONUS)
-            {
-                // Stash the timer overshoot
-                #[cfg(feature = "trace")]
-                {
-                    self.wake_overshoot[idx] = now.saturating_sub(_at_cycles);
-                }
-                // Interrupt other hart if appropriate
-                if let Some(other_hart_tcb) = &tcbs.0[other_curr_idx]
-                    && other_hart_tcb.pass >= pass
-                    && affinity.is_none_or(|affinity| affinity != hart_id() as u8)
-                {
-                    crate::kernel::ipi::send(hart_id() ^ 1);
-                }
-            }
-        }
-        tcbs.is_under_contention()
-    }
-
     // Get disjoint mutable TCBs for current and next
     // Given there is always an idle thread in Ready
     // Panics if there is no idle thread, or idle calls reschedule
@@ -266,7 +234,8 @@ unsafe impl Send for SchedInner {}
 
 pub(super) struct Scheduler {
     pub(super) sched: IrqSpinLock<SchedInner>,
-    // Outside of threads for lock-free read
+    // Outside of sched inner for lock-free access
+    pub(super) needs_wakeup: AtomicBitmap<THREADS_MAX, { bitmap_words_for(THREADS_MAX) }>,
     run_cycles: [CounterU64; THREADS_MAX],
 }
 
@@ -284,6 +253,7 @@ impl Scheduler {
                 #[cfg(feature = "trace")]
                 wake_overshoot: [0; THREADS_MAX],
             }),
+            needs_wakeup: AtomicBitmap::new(),
             run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
     }
@@ -318,7 +288,45 @@ impl Scheduler {
             )
             .expect("boot strap thread must succeed to start system");
         percpu::set_idle_thread_idx(thread_handle.idx);
+        self.needs_wakeup.clear(thread_handle.idx); // Best be certain that the idle thread isn't marked for wake ups
         sched.activate_thread(thread_handle.idx, None);
+    }
+
+    // Wakes any threads past their deadlines or which have a wake flag set
+    // Sets their pass to pass_baseline so they do not monopolise their Hart as their pass
+    // catches up with threads that were running
+    //
+    // Returns a count of the ready threads
+    pub(super) fn wake_sleeping_threads(&self, sched: &mut IrqSpinLockGuard<SchedInner>) -> bool {
+        let now = timer::elapsed();
+        let other_curr_idx = percpu::other_current_thread_idx();
+        let mut pass_baseline: Option<u64> = None; // This will be calculated by the Threads wake_if_due method if needed
+        let tcbs = &mut sched.thread_blocks;
+        for idx in 0..THREADS_MAX {
+            if idx == percpu::current_thread_idx() {
+                continue;
+            }
+            if let Some((pass, _at_cycles, affinity)) =
+                tcbs.wake_if_due(idx, now, &mut pass_baseline, BONUS)
+            {
+                // Stash the timer overshoot
+                #[cfg(feature = "trace")]
+                {
+                    // self.wake_overshoot[idx] = now.saturating_sub(_at_cycles);
+                }
+                // Interrupt other hart if appropriate
+                if let Some(other_hart_tcb) = &tcbs.0[other_curr_idx]
+                    && other_hart_tcb.pass >= pass
+                    && affinity.is_none_or(|affinity| affinity != hart_id() as u8)
+                {
+                    crate::kernel::ipi::send(hart_id() ^ 1);
+                }
+            }
+            if self.needs_wakeup.take(idx) {
+                self.wake_by_index(tcbs, idx);
+            }
+        }
+        tcbs.is_under_contention()
     }
 
     // Clean up a thread post switch
@@ -513,7 +521,7 @@ impl Scheduler {
                 }
             }
             // Check if any threads have reached or passed their deadline
-            sched.wake_sleeping_threads();
+            self.wake_sleeping_threads(&mut sched);
             // A yield hands off to a ready peer but never idles: if the pick
             // fell back to idle (no ready peer), keep running curr instead. For
             // sleep/block/exit curr is leaving, so the idle fallback is correct;
@@ -615,7 +623,7 @@ impl Scheduler {
                 }
 
                 // Wake any sleeping threads before we pick the next (if fairer)
-                sched.wake_sleeping_threads();
+                self.wake_sleeping_threads(&mut sched);
                 // Pick the next thread to run (or keep running if has lowest pass)
                 let pick = sched.pick_next_if_fairer_mut();
                 let Some((curr, curr_idx, next, next_idx)) = pick else {
@@ -775,45 +783,23 @@ impl Scheduler {
         );
     }
 
-    // Unpark the thread at index
+    // Set a wakeup flag for a particular thread
     #[cfg_attr(feature = "trace", ease_macros::trace)]
-    pub(super) fn unpark(&self, handle: &ThreadHandle) {
-        let mut sched = self.sched.lock();
-        let mut did_unpark: bool = false;
-        let id_ok = sched.thread_blocks.0[handle.idx]
-            .as_ref()
-            .is_some_and(|tcb| tcb.id == handle.id);
-        let affinity = if let Some(tcb) = sched.thread_blocks.0[handle.idx].as_mut() {
-            match tcb.state {
-                State::Blocked | State::BlockedUntil(_) if id_ok => {
-                    did_unpark = true;
-                    tcb.state = State::Ready;
-                    #[cfg(feature = "trace")]
-                    {
-                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
-                    }
-                    tcb.affinity
-                }
-                State::Switching(PostSwitch::Blocked)
-                | State::Switching(PostSwitch::BlockedUntil(_))
-                    if id_ok =>
-                {
-                    did_unpark = true;
-                    tcb.state = State::Switching(PostSwitch::Ready);
-                    #[cfg(feature = "trace")]
-                    {
-                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
-                    }
-                    tcb.affinity
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+    pub(super) fn set_wakeup_flag(&self, idx: usize) {
+        self.needs_wakeup.set(idx);
+    }
+
+    // Clear the wakeup flag for a particular thread
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
+    pub(super) fn clear_wakeup_flag(&self, idx: usize) {
+        self.needs_wakeup.clear(idx);
+    }
+
+    // Helper function used by unpark and wake_sleeping_threads
+    pub(super) fn wake_by_index(&self, threads: &mut Threads, idx: usize) {
+        let (did_unpark, affinity) = threads.make_unparked_ready(idx);
         #[cfg(feature = "trace")]
-        sched.snapshot_raw("unpark");
-        drop(sched);
+        self.snapshot_raw("unpark");
         if did_unpark {
             // If the unparked thread has affinity for the other hart, send an IPI
             if let Some(h) = affinity
@@ -824,6 +810,18 @@ impl Scheduler {
                 // In order to avoid waiting a time slice, set the preempt flag
                 percpu::set_needs_reschedule();
             }
+        }
+    }
+
+    // Unpark the thread at index
+    #[cfg_attr(feature = "trace", ease_macros::trace)]
+    pub(super) fn unpark(&self, handle: &ThreadHandle) {
+        let mut sched = self.sched.lock();
+        let id_ok = sched.thread_blocks.0[handle.idx]
+            .as_ref()
+            .is_some_and(|tcb| tcb.id == handle.id);
+        if id_ok {
+            self.wake_by_index(&mut sched.thread_blocks, handle.idx);
         }
     }
 

@@ -1,15 +1,8 @@
 //! Minimal bitmap
-//
-// Not interrupt safe
 
-#![allow(dead_code)]
+use core::sync::atomic::{AtomicU32, Ordering};
 
 const BITS_PER_WORD: usize = u32::BITS as usize; // Use u32 on our 32 bit system
-
-// Bitmap storage based on u32 words
-pub struct Bitmap<const BITS: usize, const WORDS: usize> {
-    bits: [u32; WORDS],
-}
 
 /// Helper function to convert required bits to number of `words`
 ///
@@ -20,6 +13,14 @@ pub struct Bitmap<const BITS: usize, const WORDS: usize> {
 /// ```
 pub const fn bitmap_words_for(bit_count: usize) -> usize {
     bit_count.div_ceil(BITS_PER_WORD)
+}
+
+// BITMAP
+
+// Bitmap storage based on u32 words
+// Not interrupt safe - use `AtomicBitmap` if this is needed
+pub struct Bitmap<const BITS: usize, const WORDS: usize> {
+    bits: [u32; WORDS],
 }
 
 impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
@@ -88,6 +89,125 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
         let (word_index, bit_mask) = Self::word_and_mask(bit);
         self.bits[word_index] ^= bit_mask;
         (self.bits[word_index] & bit_mask) != 0
+    }
+
+    /// Create a new bitmap from backing storage words
+    #[inline]
+    #[expect(dead_code)]
+    pub const fn from_words(words: [u32; WORDS]) -> Self {
+        Self { bits: words }
+    }
+}
+
+// ATOMIC BITMAP
+
+// Bitmap storage based on u32 words
+// If atomic safety is not required use `bitmap` instead
+pub struct AtomicBitmap<const BITS: usize, const WORDS: usize> {
+    bits: [AtomicU32; WORDS],
+}
+
+impl<const BITS: usize, const WORDS: usize> AtomicBitmap<BITS, WORDS> {
+    /// Create a new atomic bitmap
+    ///
+    /// Requires both required number of bits and the backing storage word count
+    /// as Rust's generics can't currently calculate this independently.
+    ///
+    /// Note that word count can be found from the helper function
+    /// bitmap_words_for().
+    /// ```text
+    /// const REQ_BITS: usize = 11;
+    /// let bitmap = Bitmap::<REQ_BITS,{ bitmap_words_for(REQ_BITS)}>::new();
+    /// ```
+    /// The atomic bitmap is initialised as all flags cleared.
+    /// There must be at least one bit (zero-sized bitmap not allowed).
+    pub const fn new() -> Self {
+        const {
+            assert!(WORDS == bitmap_words_for(BITS));
+        }
+        const {
+            assert!(BITS > 0);
+        }
+        Self {
+            bits: [const { AtomicU32::new(0) }; WORDS],
+        }
+    }
+
+    // Return the word index and bitmask for a bit
+    const fn word_and_mask(bit: usize) -> (usize, u32) {
+        (bit / BITS_PER_WORD, 1u32 << (bit % BITS_PER_WORD))
+    }
+
+    /// Return the value at `bit` as a boolean
+    ///
+    /// Panics: Panics if the requested bit is outside of the bitmap range
+    #[inline]
+    #[allow(dead_code)]
+    pub fn get(&self, bit: usize) -> bool {
+        debug_assert!(bit < BITS);
+        let (word_index, bit_mask) = Self::word_and_mask(bit);
+        self.bits[word_index].load(Ordering::Acquire) & bit_mask != 0
+    }
+
+    /// Set the flag at `bit`
+    ///
+    /// Panics: Panics if the requested bit is outside of the bitmap range
+    #[inline]
+    pub fn set(&self, bit: usize) {
+        debug_assert!(bit < BITS);
+        let (word_index, bit_mask) = Self::word_and_mask(bit);
+        let _ = self.bits[word_index].fetch_or(bit_mask, Ordering::Release);
+    }
+
+    /// Clear the flag at `bit`
+    ///
+    /// Panics: Panics if the requested bit is outside of the bitmap range
+    #[inline]
+    #[allow(dead_code)]
+    pub fn clear(&self, bit: usize) {
+        debug_assert!(bit < BITS);
+        let (word_index, bit_mask) = Self::word_and_mask(bit);
+        let _ = self.bits[word_index].fetch_and(!bit_mask, Ordering::Release);
+    }
+
+    /// Toggle the flag at `bit`
+    ///
+    /// Panics: Panics if the requested bit is outside of the bitmap range
+    #[inline]
+    #[allow(dead_code)]
+    pub fn toggle(&self, bit: usize) -> bool {
+        debug_assert!(bit < BITS);
+        let (word_index, bit_mask) = Self::word_and_mask(bit);
+        let bits = self.bits[word_index].fetch_xor(bit_mask, Ordering::Release);
+        (bits & bit_mask) != 0
+    }
+
+    /// Get a bit and set to zero
+    #[inline]
+    pub fn take(&self, bit: usize) -> bool {
+        debug_assert!(bit < BITS);
+        let (word_index, bit_mask) = Self::word_and_mask(bit);
+        let bits = self.bits[word_index].fetch_and(!bit_mask, Ordering::Acquire);
+        (bits & bit_mask) != 0
+    }
+
+    /// Drain the bit array, returns a plain bitmap
+    #[inline]
+    #[expect(dead_code)]
+    pub fn drain(&self) -> Bitmap<BITS, WORDS> {
+        let mut words = [0u32; WORDS];
+        self.bits
+            .iter()
+            .enumerate()
+            .for_each(|(i, w)| words[i] = w.swap(0, Ordering::Acquire));
+        Bitmap::from_words(words)
+    }
+
+    /// Check if any bits are set
+    #[inline]
+    #[expect(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.bits.iter().all(|b| b.load(Ordering::Relaxed) == 0)
     }
 }
 

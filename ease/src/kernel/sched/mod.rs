@@ -247,3 +247,17 @@ pub fn spawn_user(process: &ProcessHandle, user_entry: extern "C" fn()) -> Optio
         None,
     )
 }
+
+/// Set the wake up flag for a thread by index
+pub fn set_needs_wakeup(idx: usize) {
+    if idx < THREADS_MAX {
+        SCHEDULER.set_wakeup_flag(idx);
+    }
+}
+
+/// Clear the wake up flag for a thread by index
+pub fn clear_wakeup_signal(idx: usize) {
+    if idx < THREADS_MAX {
+        SCHEDULER.clear_wakeup_flag(idx);
+    }
+}

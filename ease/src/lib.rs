@@ -47,6 +47,13 @@ macro_rules! println {
     ($($arg:tt)*) => {};
 }
 
+/// No-op stub for `dprintln!` in the lib crate. See module docs above.
+#[macro_export]
+macro_rules! dprintln {
+    () => {};
+    ($($arg:tt)*) => {};
+}
+
 // `kernel/sync.rs` references `crate::arch::{disable_interrupts,
 // restore_interrupts}` when compiling for the kernel target. The lib
 // crate does not pull in the real `arch` module (it depends on more
@@ -58,6 +65,14 @@ macro_rules! println {
 // `riscv32imac-unknown-none-elf`.
 #[allow(dead_code)]
 mod arch {
+    pub mod mmio {
+        pub fn read32(_base: usize, _offset: usize) -> usize {
+            0
+        }
+        // Stub
+        pub fn write32(_base: usize, _offset: usize, _bits: u32) {}
+    }
+
     pub mod regs {
         pub fn sp() -> usize {
             0
@@ -70,11 +85,20 @@ mod arch {
         }
         #[inline]
         pub fn restore(_prev: usize) {}
+        #[inline]
+        pub fn enabled() -> bool {
+            false
+        }
     }
     pub mod csr {
         #[inline]
         pub fn rdcycles() -> u64 {
             0
+        }
+        pub mod mie {
+            pub const MSIE: usize = 0;
+            #[inline]
+            pub fn enable_bits(_bits: usize) {}
         }
     }
 
@@ -85,6 +109,15 @@ mod arch {
     #[inline]
     pub fn hart_id() -> usize {
         0
+    }
+}
+
+/// Stub
+pub mod board {
+    /// Stub
+    pub mod clint {
+        /// Stub
+        pub const BASE: usize = 0;
     }
 }
 
@@ -138,6 +171,10 @@ mod drivers {
 mod kernel {
     pub mod alloc;
     pub mod collection;
+    pub mod ipi {}
+    pub mod percpu {
+        pub fn set_needs_reschedule() {}
+    }
     pub mod profile;
     pub mod sync;
     pub mod timer {
@@ -157,6 +194,8 @@ mod kernel {
 
     #[allow(dead_code)]
     pub mod sched {
+
+        pub const THREADS_MAX: usize = 16;
 
         #[derive(Clone, Copy)]
         pub struct ThreadHandle {
@@ -207,6 +246,11 @@ mod kernel {
         }
         /// Park this thread in blocked state with wakeup deadline
         pub fn park_if_blocked_until(_deadline_ms: u64) {
+            panic!("sched stub: must not be called from the lib crate");
+        }
+
+        /// Park this thread in blocked state with wakeup deadline
+        pub fn set_needs_wakeup(_idx: usize) {
             panic!("sched stub: must not be called from the lib crate");
         }
     }

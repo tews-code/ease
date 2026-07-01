@@ -18,7 +18,7 @@ impl Scheduler {
     // Helper function to complete the spawn
     fn finish_spawn(&self, mut sched: IrqSpinLockGuard<SchedInner>, affinity: Option<u8>) {
         // Set the timer
-        sched.wake_sleeping_threads();
+        self.wake_sleeping_threads(&mut sched);
         timer::set_next_deadline(
             sched
                 .thread_blocks
@@ -64,6 +64,7 @@ impl Scheduler {
                 user: None,
             },
         )?;
+        self.needs_wakeup.clear(handle.idx); // Make sure threads don't launch with stale wakeup
         self.finish_spawn(sched, affinity);
         Some(handle)
     }
@@ -125,7 +126,7 @@ impl Scheduler {
             drop(sched);
             return None;
         }
-        // let thread_handle = acquire_user_thread();
+        self.needs_wakeup.clear(thread_handle.idx); // Make sure threads don't launch with stale wakeup
         self.finish_spawn(sched, affinity);
         Some(thread_handle)
     }
@@ -156,7 +157,7 @@ impl Scheduler {
         let pcb_idx = sched.process_blocks.find_process_slot()?;
         let user_stack_top = user_stack.top();
         let user_exit = crate::user::user_exit as *const () as usize;
-        let _ = sched.thread_blocks.acquire(
+        let thread_handle = sched.thread_blocks.acquire(
             |kernel_stack_region| unsafe {
                 Context::init_user_stack(kernel_stack_region, user_entry, user_stack_top, user_exit)
             },
@@ -172,6 +173,7 @@ impl Scheduler {
                 }),
             },
         )?;
+        self.needs_wakeup.clear(thread_handle.idx); // Make sure threads don't launch with stale wakeup
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");

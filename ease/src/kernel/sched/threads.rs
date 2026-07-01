@@ -18,7 +18,7 @@ static THREAD_ID_COUNTER: AtomicU16 = AtomicU16::new(0); // Wraps at 65535 but 0
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ThreadHandle {
-    pub(super) idx: usize,
+    pub(crate) idx: usize,
     pub(crate) id: u16,
 }
 
@@ -139,30 +139,6 @@ impl Debug for ThreadControlBlock {
 pub(super) struct Threads(pub(super) [Option<ThreadControlBlock>; THREADS_MAX]);
 
 impl Threads {
-    // Helper function providing an iterator for the index and reference to valid threads
-    #[allow(dead_code)]
-    pub(super) fn iter_indexed(&self) -> impl Iterator<Item = (usize, &ThreadControlBlock)> {
-        self.0
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, slot)| slot.as_ref().map(|tcb| (idx, tcb)))
-    }
-
-    // Helper function to get a reference to a TCB by index
-    // Since the index comes from current_thread_idx/handle.idx and are
-    // always valid — the Option here is about presence, not bounds.)
-    #[allow(dead_code)]
-    pub(super) fn get(&self, idx: usize) -> Option<&ThreadControlBlock> {
-        self.0[idx].as_ref()
-    }
-
-    // Helper function to get a mutable reference to a TCB by index
-    #[allow(dead_code)]
-    pub(super) fn get_mut(&mut self, idx: usize) -> Option<&mut ThreadControlBlock> {
-        self.0[idx].as_mut()
-    }
-
-    // (and _mut) — self.0.iter().enumerate().filter_map(|(i, slot)| slot.as_ref().map(|t| (i, t)))
     // Acquire a free slot and set up a valid thread control block
     pub(super) fn acquire(
         &mut self,
@@ -207,7 +183,42 @@ impl Threads {
         {
             self.0[thread.idx] = None;
         } else {
-            panic!("could not release thread");
+            panic!(
+                "could not release thread id={} at index={}",
+                thread.id, thread.idx
+            );
+        }
+    }
+
+    // pull the pure state-flip into Threads — make_ready(&mut self, idx) -> Option<affinity>: flip Blocked/BlockedUntil/Switching(Blocked*) → Ready, stamp ready_since, and return Some(affinity) if it actually unparked (else None). No lock, no drop, no IPI. Then:
+    // Make a thread ready, returns affinity if unparked
+    pub(super) fn make_unparked_ready(&mut self, idx: usize) -> (bool, Option<u8>) {
+        let mut did_unpark: bool = false;
+        if let Some(tcb) = self.0[idx].as_mut() {
+            match tcb.state {
+                State::Blocked | State::BlockedUntil(_) => {
+                    did_unpark = true;
+                    tcb.state = State::Ready;
+                    #[cfg(feature = "trace")]
+                    {
+                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
+                    }
+                    (did_unpark, tcb.affinity)
+                }
+                State::Switching(PostSwitch::Blocked)
+                | State::Switching(PostSwitch::BlockedUntil(_)) => {
+                    did_unpark = true;
+                    tcb.state = State::Switching(PostSwitch::Ready);
+                    #[cfg(feature = "trace")]
+                    {
+                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
+                    }
+                    (did_unpark, tcb.affinity)
+                }
+                _ => (did_unpark, None),
+            }
+        } else {
+            (did_unpark, None)
         }
     }
 

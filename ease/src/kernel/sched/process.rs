@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::stride::SchedInner;
-use crate::kernel::sched::{THREADS_MAX, usermemmap::UserMemMap};
+use crate::kernel::sched::{THREADS_MAX, clear_wakeup_signal, usermemmap::UserMemMap};
 
 pub(super) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
 const THREADS_PER_PROC_MAX: u8 = 6;
@@ -78,7 +78,9 @@ impl Procs {
 impl SchedInner {
     // Decrements the process thread count and releases the process control
     // block if the thread count reaches zero.
+    // Also removes any wakeup flag in the scheduler associated with the thread
     pub(super) fn release_process_thread(&mut self, process_idx: u8) {
+        clear_wakeup_signal(process_idx as usize);
         let thread_count = self.process_blocks.0[process_idx as usize]
             .as_mut()
             .expect("should only be decrementing thread count on a valid process control block")
