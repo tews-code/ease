@@ -430,6 +430,10 @@ impl Scheduler {
             ),
         };
         tcb.state = new_state;
+        // But if the thread we just switched has already been flagged to wake, call wake_by_index
+        if self.needs_wakeup.take(switched_from_idx) {
+            self.wake_by_index(&mut sched.thread_blocks, switched_from_idx);
+        }
         // If the thread is now Ready we need to check if this should run on the other hart
         if new_state == State::Ready {
             #[cfg(feature = "trace")]
@@ -798,8 +802,6 @@ impl Scheduler {
     // Helper function used by unpark and wake_sleeping_threads
     pub(super) fn wake_by_index(&self, threads: &mut Threads, idx: usize) {
         let (did_unpark, affinity) = threads.make_unparked_ready(idx);
-        #[cfg(feature = "trace")]
-        self.snapshot_raw("unpark");
         if did_unpark {
             // If the unparked thread has affinity for the other hart, send an IPI
             if let Some(h) = affinity
@@ -822,6 +824,11 @@ impl Scheduler {
             .is_some_and(|tcb| tcb.id == handle.id);
         if id_ok {
             self.wake_by_index(&mut sched.thread_blocks, handle.idx);
+            // Post-wake state under the same lock: the woken thread should
+            // now be Ready ("unpark" rows from the #[trace] macro are entry,
+            // pre-wake).
+            #[cfg(feature = "trace")]
+            sched.snapshot_raw("unparked");
         }
     }
 
