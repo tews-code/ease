@@ -133,6 +133,7 @@ impl VirtioBlkDev {
         virtq_kick(blk::BASE, vq, 0);
     }
 
+    #[cfg(test)]
     pub fn block_count(&self) -> u32 {
         (self.capacity / blk::BLOCK_SIZE as u64) as u32
     }

@@ -111,7 +111,7 @@ pub(super) fn virtq_init(base: usize, index: usize) -> Box<VirtioVirtq> {
     mmio::write32(base, VIRTIO_REG_QUEUE_SEL, index as u32);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     mmio::write32(base, VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM as u32);
-    // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Align to 4096;
+    // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Aligned to VIRTQ_PAGE_SIZE;
     mmio::write32(base, VIRTIO_REG_QUEUE_ALIGN, virtio::VIRTQ_PAGE_SIZE as u32);
     // 7. Notify the device about the guest page size
     mmio::write32(
