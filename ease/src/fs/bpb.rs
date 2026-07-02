@@ -184,7 +184,7 @@ mod test {
     #[test_case]
     fn disk_image_bpb() {
         let mut buf = [0u8; SECTOR_SIZE];
-        crate::drivers::virtio::read_block(0, &mut buf).unwrap();
+        crate::drivers::virtio::blk::read_block(0, &mut buf).unwrap();
         let bpb = Bpb::parse(&buf).unwrap();
         assert_eq!(bpb.sectors_per_cluster, 4);
         assert_eq!(bpb.reserved_sectors, 4);

@@ -72,7 +72,7 @@
  * - 0x08 — volume label
  */
 
-use crate::drivers::virtio::BlkError;
+use crate::drivers::virtio::blk::BlkError;
 
 const SECTOR_SIZE: usize = 512;
 

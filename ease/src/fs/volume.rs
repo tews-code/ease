@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use crate::drivers::virtio::{read_block, write_block};
+use crate::drivers::virtio::blk::{read_block, write_block};
 use crate::kernel::sync::SpinLock;
 
 use super::bpb::Bpb;

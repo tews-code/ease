@@ -132,20 +132,22 @@ pub mod board {
 #[allow(dead_code)]
 mod drivers {
     pub mod virtio {
-        #[derive(Debug)]
-        pub enum BlkError {
-            SectorOutOfRange,
-            DeviceError(u8),
-            Timeout,
-        }
+        pub mod blk {
+            #[derive(Debug)]
+            pub enum BlkError {
+                SectorOutOfRange,
+                DeviceError(u8),
+                Timeout,
+            }
 
-        // Must match crate::board::virtio_blk::BLOCK_SIZE in the kernel binary.
-        pub fn read_block(_block: u32, _buf: &mut [u8; 512]) -> Result<(), BlkError> {
-            panic!("virtio::read_block stub: must not be called from the lib crate")
-        }
+            // Must match crate::board::virtio_blk::BLOCK_SIZE in the kernel binary.
+            pub fn read_block(_block: u32, _buf: &mut [u8; 512]) -> Result<(), BlkError> {
+                panic!("virtio::read_block stub: must not be called from the lib crate")
+            }
 
-        pub fn write_block(_block: u32, _buf: &[u8; 512]) -> Result<(), BlkError> {
-            panic!("virtio::write_block stub: must not be called from the lib crate")
+            pub fn write_block(_block: u32, _buf: &[u8; 512]) -> Result<(), BlkError> {
+                panic!("virtio::write_block stub: must not be called from the lib crate")
+            }
         }
     }
 
