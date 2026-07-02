@@ -8,12 +8,19 @@ pub mod clint {
     pub const TIMER_FREQ_HZ: u64 = 10_000_000;
 }
 
-// Virtio block device
-pub mod virtio_blk {
-    pub const BASE: usize = 0x10001000;
-    pub const BLOCK_SIZE: usize = 512;
-    pub const PAGE_SIZE: usize = 4096;
-    pub const IRQ: u32 = 1;
+pub mod virtio {
+    pub const VIRTQ_PAGE_SIZE: usize = 512;
+    // Virtio block device
+    pub mod blk {
+        pub const BASE: usize = 0x10001000; // Attached to MMIO bus 0
+        pub const BLOCK_SIZE: usize = 512;
+        pub const IRQ: u32 = 1;
+    }
+    // Virtio keyboard device
+    pub mod keyboard {
+        pub const BASE: usize = 0x10002000; // Attached to MMIO bus 1
+        pub const IRQ: u32 = 2;
+    }
 }
 
 // Platform Level Interrupt Controller

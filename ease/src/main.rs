@@ -46,7 +46,7 @@ use kernel::alloc::Order;
 use kernel::percpu;
 
 use crate::board::uart;
-use crate::board::virtio_blk;
+use crate::board::virtio;
 use crate::kernel::sched;
 
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
@@ -116,8 +116,10 @@ fn kernel_init() {
     sched::Builder::new()
         .with_stack_class(Order::KB16)
         .spawn(|| {
-            drivers::virtio::virtio_blk_init();
-            drivers::plic::enable(virtio_blk::IRQ);
+            drivers::virtio::blk::virtio_blk_init();
+            drivers::plic::enable(virtio::blk::IRQ);
+            drivers::virtio::input::virtio_keyboard_init();
+            // drivers::plic::enable(virtio::keyboard::IRQ);
             fs::volume::fat16_init();
             let fb = FrameBuffer::init();
             // The interactive shell is a permanent runnable thread (its idle

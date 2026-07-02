@@ -185,7 +185,7 @@ fn handle_external_irq() {
         board::uart::IRQ => {
             uart::handle_interrupt();
         }
-        board::virtio_blk::IRQ => {
+        board::virtio::blk::IRQ => {
             virtio::handle_virtio_interrupt();
         }
         _ => panic!("Unknown external interrupt: {}", irq),

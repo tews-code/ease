@@ -37,6 +37,7 @@ rust-objcopy -O binary \
 $QEMU -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
     -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
+    -device virtio-keyboard-device,bus=virtio-mmio-bus.1 \
     -drive if=pflash,unit=0,format=raw,file="$FLASH_BIN",readonly=on \
     -m 32M \
     -smp 2 \
