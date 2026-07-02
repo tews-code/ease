@@ -44,7 +44,7 @@ pub(super) struct VirtqAvail {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub(super) struct VirtqUsedElem {
-    id: u32,
+    pub(super) id: u32,
     len: u32,
 }
 
@@ -92,6 +92,22 @@ impl VirtioVirtq {
     pub fn read_used_index(&self) -> u16 {
         unsafe { read_volatile(&raw const self.used.0.index) }
     }
+
+    // If last used index lags used index pop the next used element
+    // Otherwise returns None
+    pub(super) fn pop_used(&mut self) -> Option<VirtqUsedElem> {
+        unsafe {
+            if self.last_used_index != read_volatile(&self.used.0.index) {
+                let vq_used_elem = read_volatile::<VirtqUsedElem>(
+                    &raw const (self.used.0.ring[self.last_used_index as usize % VIRTQ_ENTRY_NUM]),
+                );
+                self.last_used_index = self.last_used_index.wrapping_add(1);
+                Some(vq_used_elem)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 // Safety: Single threaded OS
@@ -134,20 +150,22 @@ pub(super) fn virtq_init(base: usize, index: usize) -> Box<VirtioVirtq> {
     vq
 }
 
-// Notifies the device that there is a new request. `desc_index` is the index of the head descriptor of the new request
-pub(super) fn virtq_kick(base: usize, vq: &mut VirtioVirtq, desc_index: u16) {
-    let index = vq.avail.index as usize % VIRTQ_ENTRY_NUM;
-    unsafe { write_volatile(&raw mut vq.avail.ring[index], desc_index) };
+// Writes one avail ring entry and advances avail.idx. Callable in a loop.
+pub(super) fn virtq_publish(vq: &mut VirtioVirtq, desc_head: u16) {
     unsafe {
+        let index = read_volatile(&raw const vq.avail.index);
         write_volatile(
-            &raw mut vq.avail.index,
-            read_volatile(&raw const vq.avail.index) + 1,
-        )
-    };
+            &raw mut vq.avail.ring[index as usize % VIRTQ_ENTRY_NUM],
+            desc_head,
+        );
+        write_volatile(&raw mut vq.avail.index, index.wrapping_add(1));
+    }
+}
 
+// Sets a fence and writes the QueueNotify
+pub(super) fn virtq_notify(base: usize, vq: &VirtioVirtq) {
     // SeqCst is correct but stronger than necessary, could be "fence w, o"
     core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
     mmio::write32(base, VIRTIO_REG_QUEUE_NOTIFY, vq.queue_index.into()); // converting `u16` to `u32` cannot fail
-    vq.last_used_index += 1;
 }

@@ -111,7 +111,6 @@ fn wait_for_completion() -> Result<(), BlkError> {
 }
 
 // Flag tracks completion for interrupt-driven IO
-// static VIRTIO_COMPLETE: AtomicBool = AtomicBool::new(false);
 static VIRTIO_COMPLETE: Completion = Completion::new();
 
 #[cfg_attr(feature = "profile", profile)]

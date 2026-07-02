@@ -5,7 +5,8 @@ use core::mem::{self, MaybeUninit};
 use core::ptr::{read_volatile, write_volatile};
 
 use super::queue::{
-    VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioVirtq, VirtqDesc, virtq_init, virtq_kick,
+    VIRTQ_DESC_F_NEXT, VIRTQ_DESC_F_WRITE, VirtioVirtq, VirtqDesc, virtq_init, virtq_notify,
+    virtq_publish,
 };
 use super::{VIRTIO_COMPLETE, check_virtio, reset_and_handshake, set_driver_ok};
 use crate::arch::mmio;
@@ -130,7 +131,8 @@ impl VirtioBlkDev {
         };
 
         // Notify the device that there is a new request.
-        virtq_kick(blk::BASE, vq, 0);
+        virtq_publish(vq, 0);
+        virtq_notify(blk::BASE, vq);
     }
 
     #[cfg(test)]
@@ -155,6 +157,15 @@ impl VirtioBlkDev {
 
     // Check status byte, copy data out
     pub(super) fn finish_read(&mut self, buf: &mut [u8; blk::BLOCK_SIZE]) -> Result<(), BlkError> {
+        // Expecting to be able to pop an entry off the used ring
+        let vq_used_elem = self
+            .vq
+            .pop_used()
+            .expect("there should be a used element available");
+        assert!(
+            vq_used_elem.id == 0,
+            "used virtio queue element doesn't have right id"
+        );
         let status = unsafe { read_volatile(&raw const self.req.status) };
         if status != 0 {
             return Err(BlkError::DeviceError(status));
@@ -186,6 +197,15 @@ impl VirtioBlkDev {
 
     // Just check status byte
     pub(super) fn finish_write(&mut self) -> Result<(), BlkError> {
+        // Expecting to be able to pop an entry off the used ring
+        let vq_used_elem = self
+            .vq
+            .pop_used()
+            .expect("there should be a used element available");
+        assert!(
+            vq_used_elem.id == 0,
+            "used virtio queue element doesn't have right id"
+        );
         let status = unsafe { read_volatile(&raw const self.req.status) };
         if status != 0 {
             return Err(BlkError::DeviceError(status));
