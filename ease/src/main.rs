@@ -119,7 +119,7 @@ fn kernel_init() {
             drivers::virtio::blk::virtio_blk_init();
             drivers::plic::enable(virtio::blk::IRQ);
             drivers::virtio::input::virtio_keyboard_init();
-            // drivers::plic::enable(virtio::keyboard::IRQ);
+            drivers::plic::enable(virtio::keyboard::IRQ);
             fs::volume::fat16_init();
             let fb = FrameBuffer::init();
             // The interactive shell is a permanent runnable thread (its idle

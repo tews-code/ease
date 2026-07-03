@@ -188,6 +188,9 @@ fn handle_external_irq() {
         board::virtio::blk::IRQ => {
             virtio::blk::handle_virtio_interrupt();
         }
+        board::virtio::keyboard::IRQ => {
+            virtio::input::handle_virtio_interrupt();
+        }
         _ => panic!("Unknown external interrupt: {}", irq),
     }
     if irq != 0 {
