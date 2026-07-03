@@ -115,16 +115,16 @@ unsafe impl Sync for VirtioVirtq {}
 // Safety: the struct is only accessed under the StaticMutex (single-core, interrupts disabled).
 unsafe impl Send for VirtioVirtq {}
 
-pub(super) fn virtq_init(base: usize, index: usize) -> Box<VirtioVirtq> {
+pub(super) fn virtq_init(base: usize, queue_idx: usize) -> Box<VirtioVirtq> {
     // Allocate a region for the virtqueue.
     let vq: Box<MaybeUninit<VirtioVirtq>> = Box::new_zeroed();
     // Safety: zero is a valid bit pattern for VirtioVirtq (all integers/arrays)
     let mut vq: Box<VirtioVirtq> = unsafe { vq.assume_init() };
 
-    vq.queue_index = index as u16;
+    vq.queue_index = queue_idx as u16;
 
     // 1. Select the queue writing its index (first queue is 0) to QueueSel.
-    mmio::write32(base, VIRTIO_REG_QUEUE_SEL, index as u32);
+    mmio::write32(base, VIRTIO_REG_QUEUE_SEL, queue_idx as u32);
     // 5. Notify the device about the queue size by writing the size to QueueNum.
     mmio::write32(base, VIRTIO_REG_QUEUE_NUM, VIRTQ_ENTRY_NUM as u32);
     // 6. Notify the device about the used alignment by writing its value in bytes to QueueAlign. Aligned to VIRTQ_PAGE_SIZE;

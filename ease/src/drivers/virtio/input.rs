@@ -1,11 +1,16 @@
 //! Virtio input device
 
 use alloc::boxed::Box;
+use core::mem;
+use core::ptr::write_volatile;
 
 use crate::board::virtio::keyboard;
 use crate::kernel::sync::IrqSpinLock;
 
-use super::queue::{VIRTQ_ENTRY_NUM, VirtioVirtq, virtq_init};
+use super::queue::{
+    VIRTQ_DESC_F_WRITE, VIRTQ_ENTRY_NUM, VirtioVirtq, VirtqDesc, virtq_init, virtq_notify,
+    virtq_publish,
+};
 use super::{check_virtio, reset_and_handshake, set_driver_ok};
 
 //Input device id
@@ -42,18 +47,35 @@ struct Keyboard {
 impl Keyboard {
     pub(super) fn new() -> Self {
         check_virtio(keyboard::BASE, VIRTIO_DEVICE_ID);
-        let eventq = Self::reset();
-        Self {
-            eventq,
-            events: Box::new([const { Event::new() }; VIRTQ_ENTRY_NUM]),
-        }
+        let mut events = Box::new([const { Event::new() }; VIRTQ_ENTRY_NUM]);
+        reset_and_handshake(keyboard::BASE);
+        let mut eventq = virtq_init(keyboard::BASE, EVENTQ);
+        Self::post_event_buffers(&mut events, &mut eventq);
+        set_driver_ok(keyboard::BASE);
+        virtq_notify(keyboard::BASE, &eventq);
+        Self { eventq, events }
     }
 
-    pub(super) fn reset() -> Box<VirtioVirtq> {
-        reset_and_handshake(keyboard::BASE);
-        let vq = virtq_init(keyboard::BASE, EVENTQ);
-        set_driver_ok(keyboard::BASE);
-        vq
+    // Set up descriptors
+    fn post_event_buffers(events: &mut [Event; VIRTQ_ENTRY_NUM], vq: &mut VirtioVirtq) {
+        for (i, event) in events.iter().enumerate() {
+            let addr = (&raw const *event).addr();
+
+            // Descriptor: event header
+            unsafe {
+                write_volatile(
+                    &raw mut vq.descs[i],
+                    VirtqDesc {
+                        addr: addr as u64,
+                        len: mem::size_of::<Event>() as u32,
+                        flags: VIRTQ_DESC_F_WRITE as u16,
+                        next: 0, // Single event - no chain
+                    },
+                )
+            };
+
+            virtq_publish(vq, i as u16);
+        }
     }
 }
 

@@ -97,7 +97,7 @@ impl VirtioBlkDev {
 
     // Set up descriptors and kick the virtio queue
     fn queue_submit(req: &mut VirtioBlkReq, vq: &mut VirtioVirtq, flags: u32) {
-        let addr = req as *const VirtioBlkReq as usize;
+        let addr = (&raw const *req).addr();
 
         // Descriptor 0: request header
         unsafe {
