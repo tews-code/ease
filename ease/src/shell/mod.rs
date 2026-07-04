@@ -66,10 +66,13 @@ impl Shell {
         loop {
             let _ = write!(self.console, "{PROMPT}");
             loop {
-                if let Some(event) = self
-                    .keyboard
-                    .poll(|| crate::drivers::uart::UartReader.read_byte())
-                {
+                if let Some(event) = self.keyboard.poll(|| {
+                    let mut b = crate::drivers::uart::UartReader.read_byte();
+                    if b.is_none() {
+                        b = crate::drivers::virtio::input::read_byte();
+                    }
+                    b
+                }) {
                     // Send event to line editor
                     match self.line_editor.process(event) {
                         EditResult::CursorMove | EditResult::LineEdit => {

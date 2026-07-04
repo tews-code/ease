@@ -282,7 +282,6 @@ pub(crate) fn with_keyboard<R>(f: impl FnOnce(&mut Keyboard) -> R) -> R {
 }
 
 // Read byte from virtio input keyboard
-#[expect(dead_code)]
 pub(crate) fn read_byte() -> Option<u8> {
     ASCII_KEY_QUEUE.pop()
 }
