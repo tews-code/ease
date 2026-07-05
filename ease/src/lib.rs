@@ -119,6 +119,14 @@ pub mod board {
         /// Stub
         pub const BASE: usize = 0;
     }
+    /// Stub
+    pub mod virtio {
+        /// Stub
+        pub mod blk {
+            /// Stub
+            pub const BLOCK_SIZE: usize = 512;
+        }
+    }
 }
 
 // `fs/mod.rs` and `fs/volume.rs` reference `crate::drivers::virtio`
