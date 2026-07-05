@@ -44,10 +44,10 @@
 /// BIOS Parameter Block for FAT16
 use crate::fs::{FsError, SECTOR_SIZE};
 
+use super::BOOT_SECTOR_SIG;
 use super::DIR_ENTRY_BYTES;
 
 const X86_JUMP_OPCODES: [u8; 2] = [0xEB, 0xE9];
-const BOOT_SECTOR_SIG: [u8; 2] = [0x55, 0xAA];
 const FAT16_MIN: usize = 4085;
 const FAT16_MAX: usize = 65524;
 

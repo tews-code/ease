@@ -1,6 +1,21 @@
 //! FAT16 File System
 
 /*
+ * Device (SD card)
+ * ┌──────────┬─────────────┬───────────────────────────────────────────────┐
+ * │ MBR      │ (alignment  │ Partition 1 = the FAT16 volume                │
+ * │ (dev 0)  │  gap)       │ ┌──────────┬────────┬──────────┬────────────┐ │
+ * │          │             │ │ Reserved │ FAT(s) │ Root Dir │ Data       │ │
+ * │ entry 1: │             │ │ BPB here │        │          │            │ │
+ * │ LBA 2048 ──────────────▶ vol 0     │ vol 4  │ vol 68   │ vol 100    │ │
+ * └──────────┴─────────────┴─┴──────────┴────────┴──────────┴────────────┘─┘
+ *   device
+ *   sector :0                 device:2048  :2052    :2116      :2148
+ *
+ *  LBA is Logical Block Address: a sector named by a single linear number (0, 1, 2, … up the disk)
+ */
+
+/*
  * The device block size is 512 bytes, all data in or out of storage is in block sizes of bytes.
  *
  * The disk's sector size is 512 bytes, and all file operations work in sector size blocks.
@@ -162,8 +177,9 @@
 
 use crate::drivers::virtio::blk::BlkError;
 
-const SECTOR_SIZE: usize = 512;
+const BOOT_SECTOR_SIG: [u8; 2] = [0x55, 0xAA];
 const DIR_ENTRY_BYTES: usize = 32;
+const SECTOR_SIZE: usize = 512;
 
 const _: () = assert!(SECTOR_SIZE == crate::board::virtio::blk::BLOCK_SIZE);
 
@@ -183,4 +199,5 @@ pub enum FsError {
 
 pub mod bpb;
 pub mod dir_entry;
+mod mbr;
 pub mod volume;
