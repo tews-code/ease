@@ -1,4 +1,4 @@
-//! FAT16 directory entries
+//! FAT Root Directory
 
 use crate::fs::FsError;
 use crate::kernel::collection::StackVec;

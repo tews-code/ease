@@ -1,7 +1,21 @@
-//! FAT16 File System
+//! FAT File System
 
 /*
- * Device (SD card)
+ * Volume Layout
+ *
+ * In a simple case the entire device is one volume (e.g. QEMU image, USB stick) this is
+ * "superfloppy" format. As an example for FAT16:
+ *
+ *  * Sector 0   Sector 4    Sector 68        Sector 100         Last sector
+ * ┌────────────────┬───────────┬────────────────┬──────────────────────┐
+ * │ Reserved       │ FAT(s)    │ Root Directory │ Data                 │
+ * │                │           │                │                      │
+ * │ BPB in first   │ cluster   │ file/dir       │ actual file contents │
+ * │ 3 empty sectors│ chain map │ entries        │ stored in clusters   │
+ * └────────────────┴───────────┴────────────────┴──────────────────────┘
+ *
+ * Where the device as partitions (e.g. SD Card) the device has a Master Boot Record and
+ * multiple partitions:
  * ┌──────────┬─────────────┬───────────────────────────────────────────────┐
  * │ MBR      │ (alignment  │ Partition 1 = the FAT16 volume                │
  * │ (dev 0)  │  gap)       │ ┌──────────┬────────┬──────────┬────────────┐ │
@@ -12,27 +26,16 @@
  *   device
  *   sector :0                 device:2048  :2052    :2116      :2148
  *
- *  LBA is Logical Block Address: a sector named by a single linear number (0, 1, 2, … up the disk)
- */
-
-/*
- * The device block size is 512 bytes, all data in or out of storage is in block sizes of bytes.
+ * The QEMU virtio device block size is 512 bytes, all data in or out of storage is in block sizes of bytes.
  *
- * The disk's sector size is 512 bytes, and all file operations work in sector size blocks.
+ * The disk's sector size is chosen as 512 bytes, and all file operations work in sector size blocks.
  *
- * The cluster size is chosen as 4 sectors (2KiB), the file system's unit of allocation.
+ * LBA is Logical Block Address: a sector named by a single linear number (0, 1, 2, … up the disk)
  *
- * The FAT16 disk is laid out in four consecutive regions:
+ * A cluster is a contigous power-of-two number of sectors, and all file system units of allocation
+ * are in clusters. For QEMU the cluster size is chosen as 4 (2 KiB).
  *
- * Sector 0   Sector 4    Sector 68        Sector 100         Last sector
- * ┌────────────────┬───────────┬────────────────┬──────────────────────┐
- * │ Reserved       │ FAT(s)    │ Root Directory │ Data                 │
- * │                │           │                │                      │
- * │ BPB in first   │ cluster   │ file/dir       │ actual file contents │
- * │ 3 empty sectors│ chain map │ entries        │ stored in clusters   │
- * └────────────────┴───────────┴────────────────┴──────────────────────┘
- *
- * For EASE these values are:
+ * For an example FAT16 volume:
  *
  * ┌──────────┬──────────────┬─────────────────────┬───────────────────────────────────────┐
  * │  Region  │ Start sector │        Size         │             Contains                  │
@@ -46,89 +49,17 @@
  * │ Data     │ 100          │ rest of disk        │ File contents, stored in clusters     │
  * └──────────┴──────────────┴─────────────────────┴───────────────────────────────────────┘
  *
- * Reserved (boot) sector
+ *  For an example FAT32 volume:
  *
- * The BPB bytes 11–61 of it are a parameter table the format embeds
- * so a reader can derive the entire disk layout from one sector read - where the FATs start,
- * where the root directory lives, how cluster numbers become sector numbers:
+ * Sector: 0          1          2         3–5       6          7          8         9–31       32
+ * ┌────────────┬──────────┬────────────┬────────┬────────────┬──────────┬────────────┬────────┬────────┬────────┐
+ * │ Boot       │ FSInfo   │ Boot code  │ unused │ backup     │ backup   │ backup     │ unused │ FAT    │ Data   │
+ * │ sector     │          │ spillover  │        │ of 0       │ of 1     │ of 2       │        │        │        │
+ * └────────────┴──────────┴────────────┴────────┴────────────┴──────────┴────────────┴────────┴────────┴────────┘
+ * └────── the working set ─────────┘└────── copy written at format time ─────────┘
  *
- * ┌────────┬──────┬──────────────────────────────────────────┬─────────────────┐
- * │ Offset │ Size │                  Field                   │     EASE?       │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 0      │ 3    │ x86 jump instruction                     │ validated       │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 3      │ 8    │ OEM name (e.g. mkfs.fat)                 │ skipped         │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 11     │ 2    │ bytes per sector                         │ validated = 512 │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 13     │ 1    │ sectors per cluster                      │ parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 14     │ 2    │ reserved sector count                    │ parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 16     │ 1    │ number of FATs                           | parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 17     │ 2    │ root directory entry count               | parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 19     │ 2    │ total sectors (16-bit)                   | parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 21     │ 1    │ media descriptor                         | skipped         │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 22     │ 2    │ sectors per FAT                          | parsed          │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 24–31  │ 8    │ sectors/track, heads, hidden sectors     | skipped         │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 32     │ 4    │ total sectors (32-bit)                   | skipped         │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 36–53  │ 18   │ drive no, boot sig, vol serial + label   | skipped         │
- * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 54     │ 8    │ filesystem type string "FAT16   "        | ignored (1)     │
- * └────────┴──────┴──────────────────────────────────────────┴─────────────────┘
+ * Note: The root directory is a file cluster, rather than a designated set of sectors.
  *
- * (1) The type string is informational only; per the FAT spec the type is
- *     determined by the cluster count (4085..=65524 means FAT16).
- *
- * File Allocation Table
- *
- * A FAT is a flat array of u16s across its sectors (2 sectors in this case).
- * The index of the FAT is directly the cluster number in the data region.
- * Each u16 holds a number that is marker for the next cluster's role.
- *
- * ┌──────────┬──────────────┬───────────────────────────────────────┐
- * │  Index   │     u16      │             Meaning                   │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   0      │   0xFFF8     │ Reserved - media descriptor           │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   1      │   0xFFFF     │ Reserved                              │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   2      │   0x0000     │ Free                                  │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   3      │   0x0000     │ Free                                  │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   4      │   0x0000     │ Free                                  │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   5      │   0x0006     │ Next cluster is 6                     │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   6      │   0x0008     │ Next cluster is 8                     │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   7      │   0x0000     │ Free                                  │
- * ├──────────┼──────────────┼───────────────────────────────────────┤
- * │   8      │   0xFFFF     │ End of chain                          │
- * └──────────┴──────────────┴───────────────────────────────────────┘
- *
- * For FAT16 the u16 values are:
- * ┌─────────────────────────┬─────────────────────────────────────────────────────────────┐
- * │         Value           │                         Meaning                             │
- * ├─────────────────────────┼─────────────────────────────────────────────────────────────┤
- * │ 0x0000                  │ Cluster is free                                             │
- * ├─────────────────────────┼─────────────────────────────────────────────────────────────┤
- * │ 0x0002–0xFFEF           │ Cluster in use; value = next cluster in this file's chain   │
- * ├─────────────────────────┼─────────────────────────────────────────────────────────────┤
- * │ 0xFFF7                  │ Bad cluster — never allocate                                │
- * ├─────────────────────────┼─────────────────────────────────────────────────────────────┤
- * │ 0xFFF8–0xFFFF           │ Cluster in use; it's the last one in its chain              │
- * ├─────────────────────────┼─────────────────────────────────────────────────────────────┤
- * │ 0x0001, 0xFFF0–0xFFF6   │ reserved oddities                                           │
- * └─────────────────────────┴─────────────────────────────────────────────────────────────┘
  *
  * Root Directory
  *
@@ -175,29 +106,108 @@
  *
  */
 
-use crate::drivers::virtio::blk::BlkError;
+use crate::board::virtio::blk;
+use crate::drivers::virtio::blk::{BlkError, read_block};
 
+mod bpb;
+mod dir_entry;
+mod fat16;
+mod mbr;
+pub(crate) mod volume;
+
+use bpb::{Bpb, BpbError};
+use mbr::{Mbr, MbrError};
+
+const BOOT_SECTOR: u32 = 0;
 const BOOT_SECTOR_SIG: [u8; 2] = [0x55, 0xAA];
 const DIR_ENTRY_BYTES: usize = 32;
 const SECTOR_SIZE: usize = 512;
 
-const _: () = assert!(SECTOR_SIZE == crate::board::virtio::blk::BLOCK_SIZE);
+const _: () = assert!(SECTOR_SIZE == blk::BLOCK_SIZE);
 
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum FsError {
-    DeviceError(BlkError),
+    Bpb(BpbError),
+    Device(BlkError),
+    Mbr(MbrError),
     DirFull,
     DiskFull,
-    InvalidBpb,
     InvalidName,
-    NotFat16,
-    NotFound,
-    UnsupportedSectorSize,
     FileSizeMismatch,
+    NotFound,
+    UnknownFormat,
+    VolumeExceedsPartition,
 }
 
-pub mod bpb;
-pub mod dir_entry;
-mod mbr;
-pub mod volume;
+impl From<BlkError> for FsError {
+    fn from(e: BlkError) -> Self {
+        FsError::Device(e)
+    }
+}
+
+impl From<BpbError> for FsError {
+    fn from(e: BpbError) -> Self {
+        FsError::Bpb(e)
+    }
+}
+
+impl From<MbrError> for FsError {
+    fn from(e: MbrError) -> Self {
+        FsError::Mbr(e)
+    }
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub(crate) enum VolumeType {
+    Fat16(u32),
+    Fat32(u32),
+}
+
+#[derive(Debug)]
+#[expect(dead_code)]
+pub(crate) enum MountError {
+    Fs(FsError),
+    UnsupportedVolumeType,
+}
+
+impl From<FsError> for MountError {
+    fn from(e: FsError) -> Self {
+        MountError::Fs(e)
+    }
+}
+
+pub(crate) fn init() -> Result<VolumeType, MountError> {
+    let (lba, bpb) = mount()?;
+    if matches!(bpb.volume_type, VolumeType::Fat16(_)) {
+        volume::fat16_init(lba, bpb);
+        Ok(VolumeType::Fat16(0))
+    } else {
+        Err(MountError::UnsupportedVolumeType)
+    }
+}
+
+// Attempt to mount the storage device
+fn mount() -> Result<(u32, Bpb), FsError> {
+    let mut buf = [0u8; blk::BLOCK_SIZE];
+    read_block(BOOT_SECTOR, &mut buf)?;
+    // First try to read sector 0 as a BPB, then as MBR
+    match Bpb::parse(&buf) {
+        Ok(bpb) => Ok((0, bpb)),
+        Err(_) => match Mbr::parse(&buf) {
+            Ok(mbr) => {
+                // Parse the MBR to get the first valid partition (which is all we support)
+                let (lba, sector_count) = mbr.find_partition()?;
+                // Read the BPB at this location
+                read_block(lba, &mut buf)?;
+                let bpb = Bpb::parse(&buf)?;
+                // Make sure that the partition size and volume size fit
+                if sector_count < bpb.total_sectors {
+                    return Err(FsError::VolumeExceedsPartition);
+                }
+                Ok((lba, bpb))
+            }
+            Err(_) => Err(FsError::UnknownFormat),
+        },
+    }
+}

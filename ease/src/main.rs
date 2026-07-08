@@ -120,7 +120,10 @@ fn kernel_init() {
             drivers::plic::enable(virtio::blk::IRQ);
             drivers::virtio::input::virtio_keyboard_init();
             drivers::plic::enable(virtio::keyboard::IRQ);
-            fs::volume::fat16_init();
+            match fs::init() {
+                Ok(s) => println!("Mounted {s:?}"),
+                Err(e) => println!("Failed to mount storage: {e:?}"),
+            }
             let fb = FrameBuffer::init();
             // The interactive shell is a permanent runnable thread (its idle
             // loop WFIs while still the Running thread on its hart). In test

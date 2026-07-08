@@ -72,7 +72,7 @@ const PARTITION_TABLE_OFFSET: usize = 446;
 const PARTITION_ENTRY_SIZE: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
-enum MbrError {
+pub(crate) enum MbrError {
     ExFatDetected,
     Fat12Detected,
     Fat32Detected,
@@ -131,12 +131,10 @@ impl Partition {
     }
 }
 
-struct Mbr {
-    partitions: [Partition; PARTITIONS_MAX],
-}
+pub(super) struct Mbr([Partition; PARTITIONS_MAX]);
 
 impl Mbr {
-    fn parse(sector: &[u8; SECTOR_SIZE]) -> Result<Mbr, MbrError> {
+    pub(super) fn parse(sector: &[u8; SECTOR_SIZE]) -> Result<Mbr, MbrError> {
         // Check signature
         if sector[SECTOR_SIZE - 2..] != BOOT_SECTOR_SIG {
             return Err(MbrError::InvalidMbr);
@@ -148,18 +146,20 @@ impl Mbr {
                 sector[offset..offset + 16].try_into().unwrap();
             Partition::parse(partition_entry)
         });
-        Ok(Self { partitions })
+        Ok(Self(partitions))
     }
 
-    fn find_partition(&self) -> Result<(u32, u32), MbrError> {
-        for partition in &self.partitions {
+    // Search the partition table for the first supported type
+    //
+    // Returns (lba, sector_count)
+    pub(super) fn find_partition(&self) -> Result<(u32, u32), MbrError> {
+        for partition in &self.0 {
             if matches!(partition.partition_type, PartitionType::Fat16) {
                 return Ok((partition.lba, partition.sector_count));
             }
         }
         // Nothing mountable, diagnose reason
-        let any =
-            |t: fn(&PartitionType) -> bool| self.partitions.iter().any(|p| t(&p.partition_type));
+        let any = |t: fn(&PartitionType) -> bool| self.0.iter().any(|p| t(&p.partition_type));
 
         if any(|t| matches!(t, PartitionType::Fat32)) {
             Err(MbrError::Fat32Detected) // will work someday; today: reformat as FAT16

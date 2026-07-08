@@ -7,25 +7,22 @@ use crate::drivers::virtio::blk::{read_block, write_block};
 use crate::kernel::sync::SpinLock;
 
 use super::bpb::Bpb;
-use super::dir_entry::{DIR_ENTRY_BYTES, DirEntry, DirParseResult};
-use super::{FsError, SECTOR_SIZE};
+use super::dir_entry::{DirEntry, DirParseResult};
+use super::{DIR_ENTRY_BYTES, FsError, SECTOR_SIZE};
 
 // Need to lock with interrupts enabled waiting for IO completion
 // SpinLock (not IrqSpinLock) because I/O needs interrupts enabled for virtio
 // completion. Must never be accessed from an interrupt handler.
 pub(super) static VOLUME: SpinLock<Option<Volume>> = SpinLock::new(None);
 
-pub struct Volume {
+pub(crate) struct Volume {
     bpb: Bpb,
+    lba: u32,
 }
 
 impl Volume {
-    /// Read from disk, parse BPB, return initialised FAT16 Volume
-    pub fn new() -> Result<Self, FsError> {
-        let mut buf = [0u8; SECTOR_SIZE];
-        read_block(0, &mut buf).map_err(FsError::DeviceError)?;
-        let bpb = Bpb::parse(&buf)?;
-        Ok(Self { bpb })
+    pub fn new(lba: u32, bpb: Bpb) -> Self {
+        Self { bpb, lba }
     }
 
     /// Read a single FAT entry for the given cluster number
@@ -36,9 +33,9 @@ impl Volume {
         // A FAT is a flat array of u16 bits, one for each FAT cluster.
         // First find which sector the cluster number refers to
         let num_entries = SECTOR_SIZE / core::mem::size_of::<u16>(); // In a 512 byte block there are 256 entries
-        let fat_sector = self.bpb.fat_start_sector() + (cluster as usize / num_entries);
+        let fat_sector = self.bpb.fat_start_sector() + (cluster as u32 / num_entries as u32);
         // Now read the block which holds that sector
-        read_block(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+        read_block(fat_sector as u32, &mut buf)?;
         // Work out the offset within the sector
         let offset = (cluster as usize % num_entries) * core::mem::size_of::<u16>();
         // Now look inside the block (in buffer) to read the offset of the entry
@@ -51,18 +48,18 @@ impl Volume {
         // A FAT is a flat array of u16 bits, one for each FAT cluster.
         // First find which sector the cluster number refers to
         let num_entries = SECTOR_SIZE / core::mem::size_of::<u16>(); // In a 512 byte block there are 256 entries
-        let fat_sector = self.bpb.fat_start_sector() + (cluster as usize / num_entries);
+        let fat_sector = self.bpb.fat_start_sector() + (cluster as u32 / num_entries as u32);
         // Now read the block which holds that sector
-        read_block(fat_sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+        read_block(fat_sector as u32, &mut buf)?;
         // Write the value at that offset
         let offset = (cluster as usize % num_entries) * core::mem::size_of::<u16>();
         buf[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
         // Write back
-        write_block(fat_sector as u32, &buf).map_err(FsError::DeviceError)?;
+        write_block(fat_sector as u32, &buf)?;
         if self.bpb.fat_count == 2 {
             // Write to 2nd copy of FAT
             let second_fat_sector = fat_sector + self.bpb.sectors_per_fat;
-            write_block(second_fat_sector as u32, &buf).map_err(FsError::DeviceError)?;
+            write_block(second_fat_sector as u32, &buf)?;
         }
         Ok(())
     }
@@ -82,7 +79,7 @@ impl Volume {
         let count = self.bpb.root_dir_sectors();
         for sector in start..start + count {
             // First read the sector
-            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+            read_block(sector, &mut buf)?;
 
             // 16 entries per sector (512 / 32)
             for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
@@ -129,9 +126,9 @@ impl Volume {
         let mut current_cluster = entry.first_cluster;
         let mut buf = [0u8; 512];
         loop {
-            let start_sector = self.bpb.cluster_to_sector(current_cluster);
-            for s in 0..self.bpb.sectors_per_cluster as u32 {
-                read_block(start_sector as u32 + s, &mut buf).map_err(FsError::DeviceError)?;
+            let start_sector = self.bpb.cluster_to_sector(current_cluster as u32);
+            for s in 0..self.bpb.sectors_per_cluster {
+                read_block(start_sector + s, &mut buf)?;
                 content.extend_from_slice(&buf);
             }
             let next_cluster = self.fat_entry(current_cluster)?;
@@ -143,6 +140,46 @@ impl Volume {
         }
         content.truncate(entry.file_size as usize);
         Ok(content)
+    }
+
+    /// Read a file from offset to end
+    ///
+    /// Note: chain walk is O(offset); positioned-read callers with large files need a fd-layer cluster cache
+    pub(crate) fn read_at(
+        &self,
+        entry: &DirEntry,
+        offset: u32,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        let to_read = if offset >= entry.file_size {
+            0 // Also covers empty files (entry.file_size == 0)
+        } else {
+            (buf.len() as u32).min(entry.file_size - offset)
+        };
+        if to_read == 0 {
+            return Ok(0);
+        }
+        // Skip to the starting cluster
+        // skip to the starting cluster. With cluster_bytes = sectors_per_cluster × SECTOR_SIZE: the target is offset / cluster_bytes links down the chain from entry.first_cluster. Walk with self.fat_entry exactly as read_file does — but here an end-of-chain marker (0xFFF8..=0xFFFF) during the walk means the chain is shorter than file_size claims: on-disk corruption. Return an error (worth a new FsError variant that says so), never panic — disk contents are device data, the same trust rule as keyboard events.
+        // This first version walks through the file which takes time O(offset)
+        let mut current_cluster = entry.first_cluster;
+        let mut sector_buf = [0u8; SECTOR_SIZE];
+        loop {
+            let start_sector = self.bpb.cluster_to_sector(current_cluster as u32);
+            for s in 0..self.bpb.sectors_per_cluster {
+                read_block(start_sector + s, &mut sector_buf)?;
+            }
+            let next_cluster = self.fat_entry(current_cluster)?;
+
+            match next_cluster {
+                0xFFF8..=0xFFFF => break,
+                _ => current_cluster = next_cluster,
+            }
+        }
+        // content.truncate(entry.file_size as usize);
+        // Ok(content)
+
+        Ok(to_read as usize)
     }
 
     // Create an empty file ("touch")
@@ -160,7 +197,7 @@ impl Volume {
         let count = self.bpb.root_dir_sectors();
         for sector in start..start + count {
             // First read the sector
-            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+            read_block(sector, &mut buf)?;
 
             // 16 entries per sector (512 / 32)
             for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
@@ -176,7 +213,7 @@ impl Volume {
                     buf[offset + 12..offset + 32].fill(0);
 
                     // Write back
-                    write_block(sector as u32, &buf).map_err(FsError::DeviceError)?;
+                    write_block(sector, &buf)?;
                     return Ok(());
                 }
             }
@@ -192,7 +229,7 @@ impl Volume {
         let start = self.bpb.root_dir_start_sector();
         let count = self.bpb.root_dir_sectors();
         for sector in start..start + count {
-            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+            read_block(sector, &mut buf)?;
 
             for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
                 let offset = entry * DIR_ENTRY_BYTES;
@@ -202,7 +239,7 @@ impl Volume {
                         if let Ok(name) = dir_entry.filename().as_str()
                             && name.eq_ignore_ascii_case(filename)
                         {
-                            return Ok((sector as u32, offset));
+                            return Ok((sector, offset));
                         }
                     }
                     DirParseResult::End => return Err(FsError::NotFound),
@@ -219,7 +256,7 @@ impl Volume {
         let (sector, offset) = self.find_dir_entry_location(filename)?;
         // First read the sector
         let mut buf = [0u8; SECTOR_SIZE]; // scratch buffer for sector reads
-        read_block(sector, &mut buf).map_err(FsError::DeviceError)?;
+        read_block(sector, &mut buf)?;
         // Find the directory entry details
         let first_cluster = u16::from_le_bytes([buf[offset + 26], buf[offset + 27]]);
         if first_cluster != 0 {
@@ -236,7 +273,7 @@ impl Volume {
         // Change the directory entry to deleted 0xE5
         buf[offset] = 0xE5;
         // Write back the change
-        write_block(sector, &buf).map_err(FsError::DeviceError)?;
+        write_block(sector, &buf)?;
         Ok(())
     }
 
@@ -264,7 +301,7 @@ impl Volume {
 
         let mut prev_cluster = 0u16;
         let mut first_cluster = 0u16;
-        let bytes_per_cluster = self.bpb.sectors_per_cluster * SECTOR_SIZE;
+        let bytes_per_cluster = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
         for (ci, data_chunk) in data.chunks(bytes_per_cluster).enumerate() {
             let cluster = self.allocate_cluster()?;
             if ci == 0 {
@@ -272,12 +309,11 @@ impl Volume {
             } else {
                 self.set_fat_entry(prev_cluster, cluster)?;
             }
-            let start_sector = self.bpb.cluster_to_sector(cluster);
+            let start_sector = self.bpb.cluster_to_sector(cluster as u32);
             for (si, sector) in data_chunk.chunks(SECTOR_SIZE).enumerate() {
                 let mut sector_buf = [0u8; SECTOR_SIZE];
                 sector_buf[..sector.len()].copy_from_slice(sector);
-                write_block((start_sector + si) as u32, &sector_buf)
-                    .map_err(FsError::DeviceError)?;
+                write_block(start_sector + si as u32, &sector_buf)?;
             }
             prev_cluster = cluster;
         }
@@ -287,7 +323,7 @@ impl Volume {
         let count = self.bpb.root_dir_sectors();
         for sector in start..start + count {
             // First read the sector
-            read_block(sector as u32, &mut buf).map_err(FsError::DeviceError)?;
+            read_block(sector, &mut buf)?;
 
             // 16 entries per sector (512 / 32)
             for entry in 0..SECTOR_SIZE / DIR_ENTRY_BYTES {
@@ -306,7 +342,7 @@ impl Volume {
                         .copy_from_slice(&(data.len() as u32).to_le_bytes());
 
                     // Write back
-                    write_block(sector as u32, &buf).map_err(FsError::DeviceError)?;
+                    write_block(sector, &buf)?;
                     return Ok(());
                 }
             }
@@ -324,8 +360,8 @@ where
     f(vol)
 }
 
-pub fn fat16_init() {
-    let vol = Volume::new().expect("FAT16 init failed");
+pub fn fat16_init(lba: u32, bpb: Bpb) {
+    let vol = Volume::new(lba, bpb);
     *VOLUME.lock() = Some(vol);
 }
 
