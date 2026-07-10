@@ -243,6 +243,8 @@ where
 }
 
 pub fn read_block(block: u32, buf: &mut [u8; blk::BLOCK_SIZE]) -> Result<(), BlkError> {
+    #[cfg(feature = "bench")]
+    bench_counters::inc_read();
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_read(block))?;
 
@@ -253,6 +255,8 @@ pub fn read_block(block: u32, buf: &mut [u8; blk::BLOCK_SIZE]) -> Result<(), Blk
 }
 
 pub fn write_block(block: u32, buf: &[u8; blk::BLOCK_SIZE]) -> Result<(), BlkError> {
+    #[cfg(feature = "bench")]
+    bench_counters::inc_write();
     let _guard = IO_IN_PROGRESS.lock();
     with_blk_dev(|blk| blk.submit_write(block, buf))?;
 
@@ -318,6 +322,38 @@ mod test {
         let mut buf2 = [0u8; blk::BLOCK_SIZE];
         read_block(1, &mut buf2).unwrap();
         assert_eq!(&buf2[..s.len()], s.as_bytes());
+    }
+}
+
+// Block-I/O counters for benchmarks. The meaningful FS performance metric is
+// the number of block operations (each is a virtio round-trip), and the count
+// is deterministic — immune to QEMU timing — so fs benchmarks assert on these
+// rather than on cycles. Bench-only; absent (zero cost) in normal builds.
+#[cfg(feature = "bench")]
+pub mod bench_counters {
+    use core::sync::atomic::{AtomicU32, Ordering};
+
+    static READS: AtomicU32 = AtomicU32::new(0);
+    static WRITES: AtomicU32 = AtomicU32::new(0);
+
+    pub(super) fn inc_read() {
+        READS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(super) fn inc_write() {
+        WRITES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Zero both counters; call immediately before a measured operation.
+    pub fn reset() {
+        READS.store(0, Ordering::Relaxed);
+        WRITES.store(0, Ordering::Relaxed);
+    }
+    /// (block reads, block writes) issued since the last `reset`.
+    pub fn snapshot() -> (u32, u32) {
+        (
+            READS.load(Ordering::Relaxed),
+            WRITES.load(Ordering::Relaxed),
+        )
     }
 }
 

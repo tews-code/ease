@@ -71,6 +71,9 @@ mod fat;
 mod mbr;
 pub(crate) mod volume;
 
+#[cfg(all(test, target_os = "none", feature = "bench"))]
+mod bench;
+
 use bpb::{Bpb, BpbError};
 use fat::FatChainClusterError;
 use mbr::{Mbr, MbrError};

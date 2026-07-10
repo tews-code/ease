@@ -175,7 +175,7 @@ impl Volume {
         }
     }
 
-    /// Read a file from a given DirEntry
+    /// Read a file from a given FileEntry
     pub fn read_file(&mut self, entry: &FileEntry) -> Result<Vec<u8>, FsError> {
         if entry.file_size == 0 {
             return Ok(Vec::new());
