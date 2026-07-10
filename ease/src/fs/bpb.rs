@@ -48,8 +48,8 @@
 use crate::fs::SECTOR_SIZE;
 
 use super::BOOT_SECTOR_SIG;
-use super::DIR_ENTRY_BYTES;
 use super::VolumeType;
+use super::dir::DIR_ENTRY_BYTES;
 
 const FAT_X86_JUMP_OPCODES: [u8; 2] = [0xEB, 0xE9];
 const FAT16_MIN: u32 = 4085;

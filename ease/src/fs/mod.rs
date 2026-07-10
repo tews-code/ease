@@ -60,67 +60,23 @@
  *
  * Note: The root directory is a file cluster, rather than a designated set of sectors.
  *
- *
- * Root Directory
- *
- * The root directory is used to find the first cluster in a file.
- * The directory is a flat array of directory entrys of 32 bytes:
- *
- * Directory entry layout:
- * ┌────────┬──────┬───────────────────────────────────┐
- * │ Offset │ Size │               Field               │
- * ├────────┼──────┼───────────────────────────────────┤
- * │ 0      │ 8    │ Filename (space-padded)           │
- * ├────────┼──────┼───────────────────────────────────┤
- * │ 8      │ 3    │ Extension (space-padded)          │
- * ├────────┼──────┼───────────────────────────────────┤
- * │ 11     │ 1    │ Attributes                        │
- * ├────────┼──────┼───────────────────────────────────┤
- * │ 26     │ 2    │ First cluster (little-endian u16) │
- * ├────────┼──────┼───────────────────────────────────┤
- * │ 28     │ 4    │ File size (little-endian u32)     │
- * └────────┴──────┴───────────────────────────────────┘
- *
- * Special first-byte values:
- * - 0x00 — entry is empty and no more entries follow
- * - 0xE5 — entry is deleted
- *
- * Attribute flags:
- * - 0x0F — long filename entry
- * - 0x08 — volume label
- *
- * Sub Directories
- *
- * In its parent's table, a subdirectory is an ordinary 32-byte entry with the directory bit
- * (0x10) set at offset 11, a first_cluster like any file — and file_size = 0 always.
- *
- * Its contents are the same 32-byte entry format — an array of DirEntries — but stored in
- * data-region clusters, chained through the FAT, exactly like file contents. Same 0x00 end
- * marker, same 0xE5 deleted marker, same parser. Only the root directory is the special
- * fixed-region case; every subdirectory is cluster-dwelling, growable by chain extension,
- * findable by the same walk.
- *
- * Two entries open every subdirectory:
- * . (pointing to its own first cluster) and
- * .. (pointing to its parent's — with 0 conventionally meaning "parent is root").
- *
  */
 
 use crate::board::virtio::blk;
 use crate::drivers::virtio::blk::{BlkError, read_block};
 
 mod bpb;
-mod dir_entry;
-mod fat16;
+mod dir;
+mod fat;
 mod mbr;
 pub(crate) mod volume;
 
 use bpb::{Bpb, BpbError};
+use fat::FatChainClusterError;
 use mbr::{Mbr, MbrError};
 
 const BOOT_SECTOR: u32 = 0;
 const BOOT_SECTOR_SIG: [u8; 2] = [0x55, 0xAA];
-const DIR_ENTRY_BYTES: usize = 32;
 const SECTOR_SIZE: usize = 512;
 
 const _: () = assert!(SECTOR_SIZE == blk::BLOCK_SIZE);
@@ -131,8 +87,11 @@ pub enum FsError {
     Bpb(BpbError),
     Device(BlkError),
     Mbr(MbrError),
+    FatChain(FatChainClusterError),
+    BadSectorFound,
     DirFull,
     DiskFull,
+    FreeSectorFound,
     InvalidName,
     FileSizeMismatch,
     NotFound,
@@ -158,7 +117,13 @@ impl From<MbrError> for FsError {
     }
 }
 
-#[derive(PartialEq, Eq, Debug)]
+impl From<FatChainClusterError> for FsError {
+    fn from(e: FatChainClusterError) -> Self {
+        FsError::FatChain(e)
+    }
+}
+
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub(crate) enum VolumeType {
     Fat16(u32),
     Fat32(u32),
