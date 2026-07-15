@@ -6,6 +6,8 @@ use core::fmt::Write;
 use core::ops::ControlFlow;
 
 use crate::fs::FsError;
+#[cfg(feature = "paint-stack")]
+use crate::kernel::sched;
 use crate::kernel::timer;
 use crate::shell::{Args, Console, ascii};
 
@@ -56,6 +58,8 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  help    - Show this help");
     let _ = writeln!(console, "  hexdump - Raw file output");
     let _ = writeln!(console, "  ls      - List files in directory");
+    #[cfg(feature = "paint-stack")]
+    let _ = writeln!(console, "  stacks  - Print painted kernel thread stacks");
     let _ = writeln!(console, "  time    - Show system time since boot [ms]");
     let _ = writeln!(console, "  touch   - Create empty file");
     let _ = writeln!(console, "  rm      - Delete file");
@@ -173,6 +177,13 @@ pub fn time(console: &mut Console) {
 #[allow(dead_code)]
 pub fn panic(_console: &mut Console) {
     panic!("user requested panic");
+}
+
+/// Prints the live thread painted stack high watermark
+#[allow(dead_code)]
+#[cfg(feature = "paint-stack")]
+pub fn stacks(_console: &mut Console) {
+    sched::stacks();
 }
 
 /// Creates an empty file

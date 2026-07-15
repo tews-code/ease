@@ -8,6 +8,8 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::Qos;
 use crate::kernel::sched::stride::PRIORITY_MIN;
+#[cfg(feature = "paint-stack")]
+use crate::kernel::stack::print_stack_watermark;
 use crate::kernel::timer;
 
 use super::deadline::Deadline;
@@ -328,5 +330,20 @@ impl Threads {
             .as_ref()
             .and_then(|tcb| tcb.user.as_ref())
             .is_some_and(|uc| uc.process_idx as usize == pid)
+    }
+
+    // Debug - print the painted stack depth for running threads
+    #[cfg(feature = "paint-stack")]
+    pub(super) fn stacks(&self) {
+        for tcb in self.0.iter().flatten() {
+            unsafe {
+                print_stack_watermark(
+                    "thread",
+                    tcb.id as usize,
+                    tcb.kernel_stack.base_addr(),
+                    tcb.kernel_stack.top().as_ptr().addr(),
+                )
+            }
+        }
     }
 }

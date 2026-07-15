@@ -261,3 +261,9 @@ pub fn clear_wakeup_signal(idx: usize) {
         SCHEDULER.clear_wakeup_flag(idx);
     }
 }
+
+/// Prints the running thread kernel stack high watermarks
+#[cfg(feature = "paint-stack")]
+pub fn stacks() {
+    SCHEDULER.stacks();
+}

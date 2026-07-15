@@ -161,6 +161,8 @@ impl Shell {
             "hexdump" => commands::hexdump(console, &args),
             "ls" => commands::ls(console, &args),
             "panic" => commands::panic(console),
+            #[cfg(feature = "paint-stack")]
+            "stacks" => commands::stacks(console),
             "time" => commands::time(console),
             "touch" => commands::touch(console, &args),
             "rm" => commands::rm(console, &args),

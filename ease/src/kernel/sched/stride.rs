@@ -904,4 +904,11 @@ impl Scheduler {
             tcb.state = State::BlockedUntil(deadline);
         }
     }
+
+    /// Print the painted stack high watermarks
+    #[cfg(feature = "paint-stack")]
+    pub fn stacks(&self) {
+        let sched = self.sched.lock();
+        sched.thread_blocks.stacks();
+    }
 }
