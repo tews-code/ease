@@ -141,7 +141,7 @@ pub mod board {
 mod drivers {
     pub mod virtio {
         pub mod blk {
-            #[derive(Debug)]
+            #[derive(Debug, PartialEq, Eq)]
             pub enum BlkError {
                 SectorOutOfRange,
                 DeviceError(u8),

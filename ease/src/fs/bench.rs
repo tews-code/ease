@@ -13,8 +13,8 @@
 
 use crate::bench;
 use crate::drivers::virtio::blk::bench_counters;
+use crate::fs::DirHandle;
 use crate::fs::volume::with_volume;
-use crate::println;
 
 // Upper bounds on block ops per operation. Reads/writes are deterministic on a
 // given disk image, so these are tight enough to catch a cache or read/write
@@ -45,10 +45,11 @@ fn fs_block_io_benchmarks() {
     println!("====== FILESYSTEM (block I/O) ======");
     println!();
 
+    let current_dir = DirHandle { start_cluster: 0 };
     // 1. Metadata lookup: scan the root directory for a file by name.
     let (reads, writes, cpu) = count(|| {
         with_volume(|vol| {
-            vol.open("HELLO.TXT").unwrap();
+            vol.open(current_dir, "HELLO.TXT").unwrap();
         });
     });
     report("open(HELLO.TXT)", reads, writes, cpu);
@@ -63,7 +64,7 @@ fn fs_block_io_benchmarks() {
     //    number of FAT-sector reads.
     let (reads, writes, cpu) = count(|| {
         with_volume(|vol| {
-            let entry = vol.open("BIG.TXT").unwrap();
+            let entry = vol.open(current_dir, "BIG.TXT").unwrap();
             vol.read_file(&entry).unwrap();
         });
     });
@@ -96,7 +97,7 @@ fn fs_block_io_benchmarks() {
     let data = [b'Z'; 8 * 1024];
     let (reads, writes, cpu) = count(|| {
         with_volume(|vol| {
-            vol.write_file("BENCH.TMP", &data).unwrap();
+            vol.write_file(current_dir, "BENCH.TMP", &data).unwrap();
         });
     });
     report("write_file(BENCH.TMP, 8KB)", reads, writes, cpu);

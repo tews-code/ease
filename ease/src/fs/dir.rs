@@ -1,29 +1,68 @@
-//! FAT Root Directory
+//! Directory
 
 /*
-* Root Directory
+* A directory is a table used to find the first cluster in a file chain.
 *
-* The root directory is used to find the first cluster in a file.
-* The directory is a flat array of directory entrys of 32 bytes:
+* A FAT volume has a root directory and further sub-directories.
 *
-* Directory entry layout for FAT16:
-* ┌────────┬──────┬───────────────────────────────────┐
-* │ Offset │ Size │               Field               │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 0      │ 8    │ Filename (space-padded)           │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 8      │ 3    │ Extension (space-padded)          │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 11     │ 1    │ Attributes                        │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 20     │ 2    │ FAT 16 - zero,                    |
-* |        |      | FAT32:First cluster high 16 bits  │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 26     │ 2    │ FAT 16: First cluster (LE  u16)   │
-* |        |      | FAT32: First cluster low 16 bits  │
-* ├────────┼──────┼───────────────────────────────────┤
-* │ 28     │ 4    │ File size (little-endian u32)     │
-* └────────┴──────┴───────────────────────────────────┘
+* Every directory entry is 32 bytes.
+*
+* ROOT DIRECTORY
+*
+* FAT16 has a continguous set of sectors acting as the root directory, which is
+* found immediately after the FAT sectors. The number of supported entries can be
+* found from BPB.
+*
+* FAT32 puts the root directory in a file, where the file's first cluster can be
+* found in the BPB.
+*
+* SUB-DIRECTORIES
+*
+* Both FAT16 and FAT32 put subdirectories in files (in the data sectors). Each directory
+* file's first cluster is found in it's parent directory table.
+*
+* In its parent's table, a subdirectory is an ordinary 32-byte entry with the directory
+* bit (0x10) set at offset 11, a first_cluster like any file and file_size = 0 always.
+*
+* Two entries open every subdirectory:
+* . (pointing to its own first cluster) and
+* .. (pointing to its parent's — with 0 conventionally meaning "parent is root").
+*
+* DIRECTORY ENTRY
+*
+* The directory entry (32 bytes) layout is:
+* ┌────────┬──────┬────────────────────────────────────────┐
+* │ Offset │ Size │               Field                    │
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 0      │ 1    │ Marker - either                        |
+* |        |      |     empty(0x00) or                     |
+* │        │      │     deleted (0xE5)                     |
+* │        │      │ The directory is packed to the start,  |
+* |        |      | so once 0x00 is found all subsequent   │
+* |        │      | entries will be 0x00 too.              |
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 0      │ 8    │ If marker is not found then this is    |
+* |        |      | Filename (space-padded)                |
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 8      │ 3    │ Extension (space-padded)               │
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 11     │ 1    │ Attributes                             │
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 20     │ 2    │ FAT16 - zero,                          |
+* |        |      | FAT32: First cluster high 16 bits      │
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 26     │ 2    │ FAT16: First cluster (LE  u16)         │
+* |        |      | FAT32: First cluster low 16 bits       │
+* ├────────┼──────┼────────────────────────────────────────┤
+* │ 28     │ 4    │ File size (little-endian u32)          │
+* └────────┴──────┴────────────────────────────────────────┘
+*
+* In FAT16, cluster numbers are only 16-bit, so the entire value fits in the
+* low word at offset 26, and offset 20 is always zero — dead space.
+*
+* In FAT32, cluster numbers are 28-bit and no longer fit in 16 bits,
+* so FAT32 presses offset 20 into service as the high half.
+* You reconstruct the real value as (high_word << 16) | low_word.
 *
 * ATTRIBUTES
 *
@@ -47,38 +86,12 @@
 * │ 0x0F        │ (0x01|0x02|0x04|0x08) Long-filename entry │
 * └─────────────┴───────────────────────────────────────────┘
 *
-*
-* For FAT32:
-*
-* The first cluster number lives in two non-adjacent slots:
-*
-* - offset 26–27 — the low 16 bits
-* - offset 20–21 — the high 16 bits
-*
-* In FAT16, cluster numbers are only 16-bit, so the entire value fits in the low word at offset 26, and offset 20 is always zero — dead space. In FAT32, cluster numbers are 28-bit and no longer fit in 16 bits, so FAT32 presses offset 20 into service as the high half. You reconstruct the real value as (high_word << 16) | low_word.
-*
-*
-*
-* Sub Directories
-*
-* In its parent's table, a subdirectory is an ordinary 32-byte entry with the directory bit
-* (0x10) set at offset 11, a first_cluster like any file — and file_size = 0 always.
-*
-* Its contents are the same 32-byte entry format — an array of DirEntries — but stored in
-* data-region clusters, chained through the FAT, exactly like file contents. Same 0x00 end
-* marker, same 0xE5 deleted marker, same parser. Only the root directory is the special
-* fixed-region case; every subdirectory is cluster-dwelling, growable by chain extension,
-* findable by the same walk.
-*
-* Two entries open every subdirectory:
-* . (pointing to its own first cluster) and
-* .. (pointing to its parent's — with 0 conventionally meaning "parent is root").
 */
 
 use crate::fs::{FsError, VolumeType};
 use crate::kernel::collection::StackVec;
 
-pub(super) const DIR_ENTRY_BYTES: usize = 32; // FAT16 and FAT32
+pub(super) const DIR_ENTRY_BYTES: usize = 32; // FAT16 and FAT32 both use 32 bytes
 
 const ENTRY_EMPTY: u8 = 0x00; // Entry is empty
 pub(super) const ENTRY_DEL: u8 = 0xE5; // Entry is deleted
@@ -98,36 +111,25 @@ pub(super) const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_RESERVED: [u8; 2] = [0x40, 0x80];
 const ATTR_LONG_FILENAME: u8 = 0x0F;
 
-pub(super) enum DirEntry {
+pub(super) enum DirEntryKind {
     Deleted,
     Empty,
-    Used(FileEntry),
+    Used(FileInfo),
     Unsupported,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct FileEntry {
-    pub(super) filename: [u8; 8],
-    pub(super) extension: [u8; 3],
-    pub(super) attributes: u8,
-    pub(super) first_cluster: u32, // FAT16 is u16 but we store as parsed u32
-    pub(crate) file_size: u32,
-}
-
-impl DirEntry {
-    /// Parse directory entry bytes and returns a FileEntry
-    ///
-    /// None for empty/deleted/skipped
+impl DirEntryKind {
+    /// Parse directory entry bytes and returns a DirEntryKind
     pub(super) fn parse(
-        dir_entry_bytes: &[u8; DIR_ENTRY_BYTES],
+        dir_entry_bytes: [u8; DIR_ENTRY_BYTES],
         volume_type: VolumeType,
-    ) -> DirEntry {
+    ) -> DirEntryKind {
         // Special first-byte values
         if dir_entry_bytes[0] == ENTRY_EMPTY {
-            return DirEntry::Empty;
+            return DirEntryKind::Empty;
         }
         if dir_entry_bytes[0] == ENTRY_DEL {
-            return DirEntry::Deleted;
+            return DirEntryKind::Deleted;
         }
         // Attribute flags to skip. A long-filename entry sets all four low
         // bits at once (0x0F); a volume label sets bit 0x08. Ordinary files
@@ -135,34 +137,14 @@ impl DirEntry {
         if dir_entry_bytes[11] & ATTR_VOLUME_LABEL != 0
             || dir_entry_bytes[11] & ATTR_LONG_FILENAME == ATTR_LONG_FILENAME
         {
-            return DirEntry::Unsupported;
+            return DirEntryKind::Unsupported;
         }
 
-        DirEntry::Used(FileEntry {
-            filename: dir_entry_bytes[0..8].try_into().unwrap(),
-            extension: dir_entry_bytes[8..11].try_into().unwrap(),
-            attributes: dir_entry_bytes[11],
-            first_cluster: match volume_type {
-                VolumeType::Fat16(_) => {
-                    u16::from_le_bytes([dir_entry_bytes[26], dir_entry_bytes[27]]) as u32
-                }
-                VolumeType::Fat32(_) => u32::from_le_bytes([
-                    dir_entry_bytes[26],
-                    dir_entry_bytes[27],
-                    dir_entry_bytes[20],
-                    dir_entry_bytes[21],
-                ]),
-            },
-            file_size: u32::from_le_bytes([
-                dir_entry_bytes[28],
-                dir_entry_bytes[29],
-                dir_entry_bytes[30],
-                dir_entry_bytes[31],
-            ]),
-        })
+        DirEntryKind::Used(FileInfo::parse(dir_entry_bytes, volume_type))
     }
 
-    // Convert to byte format
+    // Convert a DirEntryKind into its 32 byte format
+    #[cfg(test)]
     pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; DIR_ENTRY_BYTES] {
         let mut entry = [0u8; DIR_ENTRY_BYTES];
         match self {
@@ -175,47 +157,67 @@ impl DirEntry {
                 entry
             }
             Self::Unsupported => {
+                entry[0] = b'U'; // Need to clear the marker, use any character
                 entry[11] = ATTR_VOLUME_LABEL;
                 entry
             }
-            Self::Used(f) => {
-                entry[0..8].copy_from_slice(&f.filename);
-                entry[8..11].copy_from_slice(&f.extension);
-                entry[11] = ATTR_ARCHIVE;
-                match volume_type {
-                    VolumeType::Fat16(_) => {
-                        entry[20..22].copy_from_slice(&[0u8, 0u8]);
-                        let first_cluster = f.first_cluster as u16;
-                        entry[26..28].copy_from_slice(&first_cluster.to_le_bytes());
-                    }
-                    VolumeType::Fat32(_) => {
-                        let first_cluster_hi = (f.first_cluster >> 16) as u16;
-                        let first_cluster_lo = f.first_cluster as u16;
-                        entry[20..22].copy_from_slice(&first_cluster_hi.to_le_bytes());
-                        entry[26..28].copy_from_slice(&first_cluster_lo.to_le_bytes());
-                    }
-                }
-                entry[28..32].copy_from_slice(&f.file_size.to_le_bytes());
-                entry
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn is_free(&self) -> bool {
-        match self {
-            Self::Deleted => true,
-            Self::Empty => true,
-            Self::Unsupported => false,
-            Self::Used(_) => false,
+            Self::Used(file_info) => file_info.as_bytes(volume_type),
         }
     }
 }
 
-impl FileEntry {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileInfo {
+    pub(super) name: [u8; 8],
+    pub(super) extension: [u8; 3],
+    pub(super) attributes: u8,
+    pub(super) first_cluster: u32, // FAT16 is u16 but we store as parsed u32
+    pub(crate) file_size: u32,
+}
+
+impl FileInfo {
+    // Parses a raw byte array as FileInfo
+    fn parse(entry: [u8; DIR_ENTRY_BYTES], volume_type: VolumeType) -> Self {
+        Self {
+            name: entry[0..8].try_into().unwrap(),
+            extension: entry[8..11].try_into().unwrap(),
+            attributes: entry[11],
+            first_cluster: match volume_type {
+                VolumeType::Fat16(_) => u16::from_le_bytes([entry[26], entry[27]]) as u32,
+                VolumeType::Fat32(_) => {
+                    u32::from_le_bytes([entry[26], entry[27], entry[20], entry[21]])
+                }
+            },
+            file_size: u32::from_le_bytes([entry[28], entry[29], entry[30], entry[31]]),
+        }
+    }
+
+    // Convert FileInfo to a used directory raw bytes
+    pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; DIR_ENTRY_BYTES] {
+        let mut entry = [0u8; DIR_ENTRY_BYTES];
+        entry[0..8].copy_from_slice(&self.name);
+        entry[8..11].copy_from_slice(&self.extension);
+        entry[11] = self.attributes;
+        match volume_type {
+            VolumeType::Fat16(_) => {
+                entry[20..22].copy_from_slice(&[0u8, 0u8]);
+                let first_cluster = self.first_cluster as u16;
+                entry[26..28].copy_from_slice(&first_cluster.to_le_bytes());
+            }
+            VolumeType::Fat32(_) => {
+                let first_cluster_hi = (self.first_cluster >> 16) as u16;
+                let first_cluster_lo = self.first_cluster as u16;
+                entry[20..22].copy_from_slice(&first_cluster_hi.to_le_bytes());
+                entry[26..28].copy_from_slice(&first_cluster_lo.to_le_bytes());
+            }
+        }
+        entry[28..32].copy_from_slice(&self.file_size.to_le_bytes());
+        entry
+    }
+
     /// Formats the filename as a string (e.g. "HELLO   TXT" → "HELLO.TXT")
     pub fn filename(&self) -> StackVec<u8, 12> {
-        let name = str::from_utf8(&self.filename)
+        let name = str::from_utf8(&self.name)
             .expect("should be UTF-8")
             .trim_end();
         let ext = str::from_utf8(&self.extension)
@@ -305,15 +307,15 @@ mod test {
         e
     }
 
-    /// Build a FileEntry (the payload of DirEntry::Used) with archive attrs.
+    /// Build a FileInfo (the payload of DirEntry::Used) with archive attrs.
     fn make_file_entry(
         name: &[u8; 8],
         ext: &[u8; 3],
         first_cluster: u32,
         file_size: u32,
-    ) -> FileEntry {
-        FileEntry {
-            filename: *name,
+    ) -> FileInfo {
+        FileInfo {
+            name: *name,
             extension: *ext,
             attributes: ATTR_ARCHIVE,
             first_cluster,
@@ -325,10 +327,10 @@ mod test {
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_normal_file_is_used() {
         let bytes = make_dir_entry(b"HELLO   ", b"TXT", ATTR_ARCHIVE, 5, 1234);
-        let DirEntry::Used(f) = DirEntry::parse(&bytes, VolumeType::Fat16(0)) else {
+        let DirEntryKind::Used(f) = DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))) else {
             panic!("expected Used");
         };
-        assert_eq!(&f.filename, b"HELLO   ");
+        assert_eq!(&f.name, b"HELLO   ");
         assert_eq!(&f.extension, b"TXT");
         assert_eq!(f.attributes, ATTR_ARCHIVE);
         assert_eq!(f.first_cluster, 5);
@@ -339,10 +341,10 @@ mod test {
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_no_extension_is_used() {
         let bytes = make_dir_entry(b"README  ", b"   ", ATTR_ARCHIVE, 3, 100);
-        let DirEntry::Used(f) = DirEntry::parse(&bytes, VolumeType::Fat16(0)) else {
+        let DirEntryKind::Used(f) = DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))) else {
             panic!("expected Used");
         };
-        assert_eq!(&f.filename, b"README  ");
+        assert_eq!(&f.name, b"README  ");
         assert_eq!(&f.extension, b"   ");
     }
 
@@ -351,8 +353,8 @@ mod test {
     fn parse_empty_slot_is_empty() {
         let bytes = [0u8; DIR_ENTRY_BYTES];
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Empty
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Empty
         ));
     }
 
@@ -362,8 +364,8 @@ mod test {
         let mut bytes = make_dir_entry(b"OLD     ", b"TXT", ATTR_ARCHIVE, 2, 50);
         bytes[0] = ENTRY_DEL;
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Deleted
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Deleted
         ));
     }
 
@@ -373,8 +375,8 @@ mod test {
         let mut bytes = [0x42u8; DIR_ENTRY_BYTES]; // non-zero first byte
         bytes[11] = ATTR_LONG_FILENAME;
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Unsupported
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Unsupported
         ));
     }
 
@@ -383,8 +385,8 @@ mod test {
     fn parse_volume_label_is_unsupported() {
         let bytes = make_dir_entry(b"MOSSVOL ", b"   ", ATTR_VOLUME_LABEL, 0, 0);
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Unsupported
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Unsupported
         ));
     }
 
@@ -394,8 +396,8 @@ mod test {
         // Volume-label bit set alongside the archive bit
         let bytes = make_dir_entry(b"MOSSVOL ", b"   ", ATTR_VOLUME_LABEL | ATTR_ARCHIVE, 0, 0);
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Unsupported
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Unsupported
         ));
     }
 
@@ -408,8 +410,8 @@ mod test {
         // when any single one is (a read-only file sets only 0x01).
         let bytes = make_dir_entry(b"READONLY", b"TXT", ATTR_ARCHIVE | ATTR_READ_ONLY, 7, 10);
         assert!(matches!(
-            DirEntry::parse(&bytes, VolumeType::Fat16(0)),
-            DirEntry::Used(_)
+            DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
+            DirEntryKind::Used(_)
         ));
     }
 
@@ -421,8 +423,9 @@ mod test {
     #[cfg_attr(not(target_os = "none"), test)]
     fn roundtrip_used_entry_fat16() {
         let original = make_file_entry(b"HELLO   ", b"TXT", 5, 1234);
-        let bytes = DirEntry::Used(original.clone()).as_bytes(VolumeType::Fat16(0));
-        let DirEntry::Used(parsed) = DirEntry::parse(&bytes, VolumeType::Fat16(0)) else {
+        let bytes = DirEntryKind::Used(original.clone()).as_bytes(VolumeType::Fat16((0, 1)));
+        let DirEntryKind::Used(parsed) = DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1)))
+        else {
             panic!("expected Used");
         };
         assert_eq!(parsed, original);
@@ -434,8 +437,8 @@ mod test {
         // A first cluster with a nonzero high word exercises the split across
         // offsets 20-21 (high) and 26-27 (low).
         let original = make_file_entry(b"BIG     ", b"DAT", 0x0012_3456, 4096);
-        let bytes = DirEntry::Used(original.clone()).as_bytes(VolumeType::Fat32(2));
-        let DirEntry::Used(parsed) = DirEntry::parse(&bytes, VolumeType::Fat32(2)) else {
+        let bytes = DirEntryKind::Used(original.clone()).as_bytes(VolumeType::Fat32(2));
+        let DirEntryKind::Used(parsed) = DirEntryKind::parse(bytes, VolumeType::Fat32(2)) else {
             panic!("expected Used");
         };
         assert_eq!(parsed, original);
@@ -480,7 +483,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_with_extension() {
-        let (name, ext) = FileEntry::parse_83_name("TEST.TXT").unwrap();
+        let (name, ext) = FileInfo::parse_83_name("TEST.TXT").unwrap();
         assert_eq!(&name, b"TEST    ");
         assert_eq!(&ext, b"TXT");
     }
@@ -488,7 +491,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_no_extension() {
-        let (name, ext) = FileEntry::parse_83_name("README").unwrap();
+        let (name, ext) = FileInfo::parse_83_name("README").unwrap();
         assert_eq!(&name, b"README  ");
         assert_eq!(&ext, b"   ");
     }
@@ -496,7 +499,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_lowercased() {
-        let (name, ext) = FileEntry::parse_83_name("a.b").unwrap();
+        let (name, ext) = FileInfo::parse_83_name("a.b").unwrap();
         assert_eq!(&name, b"A       ");
         assert_eq!(&ext, b"B  ");
     }
@@ -504,7 +507,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_full_length() {
-        let (name, ext) = FileEntry::parse_83_name("12345678.ABC").unwrap();
+        let (name, ext) = FileInfo::parse_83_name("12345678.ABC").unwrap();
         assert_eq!(&name, b"12345678");
         assert_eq!(&ext, b"ABC");
     }
@@ -512,7 +515,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_single_char() {
-        let (name, ext) = FileEntry::parse_83_name("X.Y").unwrap();
+        let (name, ext) = FileInfo::parse_83_name("X.Y").unwrap();
         assert_eq!(&name, b"X       ");
         assert_eq!(&ext, b"Y  ");
     }
@@ -520,37 +523,37 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_empty() {
-        assert!(FileEntry::parse_83_name("").is_err());
+        assert!(FileInfo::parse_83_name("").is_err());
     }
 
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_long_name() {
-        assert!(FileEntry::parse_83_name("TOOLONGNAME.TXT").is_err());
+        assert!(FileInfo::parse_83_name("TOOLONGNAME.TXT").is_err());
     }
 
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_long_ext() {
-        assert!(FileEntry::parse_83_name("TEST.LONG").is_err());
+        assert!(FileInfo::parse_83_name("TEST.LONG").is_err());
     }
 
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_multiple_dots() {
-        assert!(FileEntry::parse_83_name("A.B.C").is_err());
+        assert!(FileInfo::parse_83_name("A.B.C").is_err());
     }
 
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_rejects_non_ascii() {
-        assert!(FileEntry::parse_83_name("café.txt").is_err());
+        assert!(FileInfo::parse_83_name("café.txt").is_err());
     }
 
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_83_name_dot_only_name() {
         // ".TXT" has empty name part
-        assert!(FileEntry::parse_83_name(".TXT").is_err());
+        assert!(FileInfo::parse_83_name(".TXT").is_err());
     }
 }

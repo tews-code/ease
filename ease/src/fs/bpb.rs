@@ -22,7 +22,7 @@
  * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
  * │ 16     │ 1    │ number of FATs                           | parsed          │
  * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
- * │ 17     │ 2    │ root directory entry count               | parsed          │
+ * │ 17     │ 2    │ root dir entry count (FAT16 capacity)    | parsed          │
  * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
  * │ 19     │ 2    │ total sectors (16-bit) or 0 (32-bit)     | parsed          │
  * ├────────┼──────┼──────────────────────────────────────────┼─────────────────┤
@@ -56,7 +56,7 @@ const FAT16_MIN: u32 = 4085;
 const FAT16_MAX: u32 = 65524;
 const SECTORS_PER_CLUSTER_MAX: u32 = 64;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum BpbError {
     InvalidBpb,
     UnknownFileSystem,
@@ -73,7 +73,6 @@ pub(crate) struct Bpb {
     reserved_sector_count: u32,
     pub(super) fat_count: u32,
     pub(super) sectors_per_fat: u32,
-    root_dir_entry_count: u32,
 }
 
 impl Bpb {
@@ -96,8 +95,6 @@ impl Bpb {
         if !sectors_per_cluster.is_power_of_two() || sectors_per_cluster > SECTORS_PER_CLUSTER_MAX {
             return Err(BpbError::InvalidBpb);
         }
-        // Try to identify the FAT type
-        // Microsoft formula for determining FAT12/FAT16/FAT32
         let mut total_sectors = u16::from_le_bytes([sector[19], sector[20]]) as u32;
         if total_sectors == 0 {
             // Get 32-bit total
@@ -114,21 +111,22 @@ impl Bpb {
                 return Err(BpbError::InvalidBpb);
             }
         }
-        let root_dir_entry_count = u16::from_le_bytes([sector[17], sector[18]]) as u32; // Zero for FAT32
+        let fat16_root_dir_capacity = u16::from_le_bytes([sector[17], sector[18]]) as u32; // Zero for FAT32
+        let fat16_root_dir_sector_count =
+            (fat16_root_dir_capacity * DIR_ENTRY_BYTES as u32).div_ceil(SECTOR_SIZE as u32);
         let reserved_sector_count = u16::from_le_bytes([sector[14], sector[15]]) as u32;
         let fat_count = sector[16] as u32;
-        let data_sectors = total_sectors.saturating_sub(
-            reserved_sector_count
-                + fat_count * sectors_per_fat
-                + (root_dir_entry_count * DIR_ENTRY_BYTES as u32).div_ceil(SECTOR_SIZE as u32),
-        );
+        let fat_sector_count = fat_count * sectors_per_fat;
+        // Microsoft formula for determining FAT12/FAT16/FAT32
+        let data_sectors = total_sectors
+            .saturating_sub(reserved_sector_count + fat_sector_count + fat16_root_dir_sector_count);
         let cluster_count = data_sectors / sectors_per_cluster;
         // Now match on cluster_count
         let volume_type = match cluster_count {
             0..FAT16_MIN => return Err(BpbError::UnsupportedFileSystem), // Don't support FAT12
             FAT16_MIN..=FAT16_MAX => {
-                let root_dir_start_sector = reserved_sector_count + fat_count * sectors_per_fat;
-                VolumeType::Fat16(root_dir_start_sector)
+                let fat16_root_dir_start_sector = reserved_sector_count + fat_sector_count;
+                VolumeType::Fat16((fat16_root_dir_start_sector, fat16_root_dir_sector_count))
             }
             _ => {
                 let root_dir_cluster_start =
@@ -145,7 +143,6 @@ impl Bpb {
             sectors_per_cluster,
             reserved_sector_count,
             fat_count,
-            root_dir_entry_count,
             sectors_per_fat,
         })
     }
@@ -154,29 +151,13 @@ impl Bpb {
         self.reserved_sector_count // FAT region starts immediately after reserved region
     }
 
-    pub(super) fn root_dir_start_sector(&self) -> u32 {
-        match self.volume_type {
-            VolumeType::Fat16(root_dir_start_sector) => root_dir_start_sector,
-            VolumeType::Fat32(root_dir_cluster_start) => {
-                self.cluster_to_sector(root_dir_cluster_start)
-            }
-        }
-    }
-
-    // Returnds the number of sectors assigned to a root directory
-    // For FAT32 this is zero
-    pub(super) fn root_dir_sectors(&self) -> u32 {
-        // FAT16 and FAT32 both use 32-bit directory entries
-        (self.root_dir_entry_count * DIR_ENTRY_BYTES as u32).div_ceil(SECTOR_SIZE as u32)
-    }
-
     fn data_start_sector(&self) -> u32 {
         match self.volume_type {
-            VolumeType::Fat16(root_dir_start_sector) => {
-                root_dir_start_sector + self.root_dir_sectors()
+            VolumeType::Fat16((root_dir_start_sector, root_dir_sector_count)) => {
+                root_dir_start_sector + root_dir_sector_count // FAT16 data follows the root dir
             }
             VolumeType::Fat32(_) => {
-                self.reserved_sector_count + self.fat_count * self.sectors_per_fat
+                self.reserved_sector_count + self.fat_count * self.sectors_per_fat // FAT32 data follows the FAT
             }
         }
     }
@@ -255,7 +236,13 @@ mod test {
         assert_eq!(bpb.sectors_per_cluster, 4);
         assert_eq!(bpb.reserved_sector_count, 4);
         assert_eq!(bpb.fat_count, 2);
-        assert_eq!(bpb.root_dir_entry_count, 512);
+        let VolumeType::Fat16((_, root_dir_sector_count)) = bpb.volume_type else {
+            panic!("expecting FAT16");
+        };
+        assert_eq!(
+            root_dir_sector_count as usize * SECTOR_SIZE / DIR_ENTRY_BYTES,
+            512
+        );
         assert_eq!(bpb.total_sectors, 32768);
         assert_eq!(bpb.sectors_per_fat, 32);
     }
@@ -284,8 +271,12 @@ mod test {
         let sector = make_test_bpb();
         let bpb = Bpb::parse(&sector).unwrap();
         assert_eq!(bpb.fat_start_sector(), 4);
-        assert_eq!(bpb.root_dir_start_sector(), 68);
-        assert_eq!(bpb.root_dir_sectors(), 32);
+        let VolumeType::Fat16((root_dir_start_sector, root_dir_sector_count)) = bpb.volume_type
+        else {
+            panic!("should be FAT16")
+        };
+        assert_eq!(root_dir_start_sector, 68);
+        assert_eq!(root_dir_sector_count, 32);
         assert_eq!(bpb.data_start_sector(), 100);
         assert_eq!(bpb.cluster_to_sector(2), 100);
         assert_eq!(bpb.cluster_to_sector(3), 104);
@@ -427,9 +418,11 @@ mod test {
         let bpb = Bpb::parse(&sector).unwrap();
         assert!(matches!(bpb.volume_type, VolumeType::Fat32(_)));
         assert_eq!(bpb.fat_start_sector(), 32); // after reserved region
-        assert_eq!(bpb.root_dir_sectors(), 0); // FAT32 has no fixed root dir
         assert_eq!(bpb.data_start_sector(), 232); // 32 + 2 * 100
-        assert_eq!(bpb.root_dir_start_sector(), 232); // cluster 2 == data_start
+        let VolumeType::Fat32(root_dir_start_cluster) = bpb.volume_type else {
+            panic!("should be FAT32")
+        };
+        assert_eq!(bpb.cluster_to_sector(root_dir_start_cluster), 232); // cluster 2 == data_start
         assert_eq!(bpb.cluster_to_sector(2), 232);
         assert_eq!(bpb.cluster_to_sector(3), 240); // one cluster (8 sectors) later
         assert_eq!(bpb.total_data_clusters(), 74971); // (600000 - 232) / 8
@@ -448,7 +441,6 @@ mod test {
         assert_eq!(bpb.sectors_per_cluster, 4);
         assert_eq!(bpb.reserved_sector_count, 4);
         assert_eq!(bpb.fat_count, 2);
-        assert_eq!(bpb.root_dir_entry_count, 512);
         assert_eq!(bpb.total_sectors, 32768);
         assert_eq!(bpb.sectors_per_fat, 32);
         assert_eq!(bpb.data_start_sector(), 100);

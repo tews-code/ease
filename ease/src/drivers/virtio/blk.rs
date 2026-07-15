@@ -32,8 +32,7 @@ static VIRTIO_COMPLETE: Completion = Completion::new();
 static BLK_DEV: IrqSpinLock<Option<VirtioBlkDev>> = IrqSpinLock::new(None);
 
 // Virtio block errors
-#[expect(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum BlkError {
     SectorOutOfRange,
     DeviceError(u8),

@@ -68,6 +68,8 @@ use crate::drivers::virtio::blk::{BlkError, read_block};
 mod bpb;
 mod dir;
 mod fat;
+#[allow(dead_code)]
+mod file;
 mod mbr;
 pub(crate) mod volume;
 
@@ -75,7 +77,9 @@ pub(crate) mod volume;
 mod bench;
 
 use bpb::{Bpb, BpbError};
+use dir::FileInfo;
 use fat::FatChainClusterError;
+pub(crate) use file::DirHandle;
 use mbr::{Mbr, MbrError};
 
 const BOOT_SECTOR: u32 = 0;
@@ -84,7 +88,7 @@ const SECTOR_SIZE: usize = 512;
 
 const _: () = assert!(SECTOR_SIZE == blk::BLOCK_SIZE);
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum FsError {
     Bpb(BpbError),
@@ -128,8 +132,8 @@ impl From<FatChainClusterError> for FsError {
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub(crate) enum VolumeType {
-    Fat16(u32),
-    Fat32(u32),
+    Fat16((u32, u32)), // Root directory start sector and root dir num sectors
+    Fat32(u32),        // Root directory file first cluster
 }
 
 #[derive(Debug)]
@@ -149,7 +153,7 @@ pub(crate) fn init() -> Result<VolumeType, MountError> {
     let (lba, bpb) = mount()?;
     if matches!(bpb.volume_type, VolumeType::Fat16(_)) {
         volume::fat16_init(lba, bpb);
-        Ok(VolumeType::Fat16(0))
+        Ok(VolumeType::Fat16((0, 0)))
     } else {
         Err(MountError::UnsupportedVolumeType)
     }

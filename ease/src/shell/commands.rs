@@ -5,7 +5,7 @@ use alloc::string::String;
 use core::fmt::Write;
 use core::ops::ControlFlow;
 
-use crate::fs::FsError;
+use crate::fs::{DirHandle, FsError};
 #[cfg(feature = "paint-stack")]
 use crate::kernel::sched;
 use crate::kernel::timer;
@@ -14,8 +14,9 @@ use crate::shell::{Args, Console, ascii};
 /// Reads file content to console
 #[allow(dead_code)]
 pub fn cat(console: &mut Console, args: &Args) {
+    let current_dir = DirHandle { start_cluster: 0 };
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.open(filename) {
+        crate::fs::volume::with_volume(|vol| match vol.open(current_dir, filename) {
             Ok(entry) => match vol.read_file(&entry) {
                 Ok(content) => match core::str::from_utf8(&content) {
                     Ok(text) => {
@@ -73,7 +74,8 @@ pub fn help(console: &mut Console) {
 pub fn hexdump(console: &mut Console, args: &Args) {
     // Open the file
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.open(filename) {
+        let current_dir = DirHandle { start_cluster: 0 };
+        crate::fs::volume::with_volume(|vol| match vol.open(current_dir, filename) {
             Ok(entry) => match vol.read_file(&entry) {
                 Ok(content) => {
                     if args.has_flag(b'C') {
@@ -143,9 +145,10 @@ pub fn hexdump(console: &mut Console, args: &Args) {
 /// Lists files in current directory
 #[allow(dead_code)]
 pub fn ls(console: &mut Console, args: &Args) {
+    let current_dir = DirHandle { start_cluster: 0 };
     crate::fs::volume::with_volume(|vol| {
         let _ = vol
-            .read_root_dir(|entry| {
+            .read_dir(current_dir, |entry| {
                 let name = entry.filename();
                 if args.has_flag(b'l') {
                     let _ = writeln!(
@@ -190,7 +193,8 @@ pub fn stacks(_console: &mut Console) {
 #[allow(dead_code)]
 pub fn touch(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.create_empty_file(filename) {
+        let current_dir = DirHandle { start_cluster: 0 };
+        crate::fs::volume::with_volume(|vol| match vol.create_empty_file(current_dir, filename) {
             Ok(_) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
@@ -207,8 +211,9 @@ pub fn touch(console: &mut Console, args: &Args) {
 /// Deletes a file
 #[allow(dead_code)]
 pub fn rm(console: &mut Console, args: &Args) {
+    let current_dir = DirHandle { start_cluster: 0 };
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.delete_file(filename) {
+        crate::fs::volume::with_volume(|vol| match vol.delete_file(current_dir, filename) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
@@ -225,6 +230,7 @@ pub fn rm(console: &mut Console, args: &Args) {
 /// Write text to file
 #[allow(dead_code)]
 pub fn write(console: &mut Console, args: &Args) {
+    let current_dir = DirHandle { start_cluster: 0 };
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
         Some(pos) => (&rest[..pos], &rest[pos + 1..]),
@@ -235,16 +241,18 @@ pub fn write(console: &mut Console, args: &Args) {
     };
     let mut data = String::from(content);
     data.push('\n');
-    crate::fs::volume::with_volume(|vol| match vol.write_file(filename, data.as_bytes()) {
-        Ok(_) => {}
-        Err(fs_error) => {
-            let msg = match fs_error {
-                FsError::DiskFull => "disk full",
-                FsError::DirFull => "directory full",
-                FsError::InvalidName => "invalid file name",
-                _ => "device error",
-            };
-            let _ = writeln!(console, "write: {}: {}", filename, msg);
+    crate::fs::volume::with_volume(|vol| {
+        match vol.write_file(current_dir, filename, data.as_bytes()) {
+            Ok(_) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::DiskFull => "disk full",
+                    FsError::DirFull => "directory full",
+                    FsError::InvalidName => "invalid file name",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "write: {}: {}", filename, msg);
+            }
         }
     });
 }
