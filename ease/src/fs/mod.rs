@@ -65,6 +65,7 @@
 use crate::board::virtio::blk;
 use crate::drivers::virtio::blk::{BlkError, read_block};
 
+mod blockcache;
 mod bpb;
 mod dir;
 mod fat;

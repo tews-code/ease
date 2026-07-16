@@ -2,9 +2,7 @@
 
 // Functions take the lock on the volume (and delegate as needed)
 
-use crate::fs::SECTOR_SIZE;
-
-use super::volume::{SectorLocation, with_volume};
+use super::volume::{EntrySlot, with_volume};
 
 use super::{FileInfo, FsError};
 
@@ -23,8 +21,7 @@ pub(crate) struct DirHandle {
 pub(crate) fn find_file_entry(
     dir: DirHandle,
     filename: &str,
-) -> Result<(SectorLocation, FileInfo), FsError> {
-    let sector_buf = &mut [0u8; SECTOR_SIZE];
+) -> Result<(EntrySlot, FileInfo), FsError> {
     // Use the directory iterator
-    with_volume(|vol| vol.find_dir_entry_location(sector_buf, dir, filename))
+    with_volume(|vol| vol.find_dir_entry_location(dir, filename))
 }
