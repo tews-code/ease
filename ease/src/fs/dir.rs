@@ -111,6 +111,7 @@ pub(super) const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_RESERVED: [u8; 2] = [0x40, 0x80];
 const ATTR_LONG_FILENAME: u8 = 0x0F;
 
+#[derive(PartialEq, Eq)]
 pub(super) enum DirEntryKind {
     Deleted,
     Empty,

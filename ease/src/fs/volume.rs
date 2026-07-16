@@ -485,6 +485,7 @@ impl Volume {
             next_sector: current_sector + 1,
             sectors_left_in_run: sectors_in_run as usize - 1,
             next_cluster,
+            returned_empty: false,
         })
     }
 }
@@ -496,6 +497,7 @@ pub(super) struct DirEntryIter<'a> {
     sectors_left_in_run: usize,
     current_offset: usize,
     next_cluster: Option<u32>,
+    returned_empty: bool,
 }
 
 pub(super) struct DirEntryResult {
@@ -505,6 +507,10 @@ pub(super) struct DirEntryResult {
 
 impl<'a> DirEntryIter<'a> {
     fn next_inner(&mut self) -> Result<Option<DirEntryResult>, FsError> {
+        // Are we already done?
+        if self.returned_empty {
+            return Ok(None);
+        }
         // Use cached values to return next DirEntryKind
         if self.current_offset == SECTOR_SIZE {
             // We are at the end of this sector, get the next one
@@ -528,21 +534,23 @@ impl<'a> DirEntryIter<'a> {
         // We use the cached values to get the directory entry raw bytes and parse
         let offset = self.current_offset;
         self.current_offset = offset + DIR_ENTRY_BYTES;
-        match DirEntryKind::parse(
+        let dir_entry_kind = DirEntryKind::parse(
             self.sector_buf[offset..self.current_offset]
                 .try_into()
                 .unwrap(),
             self.volume.bpb.volume_type,
-        ) {
-            DirEntryKind::Empty => Ok(None),
-            d => Ok(Some(DirEntryResult {
-                sector_location: SectorLocation {
-                    sector: self.next_sector - 1,
-                    offset,
-                },
-                dir_entry_kind: d,
-            })),
+        );
+        if dir_entry_kind == DirEntryKind::Empty {
+            // We only return the first Empty, afterwards the iterator is done
+            self.returned_empty = true;
         }
+        Ok(Some(DirEntryResult {
+            sector_location: SectorLocation {
+                sector: self.next_sector - 1,
+                offset,
+            },
+            dir_entry_kind,
+        }))
     }
 }
 
@@ -1075,6 +1083,94 @@ mod test {
             assert_eq!(vol.fat_entry(cluster).unwrap(), FatEntry::End);
             // Clean up
             vol.set_fat_entry(cluster, FatEntry::Free).unwrap();
+        });
+    }
+
+    // =========================================================================
+    // DirEntryIter tests
+    // =========================================================================
+
+    #[test_case]
+    fn dir_iter_yields_single_trailing_empty() {
+        let root = DirHandle { start_cluster: 0 };
+        // The fused contract: the Empty terminator is yielded exactly once,
+        // as the final item, and the iterator stays finished afterwards.
+        with_volume(|vol| {
+            let mut buf = [0u8; SECTOR_SIZE];
+            let mut iter = vol.dir_iter(&mut buf, root).unwrap();
+            let mut empties = 0;
+            let mut items_after_empty = 0;
+            for item in iter.by_ref() {
+                match item.unwrap().dir_entry_kind {
+                    DirEntryKind::Empty => empties += 1,
+                    _ if empties > 0 => items_after_empty += 1,
+                    _ => {}
+                }
+            }
+            assert_eq!(empties, 1, "expected exactly one Empty item");
+            assert_eq!(
+                items_after_empty, 0,
+                "no items may follow the Empty frontier"
+            );
+            assert!(
+                iter.next().is_none(),
+                "iterator must stay finished after returning None"
+            );
+        });
+    }
+
+    #[test_case]
+    fn dir_iter_ignores_stale_bytes_beyond_terminator() {
+        let root = DirHandle { start_cluster: 0 };
+        // The FAT spec says nothing after the first 0x00 entry is valid, but
+        // disks formatted elsewhere can carry stale bytes there. Plant a
+        // convincing used entry one slot past the terminator and check it is
+        // not reachable through the iterator path.
+        with_volume(|vol| {
+            // Locate the terminator via the iterator
+            let mut buf = [0u8; SECTOR_SIZE];
+            let mut empty_loc = None;
+            for item in vol.dir_iter(&mut buf, root).unwrap() {
+                let item = item.unwrap();
+                if matches!(item.dir_entry_kind, DirEntryKind::Empty) {
+                    empty_loc = Some(item.sector_location);
+                }
+            }
+            let empty_loc = empty_loc.expect("root dir should have a free slot");
+            // The slot after the terminator; may roll into the next sector
+            let (sector, offset) = if empty_loc.offset + DIR_ENTRY_BYTES == SECTOR_SIZE {
+                (empty_loc.sector + 1, 0)
+            } else {
+                (empty_loc.sector, empty_loc.offset + DIR_ENTRY_BYTES)
+            };
+            // Plant the phantom entry, keeping the original bytes
+            let mut sector_buf = [0u8; SECTOR_SIZE];
+            vol.read_sector(sector, &mut sector_buf).unwrap();
+            let mut original = [0u8; DIR_ENTRY_BYTES];
+            original.copy_from_slice(&sector_buf[offset..offset + DIR_ENTRY_BYTES]);
+            let phantom = FileInfo {
+                name: *b"PHANTOM ",
+                extension: *b"TXT",
+                attributes: ATTR_ARCHIVE,
+                first_cluster: 2,
+                file_size: 5,
+            };
+            sector_buf[offset..offset + DIR_ENTRY_BYTES]
+                .copy_from_slice(&phantom.as_bytes(vol.bpb.volume_type));
+            vol.write_sector(sector, &sector_buf).unwrap();
+
+            let result = vol.open(root, "PHANTOM.TXT");
+
+            // Restore the on-disk bytes before asserting so a green run
+            // leaves the image untouched for later tests
+            vol.read_sector(sector, &mut sector_buf).unwrap();
+            sector_buf[offset..offset + DIR_ENTRY_BYTES].copy_from_slice(&original);
+            vol.write_sector(sector, &sector_buf).unwrap();
+
+            assert!(
+                matches!(result, Err(FsError::NotFound)),
+                "entry beyond the 0x00 terminator must be invisible"
+            );
         });
     }
 }
