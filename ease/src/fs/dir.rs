@@ -88,10 +88,10 @@
 *
 */
 
-use crate::fs::{FsError, VolumeType};
+use super::{FsError, Location, VolumeType};
 use crate::kernel::collection::StackVec;
 
-pub(super) const DIR_ENTRY_BYTES: usize = 32; // FAT16 and FAT32 both use 32 bytes
+pub(super) const ENTRY_BYTES: usize = 32; // FAT16 and FAT32 both use 32 bytes
 
 const ENTRY_EMPTY: u8 = 0x00; // Entry is empty
 pub(super) const ENTRY_DEL: u8 = 0xE5; // Entry is deleted
@@ -103,15 +103,14 @@ const ATTR_HIDDEN: u8 = 0x02;
 #[allow(dead_code)]
 const ATTR_SYSTEM: u8 = 0x04;
 const ATTR_VOLUME_LABEL: u8 = 0x08;
-#[allow(dead_code)]
-const ATTR_DIR: u8 = 0x10;
+pub(super) const ATTR_DIR: u8 = 0x10;
 #[allow(dead_code)]
 pub(super) const ATTR_ARCHIVE: u8 = 0x20;
 #[allow(dead_code)]
 const ATTR_RESERVED: [u8; 2] = [0x40, 0x80];
 const ATTR_LONG_FILENAME: u8 = 0x0F;
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DirEntryKind {
     Deleted,
     Empty,
@@ -119,10 +118,16 @@ pub(super) enum DirEntryKind {
     Unsupported,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DirEntry {
+    pub(super) location: Location,
+    pub(super) kind: DirEntryKind,
+}
+
 impl DirEntryKind {
     /// Parse directory entry bytes and returns a DirEntryKind
     pub(super) fn parse(
-        dir_entry_bytes: [u8; DIR_ENTRY_BYTES],
+        dir_entry_bytes: [u8; ENTRY_BYTES],
         volume_type: VolumeType,
     ) -> DirEntryKind {
         // Special first-byte values
@@ -146,8 +151,8 @@ impl DirEntryKind {
 
     // Convert a DirEntryKind into its 32 byte format
     #[cfg(test)]
-    pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; DIR_ENTRY_BYTES] {
-        let mut entry = [0u8; DIR_ENTRY_BYTES];
+    pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; ENTRY_BYTES] {
+        let mut entry = [0u8; ENTRY_BYTES];
         match self {
             Self::Deleted => {
                 entry[0] = ENTRY_DEL;
@@ -167,7 +172,7 @@ impl DirEntryKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileInfo {
     pub(super) name: [u8; 8],
     pub(super) extension: [u8; 3],
@@ -178,7 +183,7 @@ pub(crate) struct FileInfo {
 
 impl FileInfo {
     // Parses a raw byte array as FileInfo
-    fn parse(entry: [u8; DIR_ENTRY_BYTES], volume_type: VolumeType) -> Self {
+    fn parse(entry: [u8; ENTRY_BYTES], volume_type: VolumeType) -> Self {
         Self {
             name: entry[0..8].try_into().unwrap(),
             extension: entry[8..11].try_into().unwrap(),
@@ -194,8 +199,8 @@ impl FileInfo {
     }
 
     // Convert FileInfo to a used directory raw bytes
-    pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; DIR_ENTRY_BYTES] {
-        let mut entry = [0u8; DIR_ENTRY_BYTES];
+    pub(super) fn as_bytes(&self, volume_type: VolumeType) -> [u8; ENTRY_BYTES] {
+        let mut entry = [0u8; ENTRY_BYTES];
         entry[0..8].copy_from_slice(&self.name);
         entry[8..11].copy_from_slice(&self.extension);
         entry[11] = self.attributes;
@@ -352,7 +357,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_empty_slot_is_empty() {
-        let bytes = [0u8; DIR_ENTRY_BYTES];
+        let bytes = [0u8; ENTRY_BYTES];
         assert!(matches!(
             DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),
             DirEntryKind::Empty
@@ -373,7 +378,7 @@ mod test {
     #[cfg_attr(target_os = "none", test_case)]
     #[cfg_attr(not(target_os = "none"), test)]
     fn parse_lfn_entry_is_unsupported() {
-        let mut bytes = [0x42u8; DIR_ENTRY_BYTES]; // non-zero first byte
+        let mut bytes = [0x42u8; ENTRY_BYTES]; // non-zero first byte
         bytes[11] = ATTR_LONG_FILENAME;
         assert!(matches!(
             DirEntryKind::parse(bytes, VolumeType::Fat16((0, 1))),

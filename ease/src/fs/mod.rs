@@ -70,7 +70,7 @@ mod bpb;
 mod dir;
 mod fat;
 #[allow(dead_code)]
-mod file;
+pub(crate) mod file;
 mod mbr;
 pub(crate) mod volume;
 
@@ -78,9 +78,8 @@ pub(crate) mod volume;
 mod bench;
 
 use bpb::{Bpb, BpbError};
-use dir::FileInfo;
 use fat::FatChainClusterError;
-pub(crate) use file::DirHandle;
+pub(crate) use file::{DirHandle, FileHandle};
 use mbr::{Mbr, MbrError};
 
 const BOOT_SECTOR: u32 = 0;
@@ -96,13 +95,21 @@ pub enum FsError {
     Device(BlkError),
     Mbr(MbrError),
     FatChain(FatChainClusterError),
-    BadSectorFound,
+    AlreadyExists,
+    DirectoryInsteadOfFile,
+    DirectoryInvalid,
+    DirectoryIsCurrent,
+    DirectoryNotEmpty,
     DirFull,
     DiskFull,
+    NotFound,
+    OpeningForWriteButAlreadyOpen,
+    FileInsteadOfDirectory,
+    FileSizeMismatch,
     FreeSectorFound,
     InvalidName,
-    FileSizeMismatch,
-    NotFound,
+    ReadPastEndOfFile,
+    TooManyOpenFiles,
     UnknownFormat,
     VolumeExceedsPartition,
 }
@@ -137,6 +144,12 @@ pub(crate) enum VolumeType {
     Fat32(u32),        // Root directory file first cluster
 }
 
+impl From<FsError> for MountError {
+    fn from(e: FsError) -> Self {
+        MountError::Fs(e)
+    }
+}
+
 #[derive(Debug)]
 #[expect(dead_code)]
 pub(crate) enum MountError {
@@ -144,10 +157,10 @@ pub(crate) enum MountError {
     UnsupportedVolumeType,
 }
 
-impl From<FsError> for MountError {
-    fn from(e: FsError) -> Self {
-        MountError::Fs(e)
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Location {
+    sector: u32,
+    offset: usize,
 }
 
 pub(crate) fn init() -> Result<VolumeType, MountError> {

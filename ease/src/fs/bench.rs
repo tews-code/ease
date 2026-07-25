@@ -14,6 +14,7 @@
 use crate::bench;
 use crate::drivers::virtio::blk::bench_counters;
 use crate::fs::DirHandle;
+use crate::fs::file::{self, Access};
 use crate::fs::volume::with_volume;
 
 // Upper bounds on block ops per operation. Reads/writes are deterministic on a
@@ -48,9 +49,9 @@ fn fs_block_io_benchmarks() {
     let current_dir = DirHandle { start_cluster: 0 };
     // 1. Metadata lookup: scan the root directory for a file by name.
     let (reads, writes, cpu) = count(|| {
-        with_volume(|vol| {
-            vol.open(current_dir, "HELLO.TXT").unwrap();
-        });
+        // file::open takes the volume lock internally, so no with_volume here.
+        let entry = file::open(Access::Read, current_dir, "HELLO.TXT").unwrap();
+        file::close(&entry);
     });
     report("open(HELLO.TXT)", reads, writes, cpu);
     assert_eq!(writes, 0, "open should not write");
@@ -63,10 +64,9 @@ fn fs_block_io_benchmarks() {
     //    per 512 bytes of payload (128 data reads) plus a small, cache-amortised
     //    number of FAT-sector reads.
     let (reads, writes, cpu) = count(|| {
-        with_volume(|vol| {
-            let entry = vol.open(current_dir, "BIG.TXT").unwrap();
-            vol.read_file(&entry).unwrap();
-        });
+        let entry = file::open(Access::Read, current_dir, "BIG.TXT").unwrap();
+        with_volume(|vol| vol.read_file(&entry)).unwrap();
+        file::close(&entry);
     });
     report("read_file(BIG.TXT, 64KB)", reads, writes, cpu);
     assert!(

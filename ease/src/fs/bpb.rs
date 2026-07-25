@@ -49,7 +49,7 @@ use crate::fs::SECTOR_SIZE;
 
 use super::BOOT_SECTOR_SIG;
 use super::VolumeType;
-use super::dir::DIR_ENTRY_BYTES;
+use super::dir;
 
 const FAT_X86_JUMP_OPCODES: [u8; 2] = [0xEB, 0xE9];
 const FAT16_MIN: u32 = 4085;
@@ -113,7 +113,7 @@ impl Bpb {
         }
         let fat16_root_dir_capacity = u16::from_le_bytes([sector[17], sector[18]]) as u32; // Zero for FAT32
         let fat16_root_dir_sector_count =
-            (fat16_root_dir_capacity * DIR_ENTRY_BYTES as u32).div_ceil(SECTOR_SIZE as u32);
+            (fat16_root_dir_capacity * dir::ENTRY_BYTES as u32).div_ceil(SECTOR_SIZE as u32);
         let reserved_sector_count = u16::from_le_bytes([sector[14], sector[15]]) as u32;
         let fat_count = sector[16] as u32;
         let fat_sector_count = fat_count * sectors_per_fat;
@@ -240,7 +240,7 @@ mod test {
             panic!("expecting FAT16");
         };
         assert_eq!(
-            root_dir_sector_count as usize * SECTOR_SIZE / DIR_ENTRY_BYTES,
+            root_dir_sector_count as usize * SECTOR_SIZE / dir::ENTRY_BYTES,
             512
         );
         assert_eq!(bpb.total_sectors, 32768);

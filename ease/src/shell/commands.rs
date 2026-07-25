@@ -5,6 +5,7 @@ use alloc::string::String;
 use core::fmt::Write;
 use core::ops::ControlFlow;
 
+use crate::fs::file;
 use crate::fs::{DirHandle, FsError};
 #[cfg(feature = "paint-stack")]
 use crate::kernel::sched;
@@ -14,26 +15,53 @@ use crate::shell::{Args, Console, ascii};
 /// Reads file content to console
 #[allow(dead_code)]
 pub fn cat(console: &mut Console, args: &Args) {
-    let current_dir = DirHandle { start_cluster: 0 };
+    let dir = DirHandle { start_cluster: 0 };
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.open(current_dir, filename) {
-            Ok(entry) => match vol.read_file(&entry) {
-                Ok(content) => match core::str::from_utf8(&content) {
-                    Ok(text) => {
-                        let _ = write!(console, "{}", text);
-                    }
-                    Err(_) => {
-                        let _ = writeln!(console, "cat: file is not valid text");
-                    }
-                },
-                Err(_) => {
-                    let _ = writeln!(console, "cat: unable to read file");
-                }
-            },
+        let mut file_handle = match file::open(file::Access::Read, dir, filename) {
+            Ok(file_handle) => file_handle,
             Err(_) => {
-                let _ = write!(console, "cat: {}: No such file or directory", filename);
+                let _ = writeln!(console, "cat: could not open file");
+                break;
             }
-        })
+        };
+        let mut buf = [0u8; 256];
+        let mut remainder_byte_count = 0;
+        loop {
+            let num_bytes = match file::read_at(&mut file_handle, &mut buf[remainder_byte_count..])
+            {
+                Ok(num_bytes) => num_bytes,
+                Err(fs_error) => {
+                    let _ = writeln!(console, "cat: error {:?}", fs_error);
+                    break;
+                }
+            };
+            if num_bytes == 0 {
+                break;
+            }
+            // Print out the bytes that have arrived so far
+            let filled_bytes = remainder_byte_count + num_bytes;
+            match core::str::from_utf8(&buf[..filled_bytes]) {
+                Ok(text) => {
+                    let _ = write!(console, "{}", text);
+                    remainder_byte_count = 0;
+                }
+                Err(e) => {
+                    if e.error_len().is_some() {
+                        let _ = writeln!(console, "cat: file is not valid text");
+                        break;
+                    } else {
+                        let valid_bytes = e.valid_up_to();
+                        let valid_text = core::str::from_utf8(&buf[..valid_bytes])
+                            .expect("already validated that these bytes");
+                        let _ = write!(console, "{}", valid_text);
+                        remainder_byte_count = filled_bytes - valid_bytes;
+                        // Copy the remainder to the beginning for the next read
+                        buf.copy_within(valid_bytes..filled_bytes, 0);
+                    }
+                }
+            }
+        }
+        file::close(&file_handle);
     }
 }
 
@@ -74,69 +102,71 @@ pub fn help(console: &mut Console) {
 pub fn hexdump(console: &mut Console, args: &Args) {
     // Open the file
     for filename in args.positionals.as_slice().iter() {
-        let current_dir = DirHandle { start_cluster: 0 };
-        crate::fs::volume::with_volume(|vol| match vol.open(current_dir, filename) {
-            Ok(entry) => match vol.read_file(&entry) {
-                Ok(content) => {
-                    if args.has_flag(b'C') {
-                        // byte-by-byte with ASCII column
-                        // Loop through content 16 bytes at a time
-                        for (i, chunk) in content.chunks(16).enumerate() {
-                            let offset = i * 16;
-                            // chunk is a &[u8], length 16 (or less for the last one)
-                            // Print offset
-                            let _ = write!(console, "{:08x}  ", offset);
+        let dir = DirHandle { start_cluster: 0 }; // For now all files in root
+        let file = match crate::fs::file::open(file::Access::Read, dir, filename) {
+            Ok(file) => file,
+            Err(_) => {
+                let _ = write!(console, "hexdump: {}: Error opening file.", filename);
+                break;
+            }
+        };
+        crate::fs::volume::with_volume(|vol| match vol.read_file(&file) {
+            Ok(content) => {
+                if args.has_flag(b'C') {
+                    // byte-by-byte with ASCII column
+                    // Loop through content 16 bytes at a time
+                    for (i, chunk) in content.chunks(16).enumerate() {
+                        let offset = i * 16;
+                        // chunk is a &[u8], length 16 (or less for the last one)
+                        // Print offset
+                        let _ = write!(console, "{:08x}  ", offset);
 
-                            // Print hex bytes
-                            for (j, &byte) in chunk.iter().enumerate() {
-                                let _ = write!(console, "{:02x} ", byte);
-                                if j == 7 {
-                                    let _ = write!(console, " ");
-                                }
+                        // Print hex bytes
+                        for (j, &byte) in chunk.iter().enumerate() {
+                            let _ = write!(console, "{:02x} ", byte);
+                            if j == 7 {
+                                let _ = write!(console, " ");
                             }
-
-                            // Pad if chunk is shorter than 16 (last line)
-                            for j in chunk.len()..16 {
-                                let _ = write!(console, "   ");
-                                if j == 7 {
-                                    let _ = write!(console, " ");
-                                }
-                            }
-
-                            // Print ASCII column
-                            let _ = write!(console, " |");
-                            for &byte in chunk {
-                                let ch = if byte.is_ascii_graphic() || byte == b' ' {
-                                    byte as char
-                                } else {
-                                    '.'
-                                };
-                                let _ = write!(console, "{}", ch);
-                            }
-                            let _ = writeln!(console, "|");
                         }
-                    } else {
-                        for (i, chunk) in content.chunks(16).enumerate() {
-                            let offset = i * 16;
-                            let _ = write!(console, "{:07x}", offset);
-                            for word in chunk.chunks(2) {
-                                if word.len() == 2 {
-                                    let val = u16::from_le_bytes([word[0], word[1]]);
-                                    let _ = write!(console, " {:04x}", val);
-                                } else {
-                                    let _ = write!(console, " {:02x}", word[0]);
-                                }
+
+                        // Pad if chunk is shorter than 16 (last line)
+                        for j in chunk.len()..16 {
+                            let _ = write!(console, "   ");
+                            if j == 7 {
+                                let _ = write!(console, " ");
                             }
-                            let _ = writeln!(console);
                         }
+
+                        // Print ASCII column
+                        let _ = write!(console, " |");
+                        for &byte in chunk {
+                            let ch = if byte.is_ascii_graphic() || byte == b' ' {
+                                byte as char
+                            } else {
+                                '.'
+                            };
+                            let _ = write!(console, "{}", ch);
+                        }
+                        let _ = writeln!(console, "|");
+                    }
+                } else {
+                    for (i, chunk) in content.chunks(16).enumerate() {
+                        let offset = i * 16;
+                        let _ = write!(console, "{:07x}", offset);
+                        for word in chunk.chunks(2) {
+                            if word.len() == 2 {
+                                let val = u16::from_le_bytes([word[0], word[1]]);
+                                let _ = write!(console, " {:04x}", val);
+                            } else {
+                                let _ = write!(console, " {:02x}", word[0]);
+                            }
+                        }
+                        let _ = writeln!(console);
                     }
                 }
-                Err(_) => {
-                    let _ = writeln!(console, "hexdump: unable to read file");
-                }
-            },
+            }
             Err(_) => {
-                let _ = write!(console, "hexdump: {}: No such file or directory", filename);
+                let _ = write!(console, "hexdump: {}: Could not read file.", filename);
             }
         });
     }

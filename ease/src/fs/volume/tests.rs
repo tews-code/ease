@@ -8,54 +8,57 @@
 //! builds clean.
 
 use super::*;
+use crate::fs::file::{self, Access};
+use alloc::vec::Vec;
+
+const ROOT: DirHandle = DirHandle { start_cluster: 0 };
+
+/// Directory-entry lookup — the backend of the (now file-module) `open`.
+/// Use for tests that only inspect the entry (size, existence), so they can
+/// stay inside a single `with_volume` closure.
+fn find_size(name: &str) -> Result<u32, FsError> {
+    with_volume(|vol| vol.find_file_dir_entry(ROOT, name)).map(|(_, fi)| fi.file_size)
+}
+
+/// Open `name`, read the whole file via `read_file`, then close.
+///
+/// `file::open` takes the volume lock internally, so it must run OUTSIDE
+/// `with_volume`; the returned `FileHandle` is what the volume read paths
+/// (`read_file`, `read_at`) operate on.
+fn read_whole(name: &str) -> Vec<u8> {
+    let handle = file::open(Access::Read, ROOT, name).unwrap();
+    let content = with_volume(|vol| vol.read_file(&handle)).unwrap();
+    file::close(&handle);
+    content
+}
 
 // =========================================================================
-// Volume::open tests
+// open (dir-entry lookup) tests
 // =========================================================================
 
 #[test_case]
 fn open_finds_hello_txt() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "HELLO.TXT").unwrap();
-        assert!(entry.file_size > 0);
-    });
+    assert!(find_size("HELLO.TXT").unwrap() > 0);
 }
 
 #[test_case]
 fn open_case_insensitive() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "hello.txt").unwrap();
-        assert!(entry.file_size > 0);
-    });
+    assert!(find_size("hello.txt").unwrap() > 0);
 }
 
 #[test_case]
 fn open_not_found() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let result = vol.open(current_dir, "NOPE.TXT");
-        assert!(matches!(result, Err(FsError::NotFound)));
-    });
+    assert!(matches!(find_size("NOPE.TXT"), Err(FsError::NotFound)));
 }
 
 #[test_case]
 fn open_empty_file() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "EMPTY.TXT").unwrap();
-        assert_eq!(entry.file_size, 0);
-    });
+    assert_eq!(find_size("EMPTY.TXT").unwrap(), 0);
 }
 
 #[test_case]
 fn open_no_extension() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "SHORT").unwrap();
-        assert!(entry.file_size > 0);
-    });
+    assert!(find_size("SHORT").unwrap() > 0);
 }
 
 // =========================================================================
@@ -64,87 +67,99 @@ fn open_no_extension() {
 
 #[test_case]
 fn read_file_hello_txt() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "HELLO.TXT").unwrap();
-        let content = vol.read_file(&entry).unwrap();
-        let text = core::str::from_utf8(&content).unwrap();
-        assert_eq!(text, "Text file contents\n");
-    });
+    let content = read_whole("HELLO.TXT");
+    let text = core::str::from_utf8(&content).unwrap();
+    assert_eq!(text, "Text file contents\n");
 }
 
 #[test_case]
 fn read_file_empty() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "EMPTY.TXT").unwrap();
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(content.len(), 0);
-    });
+    assert_eq!(read_whole("EMPTY.TXT").len(), 0);
 }
 
 #[test_case]
 fn read_file_short() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "SHORT").unwrap();
-        let content = vol.read_file(&entry).unwrap();
-        let text = core::str::from_utf8(&content).unwrap();
-        assert_eq!(text, "This is a file with a short name.\n");
-    });
+    let content = read_whole("SHORT");
+    let text = core::str::from_utf8(&content).unwrap();
+    assert_eq!(text, "This is a file with a short name.\n");
 }
 
 #[test_case]
 fn read_file_size_matches_dir_entry() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "HELLO.TXT").unwrap();
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(content.len(), entry.file_size as usize);
-    });
+    let content = read_whole("HELLO.TXT");
+    assert_eq!(content.len(), find_size("HELLO.TXT").unwrap() as usize);
 }
 
 #[test_case]
 fn read_file_longname() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "LONGNAME.END").unwrap();
-        let content = vol.read_file(&entry).unwrap();
-        let text = core::str::from_utf8(&content).unwrap();
-        assert_eq!(text, "This is a file with a long name.\n");
-    });
+    let content = read_whole("LONGNAME.END");
+    let text = core::str::from_utf8(&content).unwrap();
+    assert_eq!(text, "This is a file with a long name.\n");
 }
 
 #[test_case]
 fn read_file_64kb() {
-    let current_dir = DirHandle { start_cluster: 0 };
     // 64KB file spans many clusters — tests cluster chain following at scale
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "BIG.TXT").unwrap();
-        assert_eq!(entry.file_size, 64 * 1024);
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(content.len(), 64 * 1024);
-        // Verify first line content
-        let first_line_end = content.iter().position(|&b| b == b'\n').unwrap();
-        let first_line = core::str::from_utf8(&content[..first_line_end]).unwrap();
-        assert_eq!(
-            first_line,
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 abcdefghijklmnopqrstuvwxyz"
+    assert_eq!(find_size("BIG.TXT").unwrap(), 64 * 1024);
+    let content = read_whole("BIG.TXT");
+    assert_eq!(content.len(), 64 * 1024);
+    // Verify first line content
+    let first_line_end = content.iter().position(|&b| b == b'\n').unwrap();
+    let first_line = core::str::from_utf8(&content[..first_line_end]).unwrap();
+    assert_eq!(
+        first_line,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ 0123456789 abcdefghijklmnopqrstuvwxyz"
+    );
+    // Verify last byte
+    assert_eq!(content[content.len() - 1], b'X');
+}
+
+#[test_case]
+fn read_at_reassembles_across_sector_and_cluster_boundaries() {
+    // BIG.TXT is 64 KB: 128 sectors spread across many 2048-byte clusters.
+    // Reading it in 100-byte chunks (deliberately not a divisor of the 512
+    // sector or the 2048 cluster) forces `read_at` to hand back partial
+    // buffers whose edges land mid-sector and mid-cluster. A defect in the
+    // sector-within-cluster index or the FAT-chain-follow at a cluster
+    // boundary corrupts bytes exactly at those offsets, so reassembling the
+    // stream and comparing it against `read_file` (an independent read path,
+    // via `read_sector_uncached`) pins the whole `read_at` boundary logic.
+    // `read_file` is the oracle, but it holds the whole 64 KB file in heap —
+    // so compare each read_at chunk against it in-place and never accumulate a
+    // second full copy (only one 64 KB buffer plus the stack chunk is live).
+    let expected = read_whole("BIG.TXT");
+    assert_eq!(expected.len(), 64 * 1024);
+
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    let mut buf = [0u8; 100];
+    let mut offset = 0usize;
+    loop {
+        let n = file::read_at(&mut handle, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        assert!(
+            buf[..n] == expected[offset..offset + n],
+            "read_at diverges from read_file starting at byte {}",
+            offset
         );
-        // Verify last byte
-        assert_eq!(content[content.len() - 1], b'X');
-    });
+        offset += n;
+    }
+    file::close(&handle);
+
+    assert_eq!(
+        offset,
+        expected.len(),
+        "read_at stopped short at byte {}",
+        offset
+    );
 }
 
 #[test_case]
 fn open_multi_cluster_file() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    // The PDF is ~7.9MB — too large to read into heap, but verify open finds it
-    // and the dir entry has the expected size.
-    with_volume(|vol| {
-        let entry = vol.open(current_dir, "RP-008~1.PDF").unwrap();
-        assert_eq!(entry.file_size, 7_968_417);
-    });
+    // The PDF is ~7.9MB — too large to read into heap, but verify the dir
+    // entry is found and has the expected size.
+    assert_eq!(find_size("RP-008~1.PDF").unwrap(), 7_968_417);
 }
 
 #[test_case]
@@ -246,32 +261,20 @@ fn disk_image_fat_entry_reserved() {
 
 #[test_case]
 fn touch_creates_file() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.create_empty_file(current_dir, "NEW.TXT").unwrap();
-        let entry = vol.open(current_dir, "NEW.TXT").unwrap();
-        assert_eq!(entry.file_size, 0);
-    });
+    with_volume(|vol| vol.create_empty_file(ROOT, "NEW.TXT")).unwrap();
+    assert_eq!(find_size("NEW.TXT").unwrap(), 0);
 }
 
 #[test_case]
 fn touch_case_insensitive_open() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.create_empty_file(current_dir, "LOWER.TXT").unwrap();
-        let entry = vol.open(current_dir, "lower.txt").unwrap();
-        assert_eq!(entry.file_size, 0);
-    });
+    with_volume(|vol| vol.create_empty_file(ROOT, "LOWER.TXT")).unwrap();
+    assert_eq!(find_size("lower.txt").unwrap(), 0);
 }
 
 #[test_case]
 fn touch_no_extension() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.create_empty_file(current_dir, "NOEXT").unwrap();
-        let entry = vol.open(current_dir, "NOEXT").unwrap();
-        assert_eq!(entry.file_size, 0);
-    });
+    with_volume(|vol| vol.create_empty_file(ROOT, "NOEXT")).unwrap();
+    assert_eq!(find_size("NOEXT").unwrap(), 0);
 }
 
 #[test_case]
@@ -307,16 +310,10 @@ fn touch_created_file_visible_in_ls() {
 
 #[test_case]
 fn delete_empty_file() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.create_empty_file(current_dir, "DEL1.TXT").unwrap();
-        assert!(vol.open(current_dir, "DEL1.TXT").is_ok());
-        vol.delete_file(current_dir, "DEL1.TXT").unwrap();
-        assert!(matches!(
-            vol.open(current_dir, "DEL1.TXT"),
-            Err(FsError::NotFound)
-        ));
-    });
+    with_volume(|vol| vol.create_empty_file(ROOT, "DEL1.TXT")).unwrap();
+    assert!(find_size("DEL1.TXT").is_ok());
+    with_volume(|vol| vol.delete_file(ROOT, "DEL1.TXT")).unwrap();
+    assert!(matches!(find_size("DEL1.TXT"), Err(FsError::NotFound)));
 }
 
 #[test_case]
@@ -333,15 +330,15 @@ fn delete_file_with_content() {
     let current_dir = DirHandle { start_cluster: 0 };
     // DELETE.ME exists solely for this test — no other test depends on it
     with_volume(|vol| {
-        let entry = vol.open(current_dir, "DELETE.ME").unwrap();
-        let first_cluster = entry.first_cluster;
+        let (_, fi) = vol.find_file_dir_entry(current_dir, "DELETE.ME").unwrap();
+        let first_cluster = fi.first_cluster;
         assert!(first_cluster >= 2);
 
         vol.delete_file(current_dir, "DELETE.ME").unwrap();
 
         // File should no longer be found
         assert!(matches!(
-            vol.open(current_dir, "DELETE.ME"),
+            vol.find_file_dir_entry(current_dir, "DELETE.ME"),
             Err(FsError::NotFound)
         ));
 
@@ -357,15 +354,13 @@ fn delete_file_with_content() {
 
 #[test_case]
 fn delete_then_recreate() {
-    let current_dir = DirHandle { start_cluster: 0 };
     with_volume(|vol| {
-        vol.create_empty_file(current_dir, "REUSE.TXT").unwrap();
-        vol.delete_file(current_dir, "REUSE.TXT").unwrap();
+        vol.create_empty_file(ROOT, "REUSE.TXT").unwrap();
+        vol.delete_file(ROOT, "REUSE.TXT").unwrap();
         // Slot marked 0xE5 should be reusable
-        vol.create_empty_file(current_dir, "REUSE.TXT").unwrap();
-        let entry = vol.open(current_dir, "REUSE.TXT").unwrap();
-        assert_eq!(entry.file_size, 0);
+        vol.create_empty_file(ROOT, "REUSE.TXT").unwrap();
     });
+    assert_eq!(find_size("REUSE.TXT").unwrap(), 0);
 }
 
 // =========================================================================
@@ -402,69 +397,45 @@ fn set_fat_entry_roundtrip() {
 
 #[test_case]
 fn write_file_and_read_back() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.write_file(current_dir, "WTEST1.TXT", b"hello world\n")
-            .unwrap();
-        let entry = vol.open(current_dir, "WTEST1.TXT").unwrap();
-        assert_eq!(entry.file_size, 12);
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(&content, b"hello world\n");
-    });
+    with_volume(|vol| vol.write_file(ROOT, "WTEST1.TXT", b"hello world\n")).unwrap();
+    assert_eq!(find_size("WTEST1.TXT").unwrap(), 12);
+    assert_eq!(&read_whole("WTEST1.TXT"), b"hello world\n");
 }
 
 #[test_case]
 fn write_file_empty_data() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.write_file(current_dir, "WTEST2.TXT", b"").unwrap();
-        let entry = vol.open(current_dir, "WTEST2.TXT").unwrap();
-        assert_eq!(entry.file_size, 0);
-    });
+    with_volume(|vol| vol.write_file(ROOT, "WTEST2.TXT", b"")).unwrap();
+    assert_eq!(find_size("WTEST2.TXT").unwrap(), 0);
 }
 
 #[test_case]
 fn write_file_overwrite() {
-    let current_dir = DirHandle { start_cluster: 0 };
-    with_volume(|vol| {
-        vol.write_file(current_dir, "WTEST3.TXT", b"first").unwrap();
-        vol.write_file(current_dir, "WTEST3.TXT", b"second")
-            .unwrap();
-        let entry = vol.open(current_dir, "WTEST3.TXT").unwrap();
-        assert_eq!(entry.file_size, 6);
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(&content, b"second");
-    });
+    with_volume(|vol| vol.write_file(ROOT, "WTEST3.TXT", b"first")).unwrap();
+    with_volume(|vol| vol.write_file(ROOT, "WTEST3.TXT", b"second")).unwrap();
+    assert_eq!(find_size("WTEST3.TXT").unwrap(), 6);
+    assert_eq!(&read_whole("WTEST3.TXT"), b"second");
 }
 
 #[test_case]
 fn write_file_multi_sector() {
-    let current_dir = DirHandle { start_cluster: 0 };
     // Write more than one sector (512 bytes)
-    with_volume(|vol| {
-        let data = [b'A'; 1024];
-        vol.write_file(current_dir, "WTEST4.TXT", &data).unwrap();
-        let entry = vol.open(current_dir, "WTEST4.TXT").unwrap();
-        assert_eq!(entry.file_size, 1024);
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(content.len(), 1024);
-        assert!(content.iter().all(|&b| b == b'A'));
-    });
+    let data = [b'A'; 1024];
+    with_volume(|vol| vol.write_file(ROOT, "WTEST4.TXT", &data)).unwrap();
+    assert_eq!(find_size("WTEST4.TXT").unwrap(), 1024);
+    let content = read_whole("WTEST4.TXT");
+    assert_eq!(content.len(), 1024);
+    assert!(content.iter().all(|&b| b == b'A'));
 }
 
 #[test_case]
 fn write_file_multi_cluster() {
-    let current_dir = DirHandle { start_cluster: 0 };
     // Write more than one cluster (sectors_per_cluster * 512 = 2048 bytes)
-    with_volume(|vol| {
-        let data = [b'B'; 4096];
-        vol.write_file(current_dir, "WTEST5.TXT", &data).unwrap();
-        let entry = vol.open(current_dir, "WTEST5.TXT").unwrap();
-        assert_eq!(entry.file_size, 4096);
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(content.len(), 4096);
-        assert!(content.iter().all(|&b| b == b'B'));
-    });
+    let data = [b'B'; 4096];
+    with_volume(|vol| vol.write_file(ROOT, "WTEST5.TXT", &data)).unwrap();
+    assert_eq!(find_size("WTEST5.TXT").unwrap(), 4096);
+    let content = read_whole("WTEST5.TXT");
+    assert_eq!(content.len(), 4096);
+    assert!(content.iter().all(|&b| b == b'B'));
 }
 
 #[test_case]
@@ -478,16 +449,16 @@ fn write_file_invalid_name() {
 
 #[test_case]
 fn touch_does_not_overwrite_existing() {
-    let current_dir = DirHandle { start_cluster: 0 };
     with_volume(|vol| {
-        vol.write_file(current_dir, "WTEST6.TXT", b"keep this")
-            .unwrap();
-        vol.create_empty_file(current_dir, "WTEST6.TXT").unwrap();
-        let entry = vol.open(current_dir, "WTEST6.TXT").unwrap();
-        assert_eq!(entry.file_size, 9); // unchanged
-        let content = vol.read_file(&entry).unwrap();
-        assert_eq!(&content, b"keep this");
+        vol.write_file(ROOT, "WTEST6.TXT", b"keep this").unwrap();
+        // create_empty_file refuses to clobber an existing file
+        assert!(matches!(
+            vol.create_empty_file(ROOT, "WTEST6.TXT"),
+            Err(FsError::AlreadyExists)
+        ));
     });
+    assert_eq!(find_size("WTEST6.TXT").unwrap(), 9); // unchanged
+    assert_eq!(&read_whole("WTEST6.TXT"), b"keep this");
 }
 
 // =========================================================================
@@ -551,37 +522,37 @@ fn dir_iter_ignores_stale_bytes_beyond_terminator() {
         for item in vol.dir_iter(root).unwrap() {
             let item = item.unwrap();
             if matches!(item.kind, DirEntryKind::Empty) {
-                empty_loc = Some(item.slot);
+                empty_loc = Some(item.location);
             }
         }
         let empty_loc = empty_loc.expect("root dir should have a free slot");
         // The slot after the terminator; may roll into the next sector
-        let (sector, offset) = if empty_loc.offset + DIR_ENTRY_BYTES == SECTOR_SIZE {
+        let (sector, offset) = if empty_loc.offset + dir::ENTRY_BYTES == SECTOR_SIZE {
             (empty_loc.sector + 1, 0)
         } else {
-            (empty_loc.sector, empty_loc.offset + DIR_ENTRY_BYTES)
+            (empty_loc.sector, empty_loc.offset + dir::ENTRY_BYTES)
         };
         // Plant the phantom entry, keeping the original bytes
         let mut buf = *vol.read_sector(sector).unwrap();
-        let mut original = [0u8; DIR_ENTRY_BYTES];
-        original.copy_from_slice(&buf[offset..offset + DIR_ENTRY_BYTES]);
+        let mut original = [0u8; dir::ENTRY_BYTES];
+        original.copy_from_slice(&buf[offset..offset + dir::ENTRY_BYTES]);
         let phantom = FileInfo {
             name: *b"PHANTOM ",
             extension: *b"TXT",
-            attributes: ATTR_ARCHIVE,
+            attributes: dir::ATTR_ARCHIVE,
             first_cluster: 2,
             file_size: 5,
         };
-        buf[offset..offset + DIR_ENTRY_BYTES]
+        buf[offset..offset + dir::ENTRY_BYTES]
             .copy_from_slice(&phantom.as_bytes(vol.bpb.volume_type));
         vol.write_sector_uncached(sector, &buf).unwrap();
 
-        let result = vol.open(root, "PHANTOM.TXT");
+        let result = vol.find_file_dir_entry(root, "PHANTOM.TXT");
 
         // Restore the on-disk bytes before asserting so a green run
         // leaves the image untouched for later tests
         let _ = vol.modify_sector(sector, |buf| {
-            buf[offset..offset + DIR_ENTRY_BYTES].copy_from_slice(&original);
+            buf[offset..offset + dir::ENTRY_BYTES].copy_from_slice(&original);
         });
         assert!(
             matches!(result, Err(FsError::NotFound)),
@@ -604,7 +575,7 @@ fn dir_iter_walks_into_second_root_sector() {
         for (i, slot_sector) in slot_sectors.iter_mut().enumerate() {
             let name = format!("SEC{i:02}.TXT");
             vol.create_empty_file(root, &name).unwrap();
-            let (slot, _) = vol.find_dir_entry_location(root, &name).unwrap();
+            let (slot, _) = vol.find_file_dir_entry(root, &name).unwrap();
             *slot_sector = slot.sector;
         }
         // The slots must span at least two sectors
@@ -615,10 +586,10 @@ fn dir_iter_walks_into_second_root_sector() {
         // The recorded slot must be honest: the entry's bytes must
         // really be at that sector and offset on disk
         let last_name = format!("SEC{:02}.TXT", FILES - 1);
-        let (slot, _) = vol.find_dir_entry_location(root, &last_name).unwrap();
+        let (slot, _) = vol.find_file_dir_entry(root, &last_name).unwrap();
         let mut buf = [0u8; SECTOR_SIZE];
         vol.read_sector_uncached(slot.sector, &mut buf).unwrap();
-        let raw: [u8; DIR_ENTRY_BYTES] = buf[slot.offset..slot.offset + DIR_ENTRY_BYTES]
+        let raw: [u8; dir::ENTRY_BYTES] = buf[slot.offset..slot.offset + dir::ENTRY_BYTES]
             .try_into()
             .unwrap();
         match DirEntryKind::parse(raw, vol.bpb.volume_type) {
