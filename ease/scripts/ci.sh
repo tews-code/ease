@@ -16,6 +16,11 @@
 #                                            # `trace` feature (scheduler
 #                                            # trace points + panic dump);
 #                                            # off by default
+#   ./scripts/ci.sh --fat32                  # build the FAT32 (MBR) test disk
+#                                            # instead of the default FAT16
+#                                            # superfloppy (see mkdisk.sh); the
+#                                            # kernel can't mount FAT32 yet, so
+#                                            # this is for FAT32 development
 #   ./scripts/ci.sh --help                   # this message
 
 set -e
@@ -23,14 +28,16 @@ set -e
 TEST_SET="test-all"
 PAINT_STACK=0
 TRACE=0
+FS_TYPE="fat16"
 
 for arg in "$@"; do
     case "$arg" in
         --test=*)      TEST_SET="${arg#*=}" ;;
         --paint-stack) PAINT_STACK=1 ;;
         --trace)       TRACE=1 ;;
+        --fat32)       FS_TYPE="fat32" ;;
         --help|-h)
-            sed -n '2,19p' "$0"
+            sed -n '2,24p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -71,6 +78,7 @@ RISCV_FEATURES="$FEATURES"
 CLIPPY_EXTRA="-A dead-code"
 
 echo "Test set                : $TEST_SET"
+echo "Disk image              : $FS_TYPE"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 [ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
 [ $TRACE -eq 1 ] && echo "Tracing                 : on (trace feature in QEMU stage)"
@@ -80,7 +88,7 @@ cargo fmt
 
 echo ""
 echo "=== Disk Image ==="
-./scripts/mkdisk.sh
+./scripts/mkdisk.sh "$FS_TYPE"
 
 echo ""
 echo "=== Clippy ==="
@@ -114,7 +122,7 @@ echo "=== QEMU Benchmarks ==="
 # directly. All of these run here under `set -e`, so a regression fails CI.
 # Fresh disk because the virtio and FS benchmarks write blocks.
 # Focused benchmark iteration: ./scripts/ci.sh --test=bench
-./scripts/mkdisk.sh
+./scripts/mkdisk.sh "$FS_TYPE"
 cargo test --bin ease --no-default-features --features "bench"
 
 echo ""
