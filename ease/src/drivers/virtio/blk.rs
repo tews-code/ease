@@ -297,6 +297,7 @@ mod test {
     }
 
     #[test_case]
+    #[cfg(feature = "fat16")]
     fn capacity_matches_disk_image() {
         with_blk_dev(|blk| {
             assert_eq!(blk.block_count(), 32768);
@@ -304,6 +305,15 @@ mod test {
     }
 
     #[test_case]
+    #[cfg(feature = "fat32")]
+    fn capacity_matches_disk_image() {
+        with_blk_dev(|blk| {
+            assert_eq!(blk.block_count(), 196608);
+        });
+    }
+
+    #[test_case]
+    #[cfg(feature = "fat16")]
     fn read_block_zero_fat16_signature() {
         // Block 0 of a FAT16 volume has "FAT16" at byte offset 54
         let mut buf = [0u8; blk::BLOCK_SIZE];
@@ -312,7 +322,35 @@ mod test {
     }
 
     #[test_case]
+    #[cfg(feature = "fat32")]
+    fn read_block_zero_mbr_fat32_partition() {
+        // The FAT32 image is MBR-partitioned, so block 0 is the MBR, not a BPB:
+        // the 0x55AA boot signature plus a partition-1 entry of type 0x0C
+        // (FAT32 LBA) starting at LBA 2048. The FAT32 BPB — with "FAT32   " at
+        // offset 82 — lives at that partition start.
+        let mut mbr = [0u8; blk::BLOCK_SIZE];
+        read_block(0, &mut mbr).unwrap();
+        assert_eq!(
+            [mbr[510], mbr[511]],
+            [0x55, 0xAA],
+            "missing MBR boot signature"
+        );
+        // Partition-table entry 1 starts at offset 446: type byte at +4, LBA at +8.
+        assert_eq!(mbr[446 + 4], 0x0C, "partition 1 should be FAT32 (LBA)");
+        let lba = u32::from_le_bytes([mbr[446 + 8], mbr[446 + 9], mbr[446 + 10], mbr[446 + 11]]);
+        assert_eq!(lba, 2048, "partition should start at LBA 2048");
+        // The BPB at the partition carries the FAT32 filesystem-type string.
+        let mut bpb = [0u8; blk::BLOCK_SIZE];
+        read_block(lba, &mut bpb).unwrap();
+        assert_eq!(&bpb[82..90], b"FAT32   ", "partition BPB should be FAT32");
+    }
+
+    #[test_case]
+    #[cfg(any(feature = "fat16", feature = "fat32"))]
     fn write_and_read_back() {
+        // Block 1 is a safe scratch block on both images: reserved padding on
+        // the FAT16 superfloppy, and MBR gap (before the LBA-2048 partition) on
+        // the FAT32 image — so this pure block round-trip runs on either.
         let s = "hello from kernel!!!";
         let mut buf = [0u8; blk::BLOCK_SIZE];
         buf[..s.len()].copy_from_slice(s.as_bytes());

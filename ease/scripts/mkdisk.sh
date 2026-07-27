@@ -2,21 +2,19 @@
 # Create disk image for EASE
 #
 # Usage:
-#   ./mkdisk.sh          # partitionless FAT16 superfloppy (default)
-#   ./mkdisk.sh fat16    # same
-#   ./mkdisk.sh fat32    # MBR + single FAT32 (LBA) partition
+#   ./mkdisk.sh          # MBR + single FAT32 (LBA) partition (default)
+#   ./mkdisk.sh fat32    # same
+#   ./mkdisk.sh fat16    # partitionless FAT16 superfloppy
 #
-# FAT16 is a "superfloppy": the BPB sits at sector 0 with no partition table,
-# which is what the kernel mounts today. FAT32 is MBR-partitioned with one
-# FAT32 partition at LBA 2048; it will NOT mount until the kernel gains FAT32
-# support (find_partition currently rejects it as Fat32Detected). It exists so
-# that FAT32 work can iterate against a real image via `ci.sh --fat32`.
+# FAT32 is MBR-partitioned with one FAT32 partition at LBA 2048. FAT16 is a
+# "superfloppy": the BPB sits at sector 0 with no partition table. The kernel
+# mounts both; ci.sh runs FAT32 by default and FAT16 via `ci.sh --fat16`.
 
 set -e  # Exit on failure
 
 cd "$(dirname "$0")"/..
 
-FS_TYPE="${1:-fat16}"
+FS_TYPE="${1:-fat32}"
 
 # Copy the shared test-file set into an mtools image spec:
 #   $1 = "disk.img"               (superfloppy)

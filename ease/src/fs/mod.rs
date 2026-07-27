@@ -79,7 +79,7 @@ mod bench;
 
 use bpb::{Bpb, BpbError};
 use fat::FatChainClusterError;
-pub(crate) use file::{DirHandle, FileHandle};
+pub(crate) use file::FileHandle;
 use mbr::{Mbr, MbrError};
 
 const BOOT_SECTOR: u32 = 0;
@@ -102,6 +102,7 @@ pub enum FsError {
     DirectoryNotEmpty,
     DirFull,
     DiskFull,
+    FileNotOpen,
     NotFound,
     OpeningForWriteButAlreadyOpen,
     FileInsteadOfDirectory,
@@ -138,10 +139,11 @@ impl From<FatChainClusterError> for FsError {
     }
 }
 
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub(crate) enum VolumeType {
-    Fat16((u32, u32)), // Root directory start sector and root dir num sectors
-    Fat32(u32),        // Root directory file first cluster
+#[derive(Debug)]
+#[expect(dead_code)]
+pub(crate) enum MountError {
+    Fs(FsError),
+    UnsupportedVolumeType,
 }
 
 impl From<FsError> for MountError {
@@ -150,11 +152,17 @@ impl From<FsError> for MountError {
     }
 }
 
-#[derive(Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub(crate) enum VolumeType {
+    Fat16((u32, u32)), // Root directory start sector and root dir num sectors
+    Fat32(u32),        // Root directory file first cluster
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[expect(dead_code)]
-pub(crate) enum MountError {
-    Fs(FsError),
-    UnsupportedVolumeType,
+pub(crate) enum Dir {
+    Root,        // Root directory details are held in VolumeType
+    SubDir(u32), // First cluster
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,14 +174,19 @@ struct Location {
 pub(crate) fn init() -> Result<VolumeType, MountError> {
     let (lba, bpb) = mount()?;
     if matches!(bpb.volume_type, VolumeType::Fat16(_)) {
-        volume::fat16_init(lba, bpb);
-        Ok(VolumeType::Fat16((0, 0)))
-    } else {
-        Err(MountError::UnsupportedVolumeType)
+        volume::fat_init(lba, bpb);
+        return Ok(VolumeType::Fat16((0, 0)));
     }
+    if matches!(bpb.volume_type, VolumeType::Fat32(_)) {
+        volume::fat_init(lba, bpb);
+        return Ok(VolumeType::Fat32(0));
+    }
+    Err(MountError::UnsupportedVolumeType)
 }
 
-// Attempt to mount the storage device
+/// Attempt to mount the volume
+///
+/// Returns the LBA and the BPB on success
 fn mount() -> Result<(u32, Bpb), FsError> {
     let mut buf = [0u8; blk::BLOCK_SIZE];
     read_block(BOOT_SECTOR, &mut buf)?;

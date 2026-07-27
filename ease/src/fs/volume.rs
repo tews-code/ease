@@ -4,6 +4,7 @@
 // Methods do not take the lock
 // See file.rs for API
 
+#[cfg(test)]
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
@@ -14,7 +15,9 @@ use super::blockcache::BlockCache;
 use super::bpb::Bpb;
 use super::dir::{self, DirEntry, DirEntryKind, FileInfo};
 use super::fat::{self, FatEntry};
-use super::{DirHandle, FileHandle, FsError, Location, SECTOR_SIZE, VolumeType};
+use super::{Dir, FileHandle, FsError, Location, SECTOR_SIZE, VolumeType};
+
+const BASE_CLUSTER: u32 = 2;
 
 // Need to lock with interrupts enabled waiting for IO completion
 // SpinLock (not IrqSpinLock) because I/O needs interrupts enabled for virtio
@@ -24,6 +27,7 @@ pub(super) static VOLUME: SpinLock<Option<Volume>> = SpinLock::new(None);
 pub(crate) struct Volume {
     bpb: Bpb,
     lba: u32,
+    last_alloc_cluster: u32,
     block_cache: BlockCache,
 }
 
@@ -33,6 +37,7 @@ impl Volume {
         Self {
             bpb,
             lba,
+            last_alloc_cluster: BASE_CLUSTER,
             block_cache: BlockCache::new(),
         }
     }
@@ -56,6 +61,7 @@ impl Volume {
         self.block_cache.read(block)
     }
 
+    #[cfg(test)]
     fn read_sector_uncached(
         &mut self,
         sector: u32,
@@ -142,7 +148,7 @@ impl Volume {
     /// Finds the next available directory entry, reusing deleted entries.
     ///
     /// Returns the sector and offset.
-    fn get_avail_dir_entry(&mut self, dir: DirHandle) -> Result<Location, FsError> {
+    fn get_avail_dir_entry(&mut self, dir: Dir) -> Result<Location, FsError> {
         for dir_entry in self.dir_iter(dir)? {
             let dir_entry = dir_entry?;
             match dir_entry.kind {
@@ -153,11 +159,31 @@ impl Volume {
             }
         }
         // Reached the end of the directory without finding an available slot
-        Err(FsError::DirFull)
+        match (dir, self.bpb.volume_type) {
+            (Dir::Root, VolumeType::Fat16(_)) => Err(FsError::DirFull),
+            (Dir::Root, VolumeType::Fat32(start_cluster)) | (Dir::SubDir(start_cluster), _) => {
+                // Extend the directory file to accommodate extra directory slots
+                // First walk the FAT chain to the end
+                let mut curr_cluster = start_cluster;
+                while let Some(next) = self.fat_entry(curr_cluster)?.next_in_chain()? {
+                    curr_cluster = next;
+                }
+                // Now extend the current cluster
+                let next_cluster = self.allocate_cluster()?;
+                self.set_fat_entry(curr_cluster, FatEntry::Next(next_cluster))?;
+                // Now zero the new cluster
+                let sector = self.bpb.cluster_to_sector(next_cluster);
+                for i in 0..self.bpb.sectors_per_cluster {
+                    self.write_sector_uncached(sector + i, &[0u8; SECTOR_SIZE])?;
+                }
+                // Finally offer the first slot as available
+                Ok(Location { sector, offset: 0 })
+            }
+        }
     }
 
     /// Read directory
-    pub fn read_dir<B, F>(&mut self, dir: DirHandle, mut f: F) -> Result<ControlFlow<B>, FsError>
+    pub fn read_dir<B, F>(&mut self, dir: Dir, mut f: F) -> Result<ControlFlow<B>, FsError>
     where
         F: FnMut(&FileInfo) -> ControlFlow<B>,
     {
@@ -223,6 +249,7 @@ impl Volume {
     }
 
     /// Read a file from a given FileHandle
+    #[cfg(test)]
     pub fn read_file(&mut self, file: &FileHandle) -> Result<Vec<u8>, FsError> {
         if file.size == 0 {
             return Ok(Vec::new());
@@ -248,7 +275,7 @@ impl Volume {
     }
 
     // Create an empty file ("touch")
-    pub fn create_empty_file(&mut self, dir: DirHandle, filename: &str) -> Result<(), FsError> {
+    pub fn create_empty_file(&mut self, dir: Dir, filename: &str) -> Result<(), FsError> {
         // Search the directory for the existance of the file
         if self.find_file_dir_entry(dir, filename).is_ok() {
             // File already exists
@@ -279,7 +306,7 @@ impl Volume {
     // Helper function for rm and file write
     pub(super) fn find_file_dir_entry(
         &mut self,
-        dir: DirHandle,
+        dir: Dir,
         name: &str,
     ) -> Result<(Location, FileInfo), FsError> {
         for dir_entry in self.dir_iter(dir)? {
@@ -316,7 +343,7 @@ impl Volume {
     // Delete a file
     //
     // First unlink any clusters, then mark the directory entry as deleted
-    pub fn delete_file(&mut self, dir: DirHandle, filename: &str) -> Result<(), FsError> {
+    pub fn delete_file(&mut self, dir: Dir, filename: &str) -> Result<(), FsError> {
         // Get the sector and offset of the file by file name
         let (location, file_info) = self.find_file_dir_entry(dir, filename)?;
         // Check if this is a file
@@ -338,7 +365,7 @@ impl Volume {
     // // First check whether the directory is empty and not the root directory.
     // // Then mark the directory entry as deleted
     // // Does not delete if the directory handle is the same directory
-    // pub fn delete_directory(&mut self, curr_dir: DirHandle, dirname: &str) -> Result<(), FsError> {
+    // pub fn delete_directory(&mut self, curr_dir: Dir, dirname: &str) -> Result<(), FsError> {
     //     // Get the sector and offset of the directory by name
     //     let (location, dir_entry) = self.find_dir_entry_location(curr_dir, dirname)?;
     //     // Check if this is a file
@@ -358,7 +385,7 @@ impl Volume {
     //         return Err(FsError::DirectoryInvalid);
     //     }
     //     // Construct a handle for the directory to be deleted
-    //     let dir = DirHandle { start_cluster: dir_entry.first_cluster };
+    //     let dir = Dir { start_cluster: dir_entry.first_cluster };
     //     // Read the directory and ensure it is empty other than the first two entries
     //     for (i, entry) in self.dir_iter(dir)?.enumerate() {
     //         // First entry should be "."
@@ -412,10 +439,14 @@ impl Volume {
 
     /// Helper file write function to allocate the first cluster of a new file
     pub fn allocate_cluster(&mut self) -> Result<u32, FsError> {
-        for cluster in 2..2 + self.bpb.total_data_clusters() {
+        // We start at the last_alloc_cluster but wrap back to BASE_CLUSTER to scan the full drive
+        for cluster in (self.last_alloc_cluster..self.bpb.total_data_clusters())
+            .chain(BASE_CLUSTER..BASE_CLUSTER + self.last_alloc_cluster)
+        {
             if self.fat_entry(cluster)? == FatEntry::Free {
                 // read from FAT table
                 self.set_fat_entry(cluster, FatEntry::End)?; // Write end of file to FAT table
+                self.last_alloc_cluster = cluster + 1;
                 return Ok(cluster);
             }
         }
@@ -423,12 +454,7 @@ impl Volume {
     }
 
     /// Write file to disk
-    pub fn write_file(
-        &mut self,
-        dir: DirHandle,
-        filename: &str,
-        data: &[u8],
-    ) -> Result<(), FsError> {
+    pub fn write_file(&mut self, dir: Dir, filename: &str, data: &[u8]) -> Result<(), FsError> {
         // Remove existing file if present (ignore NotFound)
         match self.delete_file(dir, filename) {
             Ok(()) | Err(FsError::NotFound) => {}
@@ -473,27 +499,19 @@ impl Volume {
     }
 
     // Create an interator struct for directory entries
-    pub(super) fn dir_iter<'a>(&'a mut self, dir: DirHandle) -> Result<DirEntryIter<'a>, FsError> {
-        // We are just starting, need to load the first sector
-        let (current_sector, sectors_in_run, next_cluster) = if dir.start_cluster == 0
-            && let VolumeType::Fat16((root_dir_start_sector, root_dir_sector_count)) =
-                self.bpb.volume_type
-        {
-            // This is a FAT16 root directory - read from BPB-provided sectors
-            (root_dir_start_sector, root_dir_sector_count, None)
-        } else {
-            // This is a file-based directory. Check if it is FAT32 root
-            let current_cluster = if dir.start_cluster == 0
-                && let VolumeType::Fat32(root_dir_start_cluster) = self.bpb.volume_type
-            {
-                root_dir_start_cluster
-            } else {
-                dir.start_cluster
-            };
-            let current_sector = self.bpb.cluster_to_sector(current_cluster);
-            let next_cluster = self.fat_entry(current_cluster)?.next_in_chain()?;
-            (current_sector, self.bpb.sectors_per_cluster, next_cluster)
+    pub(super) fn dir_iter<'a>(&'a mut self, dir: Dir) -> Result<DirEntryIter<'a>, FsError> {
+        // Match the starting directory entry
+        let (current_sector, sectors_in_run, next_cluster) = match (dir, self.bpb.volume_type) {
+            (Dir::Root, VolumeType::Fat16((root_dir_start_sector, root_dir_sector_count))) => {
+                (root_dir_start_sector, root_dir_sector_count, None)
+            }
+            (Dir::Root, VolumeType::Fat32(start_cluster)) | (Dir::SubDir(start_cluster), _) => {
+                let next_cluster = self.fat_entry(start_cluster)?.next_in_chain()?;
+                let start_sector = self.bpb.cluster_to_sector(start_cluster);
+                (start_sector, self.bpb.sectors_per_cluster, next_cluster)
+            }
         };
+
         self.read_sector(current_sector)?;
 
         Ok(DirEntryIter {
@@ -584,7 +602,7 @@ where
     f(vol)
 }
 
-pub fn fat16_init(lba: u32, bpb: Bpb) {
+pub fn fat_init(lba: u32, bpb: Bpb) {
     let vol = Volume::new(lba, bpb);
     *VOLUME.lock() = Some(vol);
 }

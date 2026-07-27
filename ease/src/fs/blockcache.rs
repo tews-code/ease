@@ -120,6 +120,7 @@ impl BlockCache {
     }
 
     // Whole-block read for bulk data (avoids cache)
+    #[cfg(test)]
     pub(super) fn read_uncached(
         &mut self,
         block: u32,

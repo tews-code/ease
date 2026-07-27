@@ -432,8 +432,9 @@ mod test {
     // Disk image tests (kernel-only — require QEMU + virtio-blk)
     // =========================================================================
 
-    #[cfg(target_os = "none")]
     #[test_case]
+    #[cfg(target_os = "none")]
+    #[cfg(feature = "fat16")]
     fn disk_image_bpb() {
         let mut buf = [0u8; SECTOR_SIZE];
         crate::drivers::virtio::blk::read_block(0, &mut buf).unwrap();
@@ -444,5 +445,23 @@ mod test {
         assert_eq!(bpb.total_sectors, 32768);
         assert_eq!(bpb.sectors_per_fat, 32);
         assert_eq!(bpb.data_start_sector(), 100);
+    }
+
+    #[test_case]
+    #[cfg(target_os = "none")]
+    #[cfg(feature = "fat32")]
+    fn disk_image_bpb() {
+        // The FAT32 image is MBR-partitioned, so the BPB lives at the partition
+        // start (LBA 2048), not sector 0 (which holds the MBR).
+        let mut buf = [0u8; SECTOR_SIZE];
+        crate::drivers::virtio::blk::read_block(2048, &mut buf).unwrap();
+        let bpb = Bpb::parse(&buf).unwrap();
+        assert!(matches!(bpb.volume_type, VolumeType::Fat32(2)));
+        assert_eq!(bpb.sectors_per_cluster, 1);
+        assert_eq!(bpb.reserved_sector_count, 32);
+        assert_eq!(bpb.fat_count, 2);
+        assert_eq!(bpb.total_sectors, 194560);
+        assert_eq!(bpb.sectors_per_fat, 1497);
+        assert_eq!(bpb.data_start_sector(), 3026);
     }
 }

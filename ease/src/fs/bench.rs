@@ -13,7 +13,7 @@
 
 use crate::bench;
 use crate::drivers::virtio::blk::bench_counters;
-use crate::fs::DirHandle;
+use crate::fs::Dir;
 use crate::fs::file::{self, Access};
 use crate::fs::volume::with_volume;
 
@@ -25,8 +25,10 @@ use crate::fs::volume::with_volume;
 // allocate_cluster to ~3900, so these bounds catch that.
 const OPEN_MAX_READS: u32 = 4;
 const READ_BIG_MAX_READS: u32 = 140;
-const ALLOC_MAX_READS: u32 = 30;
-const WRITE_MAX_WRITES: u32 = 48;
+const ALLOC_MAX_READS_FAT16: u32 = 30;
+const ALLOC_MAX_READS_FAT32: u32 = 130;
+const WRITE_MAX_WRITES_FAT16: u32 = 48;
+const WRITE_MAX_WRITES_FAT32: u32 = 80;
 
 /// Run `f`, returning (block reads, block writes, cpu cycles) attributed to it.
 fn count<F: FnOnce()>(f: F) -> (u32, u32, u64) {
@@ -46,7 +48,7 @@ fn fs_block_io_benchmarks() {
     println!("====== FILESYSTEM (block I/O) ======");
     println!();
 
-    let current_dir = DirHandle { start_cluster: 0 };
+    let current_dir = Dir::Root;
     // 1. Metadata lookup: scan the root directory for a file by name.
     let (reads, writes, cpu) = count(|| {
         // file::open takes the volume lock internally, so no with_volume here.
@@ -86,8 +88,14 @@ fn fs_block_io_benchmarks() {
         });
     });
     report("allocate_cluster (FAT scan)", reads, writes, cpu);
+    #[cfg(feature = "fat16")]
     assert!(
-        reads <= ALLOC_MAX_READS,
+        reads <= ALLOC_MAX_READS_FAT16,
+        "FAT-scan reads regressed (cache broken?): {reads} > {ALLOC_MAX_READS}"
+    );
+    #[cfg(feature = "fat32")]
+    assert!(
+        reads <= ALLOC_MAX_READS_FAT32,
         "FAT-scan reads regressed (cache broken?): {reads} > {ALLOC_MAX_READS}"
     );
 
@@ -101,9 +109,15 @@ fn fs_block_io_benchmarks() {
         });
     });
     report("write_file(BENCH.TMP, 8KB)", reads, writes, cpu);
+    #[cfg(feature = "fat16")]
     assert!(
         writes <= WRITE_MAX_WRITES,
-        "write writes regressed: {writes} > {WRITE_MAX_WRITES}"
+        "write writes regressed: {writes} > {WRITE_MAX_WRITES_FAT16}"
+    );
+    #[cfg(feature = "fat32")]
+    assert!(
+        writes <= WRITE_MAX_WRITES,
+        "write writes regressed: {writes} > {WRITE_MAX_WRITES_FAT32}"
     );
 
     println!();

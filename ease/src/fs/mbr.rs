@@ -75,7 +75,6 @@ const PARTITION_ENTRY_SIZE: usize = 16;
 pub(crate) enum MbrError {
     ExFatDetected,
     Fat12Detected,
-    Fat32Detected,
     GptDetected,
     NoPartitionFound,
     InvalidMbr,
@@ -157,13 +156,14 @@ impl Mbr {
             if matches!(partition.partition_type, PartitionType::Fat16) {
                 return Ok((partition.lba, partition.sector_count));
             }
+            if matches!(partition.partition_type, PartitionType::Fat32) {
+                return Ok((partition.lba, partition.sector_count));
+            }
         }
         // Nothing mountable, diagnose reason
         let any = |t: fn(&PartitionType) -> bool| self.0.iter().any(|p| t(&p.partition_type));
 
-        if any(|t| matches!(t, PartitionType::Fat32)) {
-            Err(MbrError::Fat32Detected) // will work someday; today: reformat as FAT16
-        } else if any(|t| matches!(t, PartitionType::Gpt)) {
+        if any(|t| matches!(t, PartitionType::Gpt)) {
             Err(MbrError::GptDetected)
         } else if any(|t| matches!(t, PartitionType::ExFat)) {
             Err(MbrError::ExFatDetected)
@@ -283,7 +283,8 @@ mod test {
             let mut sector = make_test_mbr();
             set_entry(&mut sector, 0, ptype, 2048, 32768);
             let mbr = Mbr::parse(&sector).unwrap();
-            assert_eq!(mbr.find_partition(), Err(MbrError::Fat32Detected));
+            dprintln!("{:?}", mbr.find_partition());
+            assert!(mbr.find_partition().is_ok());
         }
     }
 
@@ -335,6 +336,6 @@ mod test {
         set_entry(&mut sector, 0, 0x83, 2048, 1000);
         set_entry(&mut sector, 1, 0x0C, 4096, 32768);
         let mbr = Mbr::parse(&sector).unwrap();
-        assert_eq!(mbr.find_partition(), Err(MbrError::Fat32Detected));
+        assert!(mbr.find_partition().is_ok());
     }
 }

@@ -5,7 +5,7 @@
 use crate::kernel::sync::IrqSpinLock;
 
 use super::volume::with_volume;
-use super::{FsError, Location, SECTOR_SIZE};
+use super::{Dir, FsError, Location};
 
 const OPEN_FILES_MAX: usize = 128;
 
@@ -23,6 +23,15 @@ struct OpenFile {
 }
 
 struct OpenFileTable(IrqSpinLock<[Option<OpenFile>; OPEN_FILES_MAX]>);
+
+fn is_open(dir_entry: Location) -> bool {
+    let file_table = OPEN_FILE_TABLE.0.lock();
+    file_table
+        .iter()
+        .flatten()
+        .find(|f| f.dir_entry == dir_entry)
+        .is_some()
+}
 
 fn mark_file_for_read(dir_entry: Location) -> Result<usize, FsError> {
     let mut file_table = OPEN_FILE_TABLE.0.lock();
@@ -77,12 +86,7 @@ pub(crate) struct FileHandle {
     pub(super) current_cluster: u32,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DirHandle {
-    pub(crate) start_cluster: u32,
-}
-
-pub(crate) fn open(access: Access, dir: DirHandle, filename: &str) -> Result<FileHandle, FsError> {
+pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, FsError> {
     let (location, file_info) = with_volume(|vol| vol.find_file_dir_entry(dir, filename))?;
     // Check if this is fine
     let idx = match access {
@@ -103,27 +107,26 @@ pub(crate) fn close(file: &FileHandle) {
     mark_file_closed(file.open_file_table_idx);
 }
 
-pub(crate) fn rm(dir: DirHandle, filename: &str) -> Result<(), FsError> {
-    with_volume(|vol| vol.delete_file(dir, filename))
-}
-
-pub(crate) fn read(
-    dir: DirHandle,
-    filename: &str,
-    buf: &mut [u8; SECTOR_SIZE],
-) -> Result<u32, FsError> {
-    // Open the file for reading
-    let mut file = open(Access::Read, dir, filename)?;
-    let bytes = with_volume(|vol| vol.read_at(&mut file, buf))?;
-    close(&file);
-    Ok(bytes as u32)
+pub(crate) fn seek(file: &mut FileHandle, position: u32) -> Result<(), FsError> {
+    // Ensure file is open
+    if !is_open(file.dir_entry_location) {
+        return Err(FsError::FileNotOpen);
+    }
+    if position < file.size {
+        file.position = position
+    }
+    Ok(())
 }
 
 pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, FsError> {
     with_volume(|vol| vol.read_at(file, buf))
 }
 
-pub(crate) fn touch(dir: DirHandle, filename: &str) -> Result<(), FsError> {
+pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
+    with_volume(|vol| vol.delete_file(dir, filename))
+}
+
+pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), FsError> {
     match with_volume(|vol| vol.create_empty_file(dir, filename)) {
         Ok(_) => Ok(()),
         Err(FsError::AlreadyExists) => Ok(()), // Touch does not error if the file is already in existance

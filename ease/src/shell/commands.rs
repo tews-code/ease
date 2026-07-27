@@ -6,7 +6,7 @@ use core::fmt::Write;
 use core::ops::ControlFlow;
 
 use crate::fs::file;
-use crate::fs::{DirHandle, FsError};
+use crate::fs::{Dir, FsError};
 #[cfg(feature = "paint-stack")]
 use crate::kernel::sched;
 use crate::kernel::timer;
@@ -15,12 +15,16 @@ use crate::shell::{Args, Console, ascii};
 /// Reads file content to console
 #[allow(dead_code)]
 pub fn cat(console: &mut Console, args: &Args) {
-    let dir = DirHandle { start_cluster: 0 };
+    let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         let mut file_handle = match file::open(file::Access::Read, dir, filename) {
             Ok(file_handle) => file_handle,
-            Err(_) => {
-                let _ = writeln!(console, "cat: could not open file");
+            Err(fs_error) => {
+                let _ = writeln!(
+                    console,
+                    "cat: {}: could not open file - {:?}",
+                    filename, fs_error
+                );
                 break;
             }
         };
@@ -31,7 +35,11 @@ pub fn cat(console: &mut Console, args: &Args) {
             {
                 Ok(num_bytes) => num_bytes,
                 Err(fs_error) => {
-                    let _ = writeln!(console, "cat: error {:?}", fs_error);
+                    let _ = writeln!(
+                        console,
+                        "cat: {}: Error reading file {:?}",
+                        filename, fs_error
+                    );
                     break;
                 }
             };
@@ -102,80 +110,99 @@ pub fn help(console: &mut Console) {
 pub fn hexdump(console: &mut Console, args: &Args) {
     // Open the file
     for filename in args.positionals.as_slice().iter() {
-        let dir = DirHandle { start_cluster: 0 }; // For now all files in root
-        let file = match crate::fs::file::open(file::Access::Read, dir, filename) {
+        let dir = Dir::Root; // For now all files in root
+        let mut file = match crate::fs::file::open(file::Access::Read, dir, filename) {
             Ok(file) => file,
-            Err(_) => {
-                let _ = write!(console, "hexdump: {}: Error opening file.", filename);
+            Err(fs_error) => {
+                let _ = write!(
+                    console,
+                    "hexdump: {}: Error opening file - {:?}.",
+                    filename, fs_error
+                );
                 break;
             }
         };
-        crate::fs::volume::with_volume(|vol| match vol.read_file(&file) {
-            Ok(content) => {
-                if args.has_flag(b'C') {
-                    // byte-by-byte with ASCII column
-                    // Loop through content 16 bytes at a time
-                    for (i, chunk) in content.chunks(16).enumerate() {
-                        let offset = i * 16;
-                        // chunk is a &[u8], length 16 (or less for the last one)
-                        // Print offset
-                        let _ = write!(console, "{:08x}  ", offset);
+        // At open, file position is at file start
+        let mut buf = [0u8; 384];
+        let mut file_offset = 0;
+        loop {
+            let num_bytes_read = match file::read_at(&mut file, &mut buf) {
+                Ok(num_bytes_read) => num_bytes_read,
+                Err(fs_error) => {
+                    let _ = writeln!(
+                        console,
+                        "hexdump: {}: Unable to read file - {:?}.",
+                        filename, fs_error
+                    );
+                    file::close(&file);
+                    break;
+                }
+            };
+            if num_bytes_read == 0 {
+                // End of file
+                file::close(&file);
+                break;
+            }
+            if args.has_flag(b'C') {
+                // byte-by-byte with ASCII column
+                // Loop through content 16 bytes at a time
+                for (i, chunk) in buf[..num_bytes_read].chunks(16).enumerate() {
+                    file_offset += i * 16;
+                    // chunk is a &[u8], length 16 (or less for the last one)
+                    // Print offset
+                    let _ = write!(console, "{:08x}  ", file_offset);
 
-                        // Print hex bytes
-                        for (j, &byte) in chunk.iter().enumerate() {
-                            let _ = write!(console, "{:02x} ", byte);
-                            if j == 7 {
-                                let _ = write!(console, " ");
-                            }
+                    // Print hex bytes
+                    for (j, &byte) in chunk.iter().enumerate() {
+                        let _ = write!(console, "{:02x} ", byte);
+                        if j == 7 {
+                            let _ = write!(console, " ");
                         }
-
-                        // Pad if chunk is shorter than 16 (last line)
-                        for j in chunk.len()..16 {
-                            let _ = write!(console, "   ");
-                            if j == 7 {
-                                let _ = write!(console, " ");
-                            }
-                        }
-
-                        // Print ASCII column
-                        let _ = write!(console, " |");
-                        for &byte in chunk {
-                            let ch = if byte.is_ascii_graphic() || byte == b' ' {
-                                byte as char
-                            } else {
-                                '.'
-                            };
-                            let _ = write!(console, "{}", ch);
-                        }
-                        let _ = writeln!(console, "|");
                     }
-                } else {
-                    for (i, chunk) in content.chunks(16).enumerate() {
-                        let offset = i * 16;
-                        let _ = write!(console, "{:07x}", offset);
-                        for word in chunk.chunks(2) {
-                            if word.len() == 2 {
-                                let val = u16::from_le_bytes([word[0], word[1]]);
-                                let _ = write!(console, " {:04x}", val);
-                            } else {
-                                let _ = write!(console, " {:02x}", word[0]);
-                            }
+
+                    // Pad if chunk is shorter than 16 (last line)
+                    for j in chunk.len()..16 {
+                        let _ = write!(console, "   ");
+                        if j == 7 {
+                            let _ = write!(console, " ");
                         }
-                        let _ = writeln!(console);
                     }
+
+                    // Print ASCII column
+                    let _ = write!(console, " |");
+                    for &byte in chunk {
+                        let ch = if byte.is_ascii_graphic() || byte == b' ' {
+                            byte as char
+                        } else {
+                            '.'
+                        };
+                        let _ = write!(console, "{}", ch);
+                    }
+                    let _ = writeln!(console, "|");
+                }
+            } else {
+                for (i, chunk) in buf[..num_bytes_read].chunks(16).enumerate() {
+                    file_offset += i * 16;
+                    let _ = write!(console, "{:07x}", file_offset);
+                    for word in chunk.chunks(2) {
+                        if word.len() == 2 {
+                            let val = u16::from_le_bytes([word[0], word[1]]);
+                            let _ = write!(console, " {:04x}", val);
+                        } else {
+                            let _ = write!(console, " {:02x}", word[0]);
+                        }
+                    }
+                    let _ = writeln!(console);
                 }
             }
-            Err(_) => {
-                let _ = write!(console, "hexdump: {}: Could not read file.", filename);
-            }
-        });
+        }
     }
 }
 
 /// Lists files in current directory
 #[allow(dead_code)]
 pub fn ls(console: &mut Console, args: &Args) {
-    let current_dir = DirHandle { start_cluster: 0 };
+    let current_dir = Dir::Root;
     crate::fs::volume::with_volume(|vol| {
         let _ = vol
             .read_dir(current_dir, |entry| {
@@ -223,7 +250,7 @@ pub fn stacks(_console: &mut Console) {
 #[allow(dead_code)]
 pub fn touch(console: &mut Console, args: &Args) {
     for filename in args.positionals.as_slice().iter() {
-        let current_dir = DirHandle { start_cluster: 0 };
+        let current_dir = Dir::Root;
         crate::fs::volume::with_volume(|vol| match vol.create_empty_file(current_dir, filename) {
             Ok(_) => {}
             Err(fs_error) => {
@@ -241,7 +268,7 @@ pub fn touch(console: &mut Console, args: &Args) {
 /// Deletes a file
 #[allow(dead_code)]
 pub fn rm(console: &mut Console, args: &Args) {
-    let current_dir = DirHandle { start_cluster: 0 };
+    let current_dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         crate::fs::volume::with_volume(|vol| match vol.delete_file(current_dir, filename) {
             Ok(()) => {}
@@ -260,7 +287,7 @@ pub fn rm(console: &mut Console, args: &Args) {
 /// Write text to file
 #[allow(dead_code)]
 pub fn write(console: &mut Console, args: &Args) {
-    let current_dir = DirHandle { start_cluster: 0 };
+    let current_dir = Dir::Root;
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
         Some(pos) => (&rest[..pos], &rest[pos + 1..]),

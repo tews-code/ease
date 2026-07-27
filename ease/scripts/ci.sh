@@ -16,11 +16,9 @@
 #                                            # `trace` feature (scheduler
 #                                            # trace points + panic dump);
 #                                            # off by default
-#   ./scripts/ci.sh --fat32                  # build the FAT32 (MBR) test disk
-#                                            # instead of the default FAT16
-#                                            # superfloppy (see mkdisk.sh); the
-#                                            # kernel can't mount FAT32 yet, so
-#                                            # this is for FAT32 development
+#   ./scripts/ci.sh --fat16                  # build the FAT16 (superfloppy)
+#                                            # test disk instead of the default
+#                                            # FAT32 (MBR) image (see mkdisk.sh)
 #   ./scripts/ci.sh --help                   # this message
 
 set -e
@@ -28,16 +26,16 @@ set -e
 TEST_SET="test-all"
 PAINT_STACK=0
 TRACE=0
-FS_TYPE="fat16"
+FS_TYPE="fat32"
 
 for arg in "$@"; do
     case "$arg" in
         --test=*)      TEST_SET="${arg#*=}" ;;
         --paint-stack) PAINT_STACK=1 ;;
         --trace)       TRACE=1 ;;
-        --fat32)       FS_TYPE="fat32" ;;
+        --fat16)       FS_TYPE="fat16" ;;
         --help|-h)
-            sed -n '2,24p' "$0"
+            sed -n '2,22p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -56,7 +54,13 @@ FOCUSED=0
 # `sed … "$0"` still resolves against the original CWD.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-FEATURES="$TEST_SET"
+# The FS volume tests are disk-specific: the default builds the FAT32 (MBR) test
+# disk (see mkdisk.sh) and selects its `fat32` gate; `--fat16` builds the FAT16
+# superfloppy and selects `fat16`. This feature rides along with whatever
+# TEST_SET is in effect (test-all, a focused test-*, etc.).
+FS_FEATURE="fat32"
+[ "$FS_TYPE" = "fat16" ] && FS_FEATURE="fat16"
+FEATURES="$TEST_SET $FS_FEATURE"
 
 # Stack painting + high-watermark printing is an opt-in diagnostic (the
 # `paint-stack` feature). It's scoped to the RISC-V build — the watermark
@@ -78,7 +82,7 @@ RISCV_FEATURES="$FEATURES"
 CLIPPY_EXTRA="-A dead-code"
 
 echo "Test set                : $TEST_SET"
-echo "Disk image              : $FS_TYPE"
+echo "Disk image              : $FS_TYPE (feature: $FS_FEATURE)"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 [ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
 [ $TRACE -eq 1 ] && echo "Tracing                 : on (trace feature in QEMU stage)"

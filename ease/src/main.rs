@@ -47,6 +47,7 @@ use kernel::percpu;
 
 use crate::board::uart;
 use crate::board::virtio;
+use crate::fs::VolumeType;
 use crate::kernel::sched;
 
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
@@ -121,7 +122,13 @@ fn kernel_init() {
             drivers::virtio::input::virtio_keyboard_init();
             drivers::plic::enable(virtio::keyboard::IRQ);
             match fs::init() {
-                Ok(s) => println!("Mounted {s:?}"),
+                Ok(s) => println!(
+                    "Mounted {} volume",
+                    match s {
+                        VolumeType::Fat16(_) => "FAT16",
+                        VolumeType::Fat32(_) => "FAT32",
+                    }
+                ),
                 Err(e) => println!("Failed to mount storage: {e:?}"),
             }
             let fb = FrameBuffer::init();
