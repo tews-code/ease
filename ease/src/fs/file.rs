@@ -1,7 +1,6 @@
 //! File operations
 
 // Functions take the lock on the volume (and delegate as needed)
-
 use crate::kernel::sync::IrqSpinLock;
 
 use super::volume::with_volume;
@@ -47,45 +46,43 @@ impl OpenFileTable {
             .find(|of| of.dir_entry == dir_entry)
             .map(|of| of.access)
     }
-}
 
-fn mark_file_for_read(dir_entry: Location) -> Result<usize, FsError> {
-    let mut file_table = OPEN_FILE_TABLE.lock();
-    // Is this file already being used for writes (we respect exclusive write access)
-    if file_table.get_access(dir_entry) == Some(Access::Write) {
-        return Err(FsError::OpeningForReadButWriteInProgress);
+    fn mark_file_for_read(&mut self, dir_entry: Location) -> Result<usize, FsError> {
+        // Is this file already being used for writes (we respect exclusive write access)
+        if self.get_access(dir_entry) == Some(Access::Write) {
+            return Err(FsError::OpeningForReadButWriteInProgress);
+        }
+        // Find an empty slot and insert the entry - no problem if mutiple read users
+        // of the same file
+        if let Some((i, new_slot)) = self.get_slot_mut() {
+            *new_slot = Some(OpenFile {
+                access: Access::Read,
+                dir_entry,
+            });
+            return Ok(i);
+        }
+        Err(FsError::TooManyOpenFiles)
     }
-    // Find an empty slot and insert the entry - no problem if mutiple read users
-    // of the same file
-    if let Some((i, new_slot)) = file_table.get_slot_mut() {
-        *new_slot = Some(OpenFile {
-            access: Access::Read,
-            dir_entry,
-        });
-        return Ok(i);
-    }
-    Err(FsError::TooManyOpenFiles)
-}
 
-fn mark_file_for_write(dir_entry: Location) -> Result<usize, FsError> {
-    let mut file_table = OPEN_FILE_TABLE.lock();
-    // First check if this file is already open
-    if file_table.get_open(dir_entry).is_some() {
-        return Err(FsError::OpeningForWriteButAlreadyOpen);
+    fn mark_file_for_write(&mut self, dir_entry: Location) -> Result<usize, FsError> {
+        // First check if this file is already open
+        if self.get_open(dir_entry).is_some() {
+            return Err(FsError::OpeningForWriteButAlreadyOpen);
+        }
+        // It's not already open, so mark this file as open for writing
+        if let Some((i, new_entry)) = self.get_slot_mut() {
+            *new_entry = Some(OpenFile {
+                access: Access::Write,
+                dir_entry,
+            });
+            return Ok(i);
+        }
+        Err(FsError::TooManyOpenFiles)
     }
-    // It's not already open, so mark this file as open for writing
-    if let Some((i, new_entry)) = file_table.get_slot_mut() {
-        *new_entry = Some(OpenFile {
-            access: Access::Write,
-            dir_entry,
-        });
-        return Ok(i);
-    }
-    Err(FsError::TooManyOpenFiles)
-}
 
-fn mark_file_closed(idx: usize) {
-    OPEN_FILE_TABLE.lock().0[idx].take();
+    fn mark_file_closed(&mut self, idx: usize) {
+        self.0[idx].take();
+    }
 }
 
 #[derive(Debug)]
@@ -99,19 +96,25 @@ pub(crate) struct FileHandle {
 }
 
 pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, FsError> {
-    let (location, file_info) = with_volume(|vol| vol.find_file_dir_entry(dir, filename))?;
-    // Check if this is fine
-    let idx = match access {
-        Access::Read => mark_file_for_read(location)?,
-        Access::Write => mark_file_for_write(location)?,
-    };
-    Ok(FileHandle {
-        open_file_table_idx: idx,
-        dir_entry_location: location,
-        position: 0,
-        size: file_info.file_size,
-        first_cluster: file_info.first_cluster,
-        current_cluster: file_info.first_cluster,
+    // Need both volume and table locks for safe opening
+    // The table lock disables IRQs, so must always be the inner lock
+    with_volume(|vol| {
+        // Check if this file already exists
+        let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
+        // Set up the open file table
+        let idx = match access {
+            Access::Read => OPEN_FILE_TABLE.lock().mark_file_for_read(location)?,
+            Access::Write => OPEN_FILE_TABLE.lock().mark_file_for_write(location)?,
+        };
+        // Construct the file handle with private idx member
+        Ok(FileHandle {
+            open_file_table_idx: idx,
+            dir_entry_location: location,
+            position: 0,
+            size: file_info.file_size,
+            first_cluster: file_info.first_cluster,
+            current_cluster: file_info.first_cluster,
+        })
     })
 }
 
@@ -126,7 +129,9 @@ pub(crate) fn close(file: &FileHandle) -> Result<(), FsError> {
     } else {
         Ok(())
     };
-    mark_file_closed(file.open_file_table_idx);
+    OPEN_FILE_TABLE
+        .lock()
+        .mark_file_closed(file.open_file_table_idx);
     result
 }
 
@@ -135,18 +140,17 @@ pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, Fs
 }
 
 pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
-    // Decline if the file is currently open
-    let (location, file_info) = with_volume(|vol| vol.find_file_dir_entry(dir, filename))?;
-    let idx = if OPEN_FILE_TABLE.lock().get_open(location).is_some() {
-        return Err(FsError::FileInUse);
-    } else {
-        // Insert a temporary entry to lock the file slot
-        mark_file_for_write(location)?
-    };
-    let result = with_volume(|vol| vol.delete_file(location, &file_info));
-    // Remove the temporary marker
-    mark_file_closed(idx);
-    result
+    // Need both volume and table locks for safe deletion
+    // The table lock disables IRQs, so must always be the inner lock
+    with_volume(|vol| {
+        // Decline if the file is currently open
+        let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
+        if OPEN_FILE_TABLE.lock().get_open(location).is_some() {
+            return Err(FsError::FileInUse);
+        }
+        vol.delete_file(location, &file_info)?;
+        Ok(())
+    })
 }
 
 pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), FsError> {

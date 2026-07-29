@@ -514,18 +514,18 @@ impl Volume {
         Ok(())
     }
 
-    /// Writes from a buffer to disk
-    ///
-    /// Returns the number of bytes written on success
-    pub(super) fn write_at(&mut self, file: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
-        // Remove existing file if present (ignore NotFound)
-        match self.get_file_info(file.dir_entry_location) {
-            Ok(file_info) => self.delete_file(file.dir_entry_location, &file_info)?,
-            Err(FsError::NotFound) => {}
-            Err(e) => return Err(e),
-        }
-
-    }
+    // /// Writes from a buffer to disk
+    // ///
+    // /// Returns the number of bytes written on success
+    // pub(super) fn write_at(&mut self, file: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
+    //     // Remove existing file if present (ignore NotFound)
+    //     match self.get_file_info(file.dir_entry_location) {
+    //         Ok(file_info) => self.delete_file(file.dir_entry_location, &file_info)?,
+    //         Err(FsError::NotFound) => {}
+    //         Err(e) => return Err(e),
+    //     }
+    //     Ok(0)
+    // }
 
     /// Saves the file size and first_cluster of an existing file
     pub(super) fn save_file_meta_data(&mut self, file: &FileHandle) -> Result<(), FsError> {
