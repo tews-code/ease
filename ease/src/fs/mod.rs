@@ -103,6 +103,7 @@ pub enum FsError {
     DirFull,
     DirectoryEntryNotInUse,
     DiskFull,
+    FileInUse,
     FileNotOpen,
     NotFound,
     OpeningForWriteButAlreadyOpen,

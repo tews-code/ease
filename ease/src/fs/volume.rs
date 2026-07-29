@@ -204,6 +204,20 @@ impl Volume {
         Ok(ControlFlow::Continue(()))
     }
 
+    /// Finds the FileInfo for a given directory entry location
+    fn get_file_info(&mut self, location: Location) -> Result<FileInfo, FsError> {
+        // Read the current file_info and update
+        let sector_buf = self.read_sector(location.sector)?;
+        let dir_entry_bytes = &sector_buf[location.offset..location.offset + dir::ENTRY_BYTES];
+        if let DirEntryKind::Used(file_info) =
+            DirEntryKind::parse(dir_entry_bytes.try_into().unwrap(), self.bpb.volume_type)
+        {
+            Ok(file_info)
+        } else {
+            Err(FsError::DirectoryEntryNotInUse)
+        }
+    }
+
     /// Read from a given postion in a file
     pub(super) fn read_at(
         &mut self,
@@ -343,9 +357,11 @@ impl Volume {
     // Delete a file
     //
     // First unlink any clusters, then mark the directory entry as deleted
-    pub fn delete_file(&mut self, dir: Dir, filename: &str) -> Result<(), FsError> {
-        // Get the sector and offset of the file by file name
-        let (location, file_info) = self.find_file_dir_entry(dir, filename)?;
+    pub(super) fn delete_file(
+        &mut self,
+        location: Location,
+        file_info: &FileInfo,
+    ) -> Result<(), FsError> {
         // Check if this is a file
         if file_info.attributes & dir::ATTR_DIR != 0 {
             return Err(FsError::DirectoryInsteadOfFile);
@@ -456,10 +472,11 @@ impl Volume {
     /// Write file to disk
     pub fn write_file(&mut self, dir: Dir, filename: &str, data: &[u8]) -> Result<(), FsError> {
         // Remove existing file if present (ignore NotFound)
-        match self.delete_file(dir, filename) {
-            Ok(()) | Err(FsError::NotFound) => {}
+        match self.find_file_dir_entry(dir, filename) {
+            Ok((location, file_info)) => self.delete_file(location, &file_info)?,
+            Err(FsError::NotFound) => {}
             Err(e) => return Err(e),
-        }
+        };
         let mut prev_cluster = 0u32;
         let mut first_cluster = 0u32;
         let bytes_per_cluster = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
@@ -497,22 +514,25 @@ impl Volume {
         Ok(())
     }
 
+    /// Writes from a buffer to disk
+    ///
+    /// Returns the number of bytes written on success
+    pub(super) fn write_at(&mut self, file: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
+        // Remove existing file if present (ignore NotFound)
+        match self.get_file_info(file.dir_entry_location) {
+            Ok(file_info) => self.delete_file(file.dir_entry_location, &file_info)?,
+            Err(FsError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+
+    }
+
     /// Saves the file size and first_cluster of an existing file
     pub(super) fn save_file_meta_data(&mut self, file: &FileHandle) -> Result<(), FsError> {
-        // Read the current file_info and update
-        let sector_buf = self.read_sector(file.dir_entry_location.sector)?;
-        let dir_entry_bytes = &sector_buf
-            [file.dir_entry_location.offset..file.dir_entry_location.offset + dir::ENTRY_BYTES];
-        let file_info = if let DirEntryKind::Used(mut file_info) =
-            DirEntryKind::parse(dir_entry_bytes.try_into().unwrap(), self.bpb.volume_type)
-        {
-            // Update the file info with new metadata
-            file_info.first_cluster = file.first_cluster;
-            file_info.file_size = file.size;
-            file_info
-        } else {
-            return Err(FsError::DirectoryEntryNotInUse);
-        };
+        let mut file_info = self.get_file_info(file.dir_entry_location)?;
+        // Update the file info with new metadata
+        file_info.first_cluster = file.first_cluster;
+        file_info.file_size = file.size;
         let volume_type = self.bpb.volume_type;
         // Now read sector, update entry and write back
         self.modify_sector(file.dir_entry_location.sector, |buf| {

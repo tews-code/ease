@@ -297,9 +297,9 @@ pub fn touch(console: &mut Console, args: &Args) {
 /// Deletes a file
 #[allow(dead_code)]
 pub fn rm(console: &mut Console, args: &Args) {
-    let current_dir = Dir::Root;
+    let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
-        crate::fs::volume::with_volume(|vol| match vol.delete_file(current_dir, filename) {
+        match file::rm(dir, filename) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
@@ -309,7 +309,7 @@ pub fn rm(console: &mut Console, args: &Args) {
                 };
                 let _ = writeln!(console, "rm: {}: {}", filename, msg);
             }
-        });
+        }
     }
 }
 

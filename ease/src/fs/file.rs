@@ -30,6 +30,10 @@ impl OpenFileTable {
         self.0.iter_mut().enumerate().find(|(_, f)| f.is_none())
     }
 
+    /// Checks if a file is open
+    ///
+    /// Returns the index into the open file table on success
+    /// or None if not found
     fn get_open(&self, dir_entry: Location) -> Option<usize> {
         self.0
             .iter()
@@ -131,7 +135,18 @@ pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, Fs
 }
 
 pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
-    with_volume(|vol| vol.delete_file(dir, filename))
+    // Decline if the file is currently open
+    let (location, file_info) = with_volume(|vol| vol.find_file_dir_entry(dir, filename))?;
+    let idx = if OPEN_FILE_TABLE.lock().get_open(location).is_some() {
+        return Err(FsError::FileInUse);
+    } else {
+        // Insert a temporary entry to lock the file slot
+        mark_file_for_write(location)?
+    };
+    let result = with_volume(|vol| vol.delete_file(location, &file_info));
+    // Remove the temporary marker
+    mark_file_closed(idx);
+    result
 }
 
 pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), FsError> {

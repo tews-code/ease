@@ -340,17 +340,12 @@ fn touch_created_file_visible_in_ls() {
 fn delete_empty_file() {
     with_volume(|vol| vol.create_empty_file(ROOT, "DEL1.TXT")).unwrap();
     assert!(find_size("DEL1.TXT").is_ok());
-    with_volume(|vol| vol.delete_file(ROOT, "DEL1.TXT")).unwrap();
-    assert!(matches!(find_size("DEL1.TXT"), Err(FsError::NotFound)));
-}
 
-#[test_case]
-fn delete_file_not_found() {
-    let current_dir = Dir::Root;
     with_volume(|vol| {
-        let result = vol.delete_file(current_dir, "NOPE.TXT");
-        assert!(matches!(result, Err(FsError::NotFound)));
+        let (slot, info) = vol.find_file_dir_entry(ROOT, "DEL1.TXT").unwrap();
+        vol.delete_file(slot, &info).unwrap();
     });
+    assert!(matches!(find_size("DEL1.TXT"), Err(FsError::NotFound)));
 }
 
 #[test_case]
@@ -362,7 +357,8 @@ fn delete_file_with_content() {
         let first_cluster = fi.first_cluster;
         assert!(first_cluster >= 2);
 
-        vol.delete_file(current_dir, "DELETE.ME").unwrap();
+        let (slot, info) = vol.find_file_dir_entry(ROOT, "DELETE.ME").unwrap();
+        vol.delete_file(slot, &info).unwrap();
 
         // File should no longer be found
         assert!(matches!(
@@ -384,7 +380,8 @@ fn delete_file_with_content() {
 fn delete_then_recreate() {
     with_volume(|vol| {
         vol.create_empty_file(ROOT, "REUSE.TXT").unwrap();
-        vol.delete_file(ROOT, "REUSE.TXT").unwrap();
+        let (slot, info) = vol.find_file_dir_entry(ROOT, "REUSE.TXT").unwrap();
+        vol.delete_file(slot, &info).unwrap();
         // Slot marked 0xE5 should be reusable
         vol.create_empty_file(ROOT, "REUSE.TXT").unwrap();
     });
@@ -692,7 +689,8 @@ fn dir_iter_walks_into_second_root_cluster() {
         // Clean up so later tests see the usual directory.
         for i in 0..FILES {
             let name = format!("SEC{i:02}.TXT");
-            vol.delete_file(root, &name).unwrap();
+            let (slot, info) = vol.find_file_dir_entry(ROOT, name.as_str()).unwrap();
+            vol.delete_file(slot, &info).unwrap();
         }
     });
 }
