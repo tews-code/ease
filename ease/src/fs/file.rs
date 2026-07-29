@@ -9,9 +9,10 @@ use super::{Dir, FsError, Location};
 
 const OPEN_FILES_MAX: usize = 128;
 
-static OPEN_FILE_TABLE: OpenFileTable =
-    OpenFileTable(IrqSpinLock::new([const { None }; OPEN_FILES_MAX]));
+static OPEN_FILE_TABLE: IrqSpinLock<OpenFileTable> =
+    IrqSpinLock::new(OpenFileTable([const { None }; OPEN_FILES_MAX]));
 
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Access {
     Read,
     Write,
@@ -22,58 +23,65 @@ struct OpenFile {
     dir_entry: Location,
 }
 
-struct OpenFileTable(IrqSpinLock<[Option<OpenFile>; OPEN_FILES_MAX]>);
+struct OpenFileTable([Option<OpenFile>; OPEN_FILES_MAX]);
 
-fn is_open(dir_entry: Location) -> bool {
-    let file_table = OPEN_FILE_TABLE.0.lock();
-    file_table
-        .iter()
-        .flatten()
-        .find(|f| f.dir_entry == dir_entry)
-        .is_some()
+impl OpenFileTable {
+    fn get_slot_mut(&mut self) -> Option<(usize, &mut Option<OpenFile>)> {
+        self.0.iter_mut().enumerate().find(|(_, f)| f.is_none())
+    }
+
+    fn get_open(&self, dir_entry: Location) -> Option<usize> {
+        self.0
+            .iter()
+            .position(|f| f.as_ref().is_some_and(|of| of.dir_entry == dir_entry))
+    }
+
+    fn get_access(&self, dir_entry: Location) -> Option<Access> {
+        self.0
+            .iter()
+            .flatten()
+            .find(|of| of.dir_entry == dir_entry)
+            .map(|of| of.access)
+    }
 }
 
 fn mark_file_for_read(dir_entry: Location) -> Result<usize, FsError> {
-    let mut file_table = OPEN_FILE_TABLE.0.lock();
+    let mut file_table = OPEN_FILE_TABLE.lock();
+    // Is this file already being used for writes (we respect exclusive write access)
+    if file_table.get_access(dir_entry) == Some(Access::Write) {
+        return Err(FsError::OpeningForReadButWriteInProgress);
+    }
     // Find an empty slot and insert the entry - no problem if mutiple read users
     // of the same file
-    for (i, entry) in file_table.iter_mut().enumerate() {
-        if entry.is_none() {
-            *entry = Some(OpenFile {
-                access: Access::Read,
-                dir_entry,
-            });
-            return Ok(i);
-        }
+    if let Some((i, new_slot)) = file_table.get_slot_mut() {
+        *new_slot = Some(OpenFile {
+            access: Access::Read,
+            dir_entry,
+        });
+        return Ok(i);
     }
     Err(FsError::TooManyOpenFiles)
 }
 
 fn mark_file_for_write(dir_entry: Location) -> Result<usize, FsError> {
-    let mut file_table = OPEN_FILE_TABLE.0.lock();
+    let mut file_table = OPEN_FILE_TABLE.lock();
     // First check if this file is already open
-    if file_table
-        .iter()
-        .flatten()
-        .any(|e| e.dir_entry == dir_entry)
-    {
+    if file_table.get_open(dir_entry).is_some() {
         return Err(FsError::OpeningForWriteButAlreadyOpen);
     }
     // It's not already open, so mark this file as open for writing
-    for (i, entry) in file_table.iter_mut().enumerate() {
-        if entry.is_none() {
-            *entry = Some(OpenFile {
-                access: Access::Write,
-                dir_entry,
-            });
-            return Ok(i);
-        }
+    if let Some((i, new_entry)) = file_table.get_slot_mut() {
+        *new_entry = Some(OpenFile {
+            access: Access::Write,
+            dir_entry,
+        });
+        return Ok(i);
     }
     Err(FsError::TooManyOpenFiles)
 }
 
 fn mark_file_closed(idx: usize) {
-    OPEN_FILE_TABLE.0.lock()[idx].take();
+    OPEN_FILE_TABLE.lock().0[idx].take();
 }
 
 #[derive(Debug)]
@@ -103,19 +111,19 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
     })
 }
 
-pub(crate) fn close(file: &FileHandle) {
+pub(crate) fn close(file: &FileHandle) -> Result<(), FsError> {
+    // Check whether the file was write access
+    let file_access = OPEN_FILE_TABLE
+        .lock()
+        .get_access(file.dir_entry_location)
+        .expect("should not be closing a file which is missing from the open file table");
+    let result = if file_access == Access::Write {
+        with_volume(|vol| vol.save_file_meta_data(file))
+    } else {
+        Ok(())
+    };
     mark_file_closed(file.open_file_table_idx);
-}
-
-pub(crate) fn seek(file: &mut FileHandle, position: u32) -> Result<(), FsError> {
-    // Ensure file is open
-    if !is_open(file.dir_entry_location) {
-        return Err(FsError::FileNotOpen);
-    }
-    if position < file.size {
-        file.position = position
-    }
-    Ok(())
+    result
 }
 
 pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, FsError> {

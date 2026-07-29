@@ -478,8 +478,6 @@ impl Volume {
             }
             prev_cluster = cluster;
         }
-        // Loop through dir to find empty slot
-        let location = self.get_avail_dir_entry(dir)?;
         // First parse the file name for FAT16 8.3 validity
         let (name, ext) = FileInfo::parse_83_name(filename)?;
         let file_info = FileInfo {
@@ -489,10 +487,36 @@ impl Volume {
             first_cluster,
             file_size: data.len() as u32,
         };
+        // Loop through dir to find empty slot
+        let dir_entry_slot = self.get_avail_dir_entry(dir)?;
+        let volume_type = self.bpb.volume_type;
+        self.modify_sector(dir_entry_slot.sector, |buf| {
+            buf[dir_entry_slot.offset..dir_entry_slot.offset + dir::ENTRY_BYTES]
+                .copy_from_slice(&file_info.as_bytes(volume_type));
+        })?;
+        Ok(())
+    }
+
+    /// Saves the file size and first_cluster of an existing file
+    pub(super) fn save_file_meta_data(&mut self, file: &FileHandle) -> Result<(), FsError> {
+        // Read the current file_info and update
+        let sector_buf = self.read_sector(file.dir_entry_location.sector)?;
+        let dir_entry_bytes = &sector_buf
+            [file.dir_entry_location.offset..file.dir_entry_location.offset + dir::ENTRY_BYTES];
+        let file_info = if let DirEntryKind::Used(mut file_info) =
+            DirEntryKind::parse(dir_entry_bytes.try_into().unwrap(), self.bpb.volume_type)
+        {
+            // Update the file info with new metadata
+            file_info.first_cluster = file.first_cluster;
+            file_info.file_size = file.size;
+            file_info
+        } else {
+            return Err(FsError::DirectoryEntryNotInUse);
+        };
         let volume_type = self.bpb.volume_type;
         // Now read sector, update entry and write back
-        self.modify_sector(location.sector, |buf| {
-            buf[location.offset..location.offset + dir::ENTRY_BYTES]
+        self.modify_sector(file.dir_entry_location.sector, |buf| {
+            buf[file.dir_entry_location.offset..file.dir_entry_location.offset + dir::ENTRY_BYTES]
                 .copy_from_slice(&file_info.as_bytes(volume_type));
         })?;
         Ok(())

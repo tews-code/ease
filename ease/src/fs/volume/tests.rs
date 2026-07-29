@@ -28,7 +28,7 @@ fn find_size(name: &str) -> Result<u32, FsError> {
 fn read_whole(name: &str) -> Vec<u8> {
     let handle = file::open(Access::Read, ROOT, name).unwrap();
     let content = with_volume(|vol| vol.read_file(&handle)).unwrap();
-    file::close(&handle);
+    file::close(&handle).expect("should not error closing Access::Read file");
     content
 }
 
@@ -127,10 +127,11 @@ fn read_at_reassembles_across_sector_and_cluster_boundaries() {
     // `read_file` is the oracle, but it holds the whole 64 KB file in heap —
     // so compare each read_at chunk against it in-place and never accumulate a
     // second full copy (only one 64 KB buffer plus the stack chunk is live).
-    let expected = read_whole("BIG.TXT");
+    let filename = "BIG.TXT";
+    let expected = read_whole(filename);
     assert_eq!(expected.len(), 64 * 1024);
 
-    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    let mut handle = file::open(Access::Read, ROOT, filename).unwrap();
     let mut buf = [0u8; 100];
     let mut offset = 0usize;
     loop {
@@ -145,7 +146,7 @@ fn read_at_reassembles_across_sector_and_cluster_boundaries() {
         );
         offset += n;
     }
-    file::close(&handle);
+    file::close(&handle).expect("should not error closing Access::Read file");
 
     assert_eq!(
         offset,

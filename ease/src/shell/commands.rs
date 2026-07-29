@@ -17,7 +17,7 @@ use crate::shell::{Args, Console, ascii};
 pub fn cat(console: &mut Console, args: &Args) {
     let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
-        let mut file_handle = match file::open(file::Access::Read, dir, filename) {
+        let mut file = match file::open(file::Access::Read, dir, filename) {
             Ok(file_handle) => file_handle,
             Err(fs_error) => {
                 let _ = writeln!(
@@ -31,8 +31,7 @@ pub fn cat(console: &mut Console, args: &Args) {
         let mut buf = [0u8; 256];
         let mut remainder_byte_count = 0;
         loop {
-            let num_bytes = match file::read_at(&mut file_handle, &mut buf[remainder_byte_count..])
-            {
+            let num_bytes = match file::read_at(&mut file, &mut buf[remainder_byte_count..]) {
                 Ok(num_bytes) => num_bytes,
                 Err(fs_error) => {
                     let _ = writeln!(
@@ -69,7 +68,7 @@ pub fn cat(console: &mut Console, args: &Args) {
                 }
             }
         }
-        file::close(&file_handle);
+        file::close(&file).expect("should not have a file error closing a file with Access::Read");
     }
 }
 
@@ -108,6 +107,60 @@ pub fn help(console: &mut Console) {
 /// - Supports -C argument
 #[allow(dead_code)]
 pub fn hexdump(console: &mut Console, args: &Args) {
+    const READ_BUF_SIZE: usize = 383;
+    const LINE_LEN: usize = 16;
+
+    /// Print one line: the offset, `byte_len` bytes of `line`, and (for `-C`)
+    /// the ASCII column. Columns past `byte_len` are padded so a short final
+    /// line still aligns.
+    fn emit(
+        console: &mut Console,
+        args: &Args,
+        file_offset: usize,
+        line: &[u8; LINE_LEN],
+        byte_len: usize,
+    ) {
+        if args.has_flag(b'C') {
+            // byte-by-byte with ASCII column
+            let _ = write!(console, "{:08x}  ", file_offset);
+
+            // Print hex bytes, padding the columns past the real data.
+            for (j, _) in line.iter().enumerate().take(LINE_LEN) {
+                if j < byte_len {
+                    let _ = write!(console, "{:02x} ", line[j]);
+                } else {
+                    let _ = write!(console, "   ");
+                }
+                if j == 7 {
+                    let _ = write!(console, " ");
+                }
+            }
+
+            // Print ASCII column for the real bytes only.
+            let _ = write!(console, " |");
+            for &byte in &line[..byte_len] {
+                let ch = if byte.is_ascii_graphic() || byte == b' ' {
+                    byte as char
+                } else {
+                    '.'
+                };
+                let _ = write!(console, "{}", ch);
+            }
+            let _ = writeln!(console, "|");
+        } else {
+            let _ = write!(console, "{:07x}", file_offset);
+            for word in line[..byte_len].chunks(2) {
+                if word.len() == 2 {
+                    let val = u16::from_le_bytes([word[0], word[1]]);
+                    let _ = write!(console, " {:04x}", val);
+                } else {
+                    let _ = write!(console, " {:02x}", word[0]);
+                }
+            }
+            let _ = writeln!(console);
+        }
+    }
+
     // Open the file
     for filename in args.positionals.as_slice().iter() {
         let dir = Dir::Root; // For now all files in root
@@ -122,11 +175,15 @@ pub fn hexdump(console: &mut Console, args: &Args) {
                 break;
             }
         };
-        // At open, file position is at file start
-        let mut buf = [0u8; 384];
-        let mut file_offset = 0;
+        // The 16-byte line accumulator lives across reads, so a line that
+        // straddles a read boundary is stitched back together.
+        let mut line = [0u8; LINE_LEN]; // The line currently being assembled.
+        let mut line_len = 0; // How many of those 16 slots are filled so far (0–16).
+        let mut file_offset = 0; // Absolute offset of the line being built (i.e. bytes already emitted).
+        // Read buffer is separate to the line accumulator.
+        let mut read_buf = [0u8; READ_BUF_SIZE];
         loop {
-            let num_bytes_read = match file::read_at(&mut file, &mut buf) {
+            let num_bytes_read = match file::read_at(&mut file, &mut read_buf) {
                 Ok(num_bytes_read) => num_bytes_read,
                 Err(fs_error) => {
                     let _ = writeln!(
@@ -134,67 +191,39 @@ pub fn hexdump(console: &mut Console, args: &Args) {
                         "hexdump: {}: Unable to read file - {:?}.",
                         filename, fs_error
                     );
-                    file::close(&file);
+                    file::close(&file)
+                        .expect("should not have an error closing file with Access::Read access");
                     break;
                 }
             };
             if num_bytes_read == 0 {
                 // End of file
-                file::close(&file);
+                file::close(&file)
+                    .expect("should not have an error closing file with Access::Read access");
                 break;
             }
-            if args.has_flag(b'C') {
-                // byte-by-byte with ASCII column
-                // Loop through content 16 bytes at a time
-                for (i, chunk) in buf[..num_bytes_read].chunks(16).enumerate() {
-                    file_offset += i * 16;
-                    // chunk is a &[u8], length 16 (or less for the last one)
-                    // Print offset
-                    let _ = write!(console, "{:08x}  ", file_offset);
-
-                    // Print hex bytes
-                    for (j, &byte) in chunk.iter().enumerate() {
-                        let _ = write!(console, "{:02x} ", byte);
-                        if j == 7 {
-                            let _ = write!(console, " ");
-                        }
-                    }
-
-                    // Pad if chunk is shorter than 16 (last line)
-                    for j in chunk.len()..16 {
-                        let _ = write!(console, "   ");
-                        if j == 7 {
-                            let _ = write!(console, " ");
-                        }
-                    }
-
-                    // Print ASCII column
-                    let _ = write!(console, " |");
-                    for &byte in chunk {
-                        let ch = if byte.is_ascii_graphic() || byte == b' ' {
-                            byte as char
-                        } else {
-                            '.'
-                        };
-                        let _ = write!(console, "{}", ch);
-                    }
-                    let _ = writeln!(console, "|");
+            // Pour the bytes just read into the line, flushing whenever it fills.
+            let mut buf_pos = 0;
+            loop {
+                let bytes = (LINE_LEN - line_len).min(num_bytes_read - buf_pos);
+                line[line_len..line_len + bytes]
+                    .copy_from_slice(&read_buf[buf_pos..buf_pos + bytes]);
+                // Advance cursors.
+                buf_pos += bytes;
+                line_len += bytes;
+                if line_len == LINE_LEN {
+                    emit(console, args, file_offset, &line, LINE_LEN);
+                    file_offset += LINE_LEN;
+                    line_len = 0;
                 }
-            } else {
-                for (i, chunk) in buf[..num_bytes_read].chunks(16).enumerate() {
-                    file_offset += i * 16;
-                    let _ = write!(console, "{:07x}", file_offset);
-                    for word in chunk.chunks(2) {
-                        if word.len() == 2 {
-                            let val = u16::from_le_bytes([word[0], word[1]]);
-                            let _ = write!(console, " {:04x}", val);
-                        } else {
-                            let _ = write!(console, " {:02x}", word[0]);
-                        }
-                    }
-                    let _ = writeln!(console);
+                if buf_pos == num_bytes_read {
+                    break;
                 }
             }
+        }
+        // Flush the final short line, if the file didn't end on a 16-byte boundary.
+        if line_len > 0 {
+            emit(console, args, file_offset, &line, line_len);
         }
     }
 }
