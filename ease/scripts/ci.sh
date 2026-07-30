@@ -127,7 +127,12 @@ echo "=== QEMU Benchmarks ==="
 # Fresh disk because the virtio and FS benchmarks write blocks.
 # Focused benchmark iteration: ./scripts/ci.sh --test=bench
 ./scripts/mkdisk.sh "$FS_TYPE"
-cargo test --bin ease --no-default-features --features "bench"
+# Pass the FS feature (fat16/fat32) alongside `bench` so the format-specific
+# benchmark asserts compile and run against the matching disk. `bench` is still
+# the sole gate for the benchmark test_cases — the FS feature only selects
+# which per-format bound is checked (it does NOT pull in test-fs functional
+# tests, which are gated separately).
+cargo test --bin ease --no-default-features --features "bench $FS_FEATURE"
 
 echo ""
 echo "=== Host Tests ==="

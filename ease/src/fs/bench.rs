@@ -19,16 +19,23 @@ use crate::fs::volume::with_volume;
 
 // Upper bounds on block ops per operation. Reads/writes are deterministic on a
 // given disk image, so these are tight enough to catch a cache or read/write
-// amplification regression while leaving a little headroom for layout shifts.
-// NOTE: the read and write paths moved to streaming read_at/write_at; the
-// bounds below are provisional and need re-measuring against the printed
-// counts (the write count in particular depends on WRITE_BUF_LEN — see #4).
+// amplification regression while leaving ~12-15% headroom for layout shifts.
+// Read and write differ by FAT type (cluster size / FAT layout differ), so
+// those bounds are per-format; the active one is selected by the fat16/fat32
+// feature (ci.sh passes it to the benchmark stage alongside `bench`).
+// Measured (QEMU virt, streaming read_at/write_at):
+//   open reads: fat32=2  fat16=1
+//   read_at(64KB): fat32=129 fat16=160
+//   allocate_cluster: fat32=122 fat16=15
+//   write_at(8KB) writes: fat32=96 fat16=45  (write amplification — write_at
+//     re-zeroes each new cluster; see #4)
 const OPEN_MAX_READS: u32 = 4;
-const READ_BIG_MAX_READS: u32 = 140;
+const READ_BIG_MAX_READS_FAT16: u32 = 180;
+const READ_BIG_MAX_READS_FAT32: u32 = 140;
 const ALLOC_MAX_READS_FAT16: u32 = 30;
 const ALLOC_MAX_READS_FAT32: u32 = 130;
-const WRITE_MAX_WRITES_FAT16: u32 = 48;
-const WRITE_MAX_WRITES_FAT32: u32 = 80;
+const WRITE_MAX_WRITES_FAT16: u32 = 52;
+const WRITE_MAX_WRITES_FAT32: u32 = 110;
 
 /// Streaming buffer size for the write benchmark. write_at is write-through per
 /// sector, so this directly affects the write count; one sector keeps a
@@ -78,9 +85,15 @@ fn fs_block_io_benchmarks() {
         let _ = entry.close();
     });
     report("read_at(BIG.TXT, 64KB)", reads, writes, cpu);
+    #[cfg(feature = "fat16")]
     assert!(
-        reads <= READ_BIG_MAX_READS,
-        "read reads regressed (amplification/cache?): {reads} > {READ_BIG_MAX_READS}"
+        reads <= READ_BIG_MAX_READS_FAT16,
+        "read reads regressed (amplification/cache?): {reads} > {READ_BIG_MAX_READS_FAT16}"
+    );
+    #[cfg(feature = "fat32")]
+    assert!(
+        reads <= READ_BIG_MAX_READS_FAT32,
+        "read reads regressed (amplification/cache?): {reads} > {READ_BIG_MAX_READS_FAT32}"
     );
 
     // 3. FAT free-cluster scan. `allocate_cluster` walks the FAT looking for a
