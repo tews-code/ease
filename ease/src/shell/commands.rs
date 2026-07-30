@@ -252,12 +252,6 @@ pub fn ls(console: &mut Console, args: &Args) {
     });
 }
 
-/// Prints the elapsed time since boot in milliseconds.
-#[allow(dead_code)]
-pub fn time(console: &mut Console) {
-    let _ = writeln!(console, "{} [ms]", timer::elapsed_ms());
-}
-
 /// Panics the system.
 #[allow(dead_code)]
 pub fn panic(_console: &mut Console) {
@@ -288,6 +282,12 @@ pub fn rm(console: &mut Console, args: &Args) {
 #[cfg(feature = "paint-stack")]
 pub fn stacks(_console: &mut Console) {
     sched::stacks();
+}
+
+/// Prints the elapsed time since boot in milliseconds.
+#[allow(dead_code)]
+pub fn time(console: &mut Console) {
+    let _ = writeln!(console, "{} [ms]", timer::elapsed_ms());
 }
 
 /// Creates an empty file
