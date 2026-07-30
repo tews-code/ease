@@ -120,7 +120,7 @@ pub fn hexdump(console: &mut Console, args: &Args) {
         line: &[u8; LINE_LEN],
         byte_len: usize,
     ) {
-        if args.has_flag(b'C') {
+        if args.has_flag("C") {
             // byte-by-byte with ASCII column
             let _ = write!(console, "{:08x}  ", file_offset);
 
@@ -232,7 +232,7 @@ pub fn ls(console: &mut Console, args: &Args) {
         let _ = vol
             .read_dir(current_dir, |entry| {
                 let name = entry.filename();
-                if args.has_flag(b'l') {
+                if args.has_flag("l") {
                     let _ = writeln!(
                         console,
                         "{:>8}  {}",
@@ -246,7 +246,7 @@ pub fn ls(console: &mut Console, args: &Args) {
             })
             .expect("ls command failed");
 
-        if !args.has_flag(b'l') {
+        if !args.has_flag("l") {
             let _ = writeln!(console);
         }
     });

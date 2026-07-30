@@ -38,13 +38,13 @@ pub struct Shell {
 
 /// Struct holding flags and positional arguments
 pub struct Args<'a> {
-    flags: StackVec<u8, 8>,
+    flags: StackVec<&'a str, 8>,
     positionals: StackVec<&'a str, 8>,
     rest: &'a str,
 }
 
 impl Args<'_> {
-    pub fn has_flag(&self, flag: u8) -> bool {
+    pub fn has_flag(&self, flag: &str) -> bool {
         self.flags.as_slice().contains(&flag)
     }
 }
@@ -119,13 +119,13 @@ impl Shell {
         }
     }
 
-    fn parse(rest: &str) -> Args<'_> {
-        let mut flags = StackVec::<u8, 8>::new();
+    fn parse<'a>(rest: &'a str) -> Args<'a> {
+        let mut flags = StackVec::<&str, 8>::new();
         let mut positionals = StackVec::<&str, 8>::new();
         for token in rest.split_whitespace() {
             if let Some(flag_chars) = token.strip_prefix('-') {
-                for ch in flag_chars.bytes() {
-                    let _ = flags.push(ch);
+                for (i, ch) in flag_chars.char_indices() {
+                    let _ = flags.push(&flag_chars[i..i + ch.len_utf8()]);
                 }
             } else {
                 // Positional argument
@@ -235,7 +235,7 @@ mod tests {
     fn parse_single_flag() {
         let args = Shell::parse("-l");
         assert_eq!(args.flags.len(), 1);
-        assert!(args.has_flag(b'l'));
+        assert!(args.has_flag("l"));
         assert_eq!(args.positionals.len(), 0);
     }
 
@@ -243,23 +243,23 @@ mod tests {
     fn parse_multiple_separate_flags() {
         let args = Shell::parse("-l -a");
         assert_eq!(args.flags.len(), 2);
-        assert!(args.has_flag(b'l'));
-        assert!(args.has_flag(b'a'));
+        assert!(args.has_flag("l"));
+        assert!(args.has_flag("a"));
     }
 
     #[test_case]
     fn parse_combined_flags() {
         let args = Shell::parse("-la");
         assert_eq!(args.flags.len(), 2);
-        assert!(args.has_flag(b'l'));
-        assert!(args.has_flag(b'a'));
+        assert!(args.has_flag("l"));
+        assert!(args.has_flag("a"));
     }
 
     #[test_case]
     fn parse_flags_and_positionals_mixed() {
         let args = Shell::parse("-l HELLO.TXT -a");
-        assert!(args.has_flag(b'l'));
-        assert!(args.has_flag(b'a'));
+        assert!(args.has_flag("l"));
+        assert!(args.has_flag("a"));
         assert_eq!(args.positionals.len(), 1);
         assert_eq!(args.positionals[0], "HELLO.TXT");
     }
@@ -267,7 +267,7 @@ mod tests {
     #[test_case]
     fn has_flag_returns_false_for_absent_flag() {
         let args = Shell::parse("-l");
-        assert!(!args.has_flag(b'a'));
+        assert!(!args.has_flag("a"));
     }
 
     #[test_case]
