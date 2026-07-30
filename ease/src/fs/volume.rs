@@ -340,9 +340,10 @@ impl Volume {
     // Create an empty file ("touch")
     pub fn create_empty_file(&mut self, dir: Dir, filename: &str) -> Result<(), FsError> {
         // Search the directory for the existance of the file
-        if self.find_file_dir_entry(dir, filename).is_ok() {
-            // File already exists
-            return Err(FsError::AlreadyExists);
+        match self.find_file_dir_entry(dir, filename) {
+            Ok(_) => return Err(FsError::AlreadyExists),
+            Err(FsError::NotFound) => {}
+            Err(e) => return Err(e),
         }
         // Find an available directoy slot
         let slot = self.get_avail_dir_entry(dir)?;
