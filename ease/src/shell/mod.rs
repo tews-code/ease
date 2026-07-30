@@ -161,11 +161,12 @@ impl Shell {
             "hexdump" => commands::hexdump(console, &args),
             "ls" => commands::ls(console, &args),
             "panic" => commands::panic(console),
+            "rm" => commands::rm(console, &args),
             #[cfg(feature = "paint-stack")]
             "stacks" => commands::stacks(console),
             "time" => commands::time(console),
+            "truncate" => commands::truncate(console, &args),
             "touch" => commands::touch(console, &args),
-            "rm" => commands::rm(console, &args),
             "write" => commands::write(console, &args),
             _ => commands::unknown(console, cmd),
         }

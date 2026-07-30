@@ -106,6 +106,7 @@ pub enum FsError {
     FileInUse,
     FileNotOpen,
     NotFound,
+    OpenForWriteButReadAccess,
     OpeningForWriteButAlreadyOpen,
     OpeningForReadButWriteInProgress,
     FileInsteadOfDirectory,

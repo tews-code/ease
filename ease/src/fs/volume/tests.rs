@@ -20,16 +20,47 @@ fn find_size(name: &str) -> Result<u32, FsError> {
     with_volume(|vol| vol.find_file_dir_entry(ROOT, name)).map(|(_, fi)| fi.file_size)
 }
 
-/// Open `name`, read the whole file via `read_file`, then close.
+/// Open `name`, read the whole file through the streaming `read_at` cursor,
+/// then close. The 100-byte buffer is not a divisor of the 512 sector, so
+/// reads land mid-sector and exercise the reassembly path.
 ///
 /// `file::open` takes the volume lock internally, so it must run OUTSIDE
-/// `with_volume`; the returned `FileHandle` is what the volume read paths
-/// (`read_file`, `read_at`) operate on.
+/// `with_volume`; the returned `FileHandle` is what `read_at` operates on.
 fn read_whole(name: &str) -> Vec<u8> {
-    let handle = file::open(Access::Read, ROOT, name).unwrap();
-    let content = with_volume(|vol| vol.read_file(&handle)).unwrap();
-    file::close(&handle).expect("should not error closing Access::Read file");
-    content
+    // Pre-size to the file's length so `extend_from_slice` never reallocates:
+    // a growing Vec would hold the old buffer while allocating the larger one,
+    // doubling transient heap use and OOMing on a large file like BIG.TXT.
+    let size = find_size(name).unwrap_or(0) as usize;
+    let mut handle = file::open(Access::Read, ROOT, name).unwrap();
+    let mut out = Vec::with_capacity(size);
+    let mut buf = [0u8; 100];
+    loop {
+        let n = file::read_at(&mut handle, &mut buf).unwrap();
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    handle
+        .close()
+        .expect("should not error closing Access::Read file");
+    out
+}
+
+/// Write `data` to `name` through the streaming `write_at` path, mirroring
+/// the shell `write` command: create if missing, truncate to replace, then
+/// stream the buffer in deliberately small non-aligned chunks so the
+/// multi-call path — sector advance and cluster-boundary follow/allocate,
+/// including a call that ends exactly on a boundary — is exercised. `close`
+/// commits the size/first_cluster metadata.
+fn write_streamed(name: &str, data: &[u8]) {
+    file::touch(ROOT, name).unwrap();
+    file::truncate(ROOT, name).unwrap();
+    let mut handle = file::open(Access::Write, ROOT, name).unwrap();
+    for chunk in data.chunks(7) {
+        file::write_at(&mut handle, chunk).unwrap();
+    }
+    handle.close().expect("close should commit write metadata");
 }
 
 // =========================================================================
@@ -119,14 +150,15 @@ fn read_at_reassembles_across_sector_and_cluster_boundaries() {
     // BIG.TXT is 64 KB: 128 sectors spread across many 2048-byte clusters.
     // Reading it in 100-byte chunks (deliberately not a divisor of the 512
     // sector or the 2048 cluster) forces `read_at` to hand back partial
-    // buffers whose edges land mid-sector and mid-cluster. A defect in the
-    // sector-within-cluster index or the FAT-chain-follow at a cluster
-    // boundary corrupts bytes exactly at those offsets, so reassembling the
-    // stream and comparing it against `read_file` (an independent read path,
-    // via `read_sector_uncached`) pins the whole `read_at` boundary logic.
-    // `read_file` is the oracle, but it holds the whole 64 KB file in heap —
-    // so compare each read_at chunk against it in-place and never accumulate a
-    // second full copy (only one 64 KB buffer plus the stack chunk is live).
+    // buffers whose edges land mid-sector and mid-cluster.
+    //
+    // NOTE: with `read_file` removed, there is no longer an independent read
+    // oracle, so `expected` is read via `read_at` too — the byte comparison
+    // below is self-referential. What still bites here is the final
+    // `offset == len` assertion: it catches `read_at` stalling or stopping
+    // short while following the FAT chain across this large multi-cluster
+    // file (a scale the write_at round-trip tests don't reach). Independent
+    // byte-correctness of read_at now lives in those round-trip tests.
     let filename = "BIG.TXT";
     let expected = read_whole(filename);
     assert_eq!(expected.len(), 64 * 1024);
@@ -146,7 +178,9 @@ fn read_at_reassembles_across_sector_and_cluster_boundaries() {
         );
         offset += n;
     }
-    file::close(&handle).expect("should not error closing Access::Read file");
+    handle
+        .close()
+        .expect("should not error closing Access::Read file");
 
     assert_eq!(
         offset,
@@ -415,73 +449,81 @@ fn set_fat_entry_roundtrip() {
 }
 
 // =========================================================================
-// Volume::write_file tests
+// Streaming write_at / read_at tests
+//
+// write_streamed pushes data through write_at in 7-byte chunks (create +
+// truncate + stream + close); read_whole pulls it back through the read_at
+// cursor. The round-trip is self-checking — the source buffer is the oracle,
+// so a divergence pins a defect in write_at or read_at without depending on
+// any other read path.
 // =========================================================================
 
 #[test_case]
-fn write_file_and_read_back() {
-    with_volume(|vol| vol.write_file(ROOT, "WTEST1.TXT", b"hello world\n")).unwrap();
-    assert_eq!(find_size("WTEST1.TXT").unwrap(), 12);
-    assert_eq!(&read_whole("WTEST1.TXT"), b"hello world\n");
+fn write_at_and_read_back() {
+    write_streamed("WSTREAM1.TXT", b"hello streamed world\n");
+    assert_eq!(find_size("WSTREAM1.TXT").unwrap(), 21);
+    assert_eq!(&read_whole("WSTREAM1.TXT"), b"hello streamed world\n");
 }
 
 #[test_case]
-fn write_file_empty_data() {
-    with_volume(|vol| vol.write_file(ROOT, "WTEST2.TXT", b"")).unwrap();
-    assert_eq!(find_size("WTEST2.TXT").unwrap(), 0);
+fn write_at_empty_data() {
+    // No chunks means no write_at call; close still commits size 0.
+    write_streamed("WSTREAM2.TXT", b"");
+    assert_eq!(find_size("WSTREAM2.TXT").unwrap(), 0);
+    assert!(read_whole("WSTREAM2.TXT").is_empty());
 }
 
 #[test_case]
-fn write_file_overwrite() {
-    with_volume(|vol| vol.write_file(ROOT, "WTEST3.TXT", b"first")).unwrap();
-    with_volume(|vol| vol.write_file(ROOT, "WTEST3.TXT", b"second")).unwrap();
-    assert_eq!(find_size("WTEST3.TXT").unwrap(), 6);
-    assert_eq!(&read_whole("WTEST3.TXT"), b"second");
+fn write_at_overwrite_replaces() {
+    write_streamed("WSTREAM3.TXT", b"the first, longer contents");
+    write_streamed("WSTREAM3.TXT", b"second");
+    // truncate resets the file, so size is the new (shorter) length, not max.
+    assert_eq!(find_size("WSTREAM3.TXT").unwrap(), 6);
+    assert_eq!(&read_whole("WSTREAM3.TXT"), b"second");
 }
 
 #[test_case]
-fn write_file_multi_sector() {
-    // Write more than one sector (512 bytes)
+fn write_at_multi_sector() {
     let data = [b'A'; 1024];
-    with_volume(|vol| vol.write_file(ROOT, "WTEST4.TXT", &data)).unwrap();
-    assert_eq!(find_size("WTEST4.TXT").unwrap(), 1024);
-    let content = read_whole("WTEST4.TXT");
-    assert_eq!(content.len(), 1024);
-    assert!(content.iter().all(|&b| b == b'A'));
+    write_streamed("WSTREAM4.TXT", &data);
+    assert_eq!(find_size("WSTREAM4.TXT").unwrap(), 1024);
+    assert_eq!(read_whole("WSTREAM4.TXT"), data);
 }
 
 #[test_case]
-fn write_file_multi_cluster() {
-    // Write more than one cluster (sectors_per_cluster * 512 = 2048 bytes)
-    let data = [b'B'; 4096];
-    with_volume(|vol| vol.write_file(ROOT, "WTEST5.TXT", &data)).unwrap();
-    assert_eq!(find_size("WTEST5.TXT").unwrap(), 4096);
-    let content = read_whole("WTEST5.TXT");
-    assert_eq!(content.len(), 4096);
-    assert!(content.iter().all(|&b| b == b'B'));
+fn write_at_crosses_cluster_boundary_across_calls() {
+    // 5000 bytes spans more than two 2048-byte clusters. A prime stride (251)
+    // gives every byte a distinct-per-position value that does NOT align to
+    // the 512 sector, the 2048 cluster, or the 7-byte write chunk — so a
+    // misplaced byte at any sector- or cluster-boundary crossing shows up as
+    // a mismatch at exactly that offset.
+    let data: Vec<u8> = (0..5000).map(|i| (i % 251) as u8).collect();
+    write_streamed("WSTREAM5.TXT", &data);
+    assert_eq!(find_size("WSTREAM5.TXT").unwrap(), 5000);
+    let content = read_whole("WSTREAM5.TXT");
+    assert_eq!(content.len(), 5000);
+    assert!(content == data, "streamed round-trip diverges from source");
 }
 
 #[test_case]
-fn write_file_invalid_name() {
-    let current_dir = Dir::Root;
-    with_volume(|vol| {
-        let result = vol.write_file(current_dir, "TOOLONGNAME.TXT", b"data");
-        assert!(matches!(result, Err(FsError::InvalidName)));
-    });
+fn write_at_invalid_name() {
+    // The 8.3 name check happens on create, so touch rejects an over-long name.
+    assert!(matches!(
+        file::touch(ROOT, "TOOLONGNAME.TXT"),
+        Err(FsError::InvalidName)
+    ));
 }
 
 #[test_case]
-fn touch_does_not_overwrite_existing() {
-    with_volume(|vol| {
-        vol.write_file(ROOT, "WTEST6.TXT", b"keep this").unwrap();
-        // create_empty_file refuses to clobber an existing file
-        assert!(matches!(
-            vol.create_empty_file(ROOT, "WTEST6.TXT"),
-            Err(FsError::AlreadyExists)
-        ));
-    });
-    assert_eq!(find_size("WTEST6.TXT").unwrap(), 9); // unchanged
-    assert_eq!(&read_whole("WTEST6.TXT"), b"keep this");
+fn create_empty_file_does_not_overwrite_existing() {
+    write_streamed("WSTREAM6.TXT", b"keep this");
+    // create_empty_file refuses to clobber an existing file
+    assert!(matches!(
+        with_volume(|vol| vol.create_empty_file(ROOT, "WSTREAM6.TXT")),
+        Err(FsError::AlreadyExists)
+    ));
+    assert_eq!(find_size("WSTREAM6.TXT").unwrap(), 9); // unchanged
+    assert_eq!(&read_whole("WSTREAM6.TXT"), b"keep this");
 }
 
 // =========================================================================

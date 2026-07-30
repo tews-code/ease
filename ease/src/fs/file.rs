@@ -88,11 +88,48 @@ impl OpenFileTable {
 #[derive(Debug)]
 pub(crate) struct FileHandle {
     open_file_table_idx: usize,
+    closed: bool,
     pub(super) dir_entry_location: Location,
     pub(super) position: u32,
     pub(super) size: u32,
     pub(super) first_cluster: u32,
     pub(super) current_cluster: u32,
+}
+
+impl FileHandle {
+    pub(crate) fn close(mut self) -> Result<(), FsError> {
+        // Record that we have tried to close the file
+        self.closed = true;
+        // Check whether the file was write access
+        if OPEN_FILE_TABLE.lock().0[self.open_file_table_idx]
+            .as_ref()
+            .is_some_and(|of| of.access == Access::Write)
+        {
+            match with_volume(|vol| vol.save_file_meta_data(&self)) {
+                Ok(_) => Ok(()),
+                Err(fs_error) => Err(fs_error),
+            }
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for FileHandle {
+    fn drop(&mut self) {
+        if !self.closed {
+            // Dropping without a close - make a best effort try to save metadata
+            if OPEN_FILE_TABLE.lock().0[self.open_file_table_idx]
+                .as_ref()
+                .is_some_and(|of| of.access == Access::Write)
+            {
+                let _ = with_volume(|vol| vol.save_file_meta_data(self));
+            }
+        }
+        OPEN_FILE_TABLE
+            .lock()
+            .mark_file_closed(self.open_file_table_idx);
+    }
 }
 
 pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, FsError> {
@@ -109,6 +146,7 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
         // Construct the file handle with private idx member
         Ok(FileHandle {
             open_file_table_idx: idx,
+            closed: false,
             dir_entry_location: location,
             position: 0,
             size: file_info.file_size,
@@ -118,25 +156,27 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
     })
 }
 
-pub(crate) fn close(file: &FileHandle) -> Result<(), FsError> {
-    // Check whether the file was write access
-    let file_access = OPEN_FILE_TABLE
-        .lock()
-        .get_access(file.dir_entry_location)
-        .expect("should not be closing a file which is missing from the open file table");
-    let result = if file_access == Access::Write {
-        with_volume(|vol| vol.save_file_meta_data(file))
-    } else {
-        Ok(())
-    };
-    OPEN_FILE_TABLE
-        .lock()
-        .mark_file_closed(file.open_file_table_idx);
-    result
+pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, FsError> {
+    with_volume(|vol| {
+        if OPEN_FILE_TABLE
+            .lock()
+            .get_open(file.dir_entry_location)
+            .is_none()
+        {
+            return Err(FsError::FileNotOpen);
+        }
+        vol.read_at(file, buf)
+    })
 }
 
-pub(crate) fn read_at(file: &mut FileHandle, buf: &mut [u8]) -> Result<usize, FsError> {
-    with_volume(|vol| vol.read_at(file, buf))
+pub(crate) fn write_at(file: &mut FileHandle, buf: &[u8]) -> Result<usize, FsError> {
+    with_volume(|vol| {
+        // Check if the file is open for writing
+        if OPEN_FILE_TABLE.lock().get_access(file.dir_entry_location) != Some(Access::Write) {
+            return Err(FsError::OpenForWriteButReadAccess);
+        }
+        vol.write_at(file, buf)
+    })
 }
 
 pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
@@ -151,6 +191,16 @@ pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
         vol.delete_file(location, &file_info)?;
         Ok(())
     })
+}
+
+pub(crate) fn truncate(dir: Dir, filename: &str) -> Result<(), FsError> {
+    // Try to open the file for writing
+    let mut file = open(Access::Write, dir, filename).map_err(|e| match e {
+        FsError::OpeningForWriteButAlreadyOpen => FsError::FileInUse,
+        other => other,
+    })?;
+    with_volume(|vol| vol.truncate_file(&mut file))?;
+    file.close()
 }
 
 pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), FsError> {

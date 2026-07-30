@@ -68,7 +68,6 @@ pub fn cat(console: &mut Console, args: &Args) {
                 }
             }
         }
-        file::close(&file).expect("should not have a file error closing a file with Access::Read");
     }
 }
 
@@ -88,18 +87,19 @@ pub fn echo(console: &mut Console, args: &Args) {
 #[allow(dead_code)]
 pub fn help(console: &mut Console) {
     let _ = writeln!(console, "Available commands:");
-    let _ = writeln!(console, "  cat     - Read file content to screen");
-    let _ = writeln!(console, "  clear   - Clear the screen");
-    let _ = writeln!(console, "  echo    - Print arguments");
-    let _ = writeln!(console, "  help    - Show this help");
-    let _ = writeln!(console, "  hexdump - Raw file output");
-    let _ = writeln!(console, "  ls      - List files in directory");
+    let _ = writeln!(console, "  cat      - Read file content to screen");
+    let _ = writeln!(console, "  clear    - Clear the screen");
+    let _ = writeln!(console, "  echo     - Print arguments");
+    let _ = writeln!(console, "  help     - Show this help");
+    let _ = writeln!(console, "  hexdump  - Raw file output");
+    let _ = writeln!(console, "  ls       - List files in directory");
     #[cfg(feature = "paint-stack")]
-    let _ = writeln!(console, "  stacks  - Print painted kernel thread stacks");
-    let _ = writeln!(console, "  time    - Show system time since boot [ms]");
-    let _ = writeln!(console, "  touch   - Create empty file");
-    let _ = writeln!(console, "  rm      - Delete file");
-    let _ = writeln!(console, "  write   - Write text to file");
+    let _ = writeln!(console, "  stacks   - Print painted kernel thread stacks");
+    let _ = writeln!(console, "  time     - Show system time since boot [ms]");
+    let _ = writeln!(console, "  truncate - Truncate file");
+    let _ = writeln!(console, "  touch    - Create empty file");
+    let _ = writeln!(console, "  rm       - Delete file");
+    let _ = writeln!(console, "  write    - Write text to file");
 }
 
 /// Shows the raw file details in hex format
@@ -191,15 +191,11 @@ pub fn hexdump(console: &mut Console, args: &Args) {
                         "hexdump: {}: Unable to read file - {:?}.",
                         filename, fs_error
                     );
-                    file::close(&file)
-                        .expect("should not have an error closing file with Access::Read access");
                     break;
                 }
             };
             if num_bytes_read == 0 {
                 // End of file
-                file::close(&file)
-                    .expect("should not have an error closing file with Access::Read access");
                 break;
             }
             // Pour the bytes just read into the line, flushing whenever it fills.
@@ -268,6 +264,25 @@ pub fn panic(_console: &mut Console) {
     panic!("user requested panic");
 }
 
+/// Deletes a file
+#[allow(dead_code)]
+pub fn rm(console: &mut Console, args: &Args) {
+    let dir = Dir::Root;
+    for filename in args.positionals.as_slice().iter() {
+        match file::rm(dir, filename) {
+            Ok(()) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::InvalidName => "invalid file name",
+                    FsError::NotFound => "file not found",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "rm: {}: {}", filename, msg);
+            }
+        }
+    }
+}
+
 /// Prints the live thread painted stack high watermark
 #[allow(dead_code)]
 #[cfg(feature = "paint-stack")]
@@ -294,12 +309,12 @@ pub fn touch(console: &mut Console, args: &Args) {
     }
 }
 
-/// Deletes a file
+/// Truncate a file to zero bytes
 #[allow(dead_code)]
-pub fn rm(console: &mut Console, args: &Args) {
+pub fn truncate(console: &mut Console, args: &Args) {
     let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
-        match file::rm(dir, filename) {
+        match file::truncate(dir, filename) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
@@ -307,7 +322,7 @@ pub fn rm(console: &mut Console, args: &Args) {
                     FsError::NotFound => "file not found",
                     _ => "device error",
                 };
-                let _ = writeln!(console, "rm: {}: {}", filename, msg);
+                let _ = writeln!(console, "truncate: {}: {}", filename, msg);
             }
         }
     }
@@ -316,7 +331,7 @@ pub fn rm(console: &mut Console, args: &Args) {
 /// Write text to file
 #[allow(dead_code)]
 pub fn write(console: &mut Console, args: &Args) {
-    let current_dir = Dir::Root;
+    let dir = Dir::Root;
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
         Some(pos) => (&rest[..pos], &rest[pos + 1..]),
@@ -327,20 +342,36 @@ pub fn write(console: &mut Console, args: &Args) {
     };
     let mut data = String::from(content);
     data.push('\n');
-    crate::fs::volume::with_volume(|vol| {
-        match vol.write_file(current_dir, filename, data.as_bytes()) {
-            Ok(_) => {}
-            Err(fs_error) => {
-                let msg = match fs_error {
-                    FsError::DiskFull => "disk full",
-                    FsError::DirFull => "directory full",
-                    FsError::InvalidName => "invalid file name",
-                    _ => "device error",
-                };
-                let _ = writeln!(console, "write: {}: {}", filename, msg);
-            }
+    // Ensure the file exists
+    if let Err(e) = file::touch(dir, filename) {
+        let _ = writeln!(console, "write: {}: error on touch: {:?}", filename, e);
+        return;
+    }
+    // Truncate the file if necessary
+    if let Err(e) = file::truncate(dir, filename) {
+        let _ = writeln!(console, "write: {}: error on truncate: {:?}", filename, e);
+        return;
+    }
+    // Open the file for writing
+    // Because we truncated the position is zero
+    let mut file = match file::open(file::Access::Write, dir, filename) {
+        Ok(file) => file,
+        Err(e) => {
+            let _ = writeln!(console, "write: {}: error on open: {:?}", filename, e);
+            return;
         }
-    });
+    };
+    // Write by looping over buffer
+    let write_buf_len = 5;
+    for chunk in data.as_bytes().chunks(write_buf_len) {
+        if let Err(e) = file::write_at(&mut file, chunk) {
+            let _ = writeln!(console, "write: {}: error on write: {:?}", filename, e);
+            return;
+        }
+    }
+    if let Err(e) = file.close() {
+        let _ = writeln!(console, "write: {}: error on close: {:?}", filename, e);
+    }
 }
 
 /// Prints an error message for an unrecognised command.

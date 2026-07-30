@@ -4,8 +4,6 @@
 // Methods do not take the lock
 // See file.rs for API
 
-#[cfg(test)]
-use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
 use crate::drivers::virtio::blk::BlkError;
@@ -91,6 +89,29 @@ impl Volume {
         self.block_cache.write_uncached(block, buf)
     }
 
+    /// Extend a cluster-based file chain by one new cluster
+    ///
+    /// Cluster is zeroed
+    fn extend_cluster_chain(&mut self, current_cluster: u32) -> Result<u32, FsError> {
+        let next_cluster = self.allocate_cluster()?;
+        self.set_fat_entry(current_cluster, FatEntry::Next(next_cluster))?;
+        // Now zero the new cluster
+        let sector = self.bpb.cluster_to_sector(next_cluster);
+        for i in 0..self.bpb.sectors_per_cluster {
+            self.write_sector_uncached(sector + i, &[0u8; SECTOR_SIZE])?;
+        }
+        Ok(next_cluster)
+    }
+
+    /// Move to the next cluster in a file chain: follow the existing FAT link,
+    /// or allocate and link a new cluster if `current_cluster` is end-of-chain.
+    fn next_or_new_cluster(&mut self, current_cluster: u32) -> Result<u32, FsError> {
+        match self.fat_entry(current_cluster)?.next_in_chain()? {
+            Some(next) => Ok(next),
+            None => self.extend_cluster_chain(current_cluster),
+        }
+    }
+
     /// Read a single FAT entry for the given cluster number
     ///
     /// The cluster number is the index into the FAT
@@ -145,6 +166,27 @@ impl Volume {
         Ok(())
     }
 
+    /// Finds directory entry by name and returns sector, offset and DirEntry
+    ///
+    /// Helper function for rm and file write
+    pub(super) fn find_file_dir_entry(
+        &mut self,
+        dir: Dir,
+        name: &str,
+    ) -> Result<(Location, FileInfo), FsError> {
+        for dir_entry in self.dir_iter(dir)? {
+            let dir_entry = dir_entry?;
+            if let DirEntryKind::Used(file_info) = dir_entry.kind
+                && let Ok(n) = file_info.filename().as_str()
+                && n.eq_ignore_ascii_case(name)
+            {
+                // Found a match - return location and file info
+                return Ok((dir_entry.location, file_info));
+            }
+        }
+        Err(FsError::NotFound)
+    }
+
     /// Finds the next available directory entry, reusing deleted entries.
     ///
     /// Returns the sector and offset.
@@ -169,18 +211,24 @@ impl Volume {
                     curr_cluster = next;
                 }
                 // Now extend the current cluster
-                let next_cluster = self.allocate_cluster()?;
-                self.set_fat_entry(curr_cluster, FatEntry::Next(next_cluster))?;
-                // Now zero the new cluster
-                let sector = self.bpb.cluster_to_sector(next_cluster);
-                for i in 0..self.bpb.sectors_per_cluster {
-                    self.write_sector_uncached(sector + i, &[0u8; SECTOR_SIZE])?;
-                }
+                let next_cluster = self.extend_cluster_chain(curr_cluster)?;
                 // Finally offer the first slot as available
-                Ok(Location { sector, offset: 0 })
+                Ok(Location {
+                    sector: self.bpb.cluster_to_sector(next_cluster),
+                    offset: 0,
+                })
             }
         }
     }
+
+    // /// Make a new directory
+    // pub fn make_dir(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
+    //     // Check if the directory name already exists in this directory
+    //     let name = FileInfo::parse_83_name(dirname);
+    //     self.read_dir(dir, |entry| {
+    //         if entry
+    //     })
+    // }
 
     /// Read directory
     pub fn read_dir<B, F>(&mut self, dir: Dir, mut f: F) -> Result<ControlFlow<B>, FsError>
@@ -218,74 +266,15 @@ impl Volume {
         }
     }
 
-    /// Read from a given postion in a file
-    pub(super) fn read_at(
-        &mut self,
-        file: &mut FileHandle,
-        buf: &mut [u8],
-    ) -> Result<usize, FsError> {
-        // If the file is empty or we are at the end then we are already done
-        if file.size == 0 || file.size == file.position {
-            return Ok(0);
-        }
-        // Check that our position is within the file
-        if file.size < file.position {
-            return Err(FsError::ReadPastEndOfFile);
-        }
-        // Convert the file position to a sector for reading. We assume that `position` must be within `current_cluster`.
+    /// Convert a file position to a location
+    ///
+    /// We assume that `position` must be within `current_cluster`.
+    fn get_file_position_location(&self, file: &FileHandle) -> Location {
         let current_cluster_start_sector = self.bpb.cluster_to_sector(file.current_cluster);
-        let current_sector = current_cluster_start_sector
+        let sector = current_cluster_start_sector
             + (file.position / SECTOR_SIZE as u32) % self.bpb.sectors_per_cluster;
         let offset = file.position as usize % SECTOR_SIZE;
-        // Calculate how many bytes we can read from position in this sector
-        // At the very most we will read a SECTOR_SIZE number of bytes
-        let byte_count = (SECTOR_SIZE - offset)
-            .min((file.size - file.position) as usize)
-            .min(buf.len());
-        // Read `byte_count` bytes out of the sector
-        let sector_buf = self.read_sector(current_sector)?;
-        buf[..byte_count].copy_from_slice(&sector_buf[offset..offset + byte_count]);
-        let old_position = file.position;
-        file.position += byte_count as u32;
-        // Check whether we have crossed into a new cluster
-        let bytes_per_cluster = self.bpb.sectors_per_cluster * SECTOR_SIZE as u32;
-        if old_position / bytes_per_cluster != file.position / bytes_per_cluster {
-            // We need to advance to the next cluster
-            let next_cluster = self.fat_entry(file.current_cluster)?;
-            if let Some(next) = next_cluster.next_in_chain()? {
-                file.current_cluster = next;
-            } else {
-                // We have reached the end of the file
-                return Ok(byte_count);
-            }
-        }
-        Ok(byte_count)
-    }
-
-    /// Read a file from a given FileHandle
-    #[cfg(test)]
-    pub fn read_file(&mut self, file: &FileHandle) -> Result<Vec<u8>, FsError> {
-        if file.size == 0 {
-            return Ok(Vec::new());
-        }
-        let mut content = Vec::<u8>::with_capacity(file.size as usize);
-        let mut current_cluster = file.first_cluster;
-        let mut buf = [0u8; SECTOR_SIZE];
-        loop {
-            let start_sector = self.bpb.cluster_to_sector(current_cluster);
-            for s in 0..self.bpb.sectors_per_cluster {
-                self.read_sector_uncached(start_sector + s, &mut buf)?;
-                content.extend_from_slice(&buf);
-            }
-            let next_cluster = self.fat_entry(current_cluster)?;
-            if let Some(next) = next_cluster.next_in_chain()? {
-                current_cluster = next;
-            } else {
-                break;
-            }
-        }
-        content.truncate(file.size as usize);
-        Ok(content)
+        Location { sector, offset }
     }
 
     // Create an empty file ("touch")
@@ -315,25 +304,42 @@ impl Volume {
         Ok(())
     }
 
-    // Finds directory entry by name and returns sector, offset and DirEntry
-    //
-    // Helper function for rm and file write
-    pub(super) fn find_file_dir_entry(
+    /// Read from a given postion in a file
+    pub(super) fn read_at(
         &mut self,
-        dir: Dir,
-        name: &str,
-    ) -> Result<(Location, FileInfo), FsError> {
-        for dir_entry in self.dir_iter(dir)? {
-            let dir_entry = dir_entry?;
-            if let DirEntryKind::Used(file_info) = dir_entry.kind
-                && let Ok(n) = file_info.filename().as_str()
-                && n.eq_ignore_ascii_case(name)
-            {
-                // Found a match - return location and file info
-                return Ok((dir_entry.location, file_info));
+        file: &mut FileHandle,
+        buf: &mut [u8],
+    ) -> Result<usize, FsError> {
+        // If the file is empty or we are at the end then we are already done
+        if file.size == 0 || file.size == file.position {
+            return Ok(0);
+        }
+        // Check that our position is within the file
+        if file.size < file.position {
+            return Err(FsError::ReadPastEndOfFile);
+        }
+        let loc = self.get_file_position_location(file);
+        let byte_count = (SECTOR_SIZE - loc.offset)
+            .min((file.size - file.position) as usize)
+            .min(buf.len());
+        // Read `byte_count` bytes out of the sector
+        let sector_buf = self.read_sector(loc.sector)?;
+        buf[..byte_count].copy_from_slice(&sector_buf[loc.offset..loc.offset + byte_count]);
+        let old_position = file.position;
+        file.position += byte_count as u32;
+        // Check whether we have crossed into a new cluster
+        let bytes_per_cluster = self.bpb.sectors_per_cluster * SECTOR_SIZE as u32;
+        if old_position / bytes_per_cluster != file.position / bytes_per_cluster {
+            // We need to advance to the next cluster
+            let next_cluster = self.fat_entry(file.current_cluster)?;
+            if let Some(next) = next_cluster.next_in_chain()? {
+                file.current_cluster = next;
+            } else {
+                // We have reached the end of the file
+                return Ok(byte_count);
             }
         }
-        Err(FsError::NotFound)
+        Ok(byte_count)
     }
 
     // Helper function to delete all the clusters in a file cluster chain
@@ -373,6 +379,20 @@ impl Volume {
             // rest of the entry bytes remain in place
             buf[location.offset] = dir::ENTRY_DEL;
         })?;
+        Ok(())
+    }
+
+    // First unlink any clusters, then mark the directory entry as deleted
+    pub(super) fn truncate_file(&mut self, file: &mut FileHandle) -> Result<(), FsError> {
+        let file_info = self.get_file_info(file.dir_entry_location)?;
+        // Check if this is a file
+        if file_info.attributes & dir::ATTR_DIR != 0 {
+            return Err(FsError::DirectoryInsteadOfFile);
+        }
+        file.first_cluster = 0;
+        self.delete_file_chain(file_info.first_cluster)?;
+        file.size = 0;
+        file.current_cluster = 0;
         Ok(())
     }
 
@@ -469,63 +489,63 @@ impl Volume {
         Err(FsError::DiskFull)
     }
 
-    /// Write file to disk
-    pub fn write_file(&mut self, dir: Dir, filename: &str, data: &[u8]) -> Result<(), FsError> {
-        // Remove existing file if present (ignore NotFound)
-        match self.find_file_dir_entry(dir, filename) {
-            Ok((location, file_info)) => self.delete_file(location, &file_info)?,
-            Err(FsError::NotFound) => {}
-            Err(e) => return Err(e),
-        };
-        let mut prev_cluster = 0u32;
-        let mut first_cluster = 0u32;
-        let bytes_per_cluster = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
-        for (ci, data_chunk) in data.chunks(bytes_per_cluster).enumerate() {
-            let cluster = self.allocate_cluster()?;
-            if ci == 0 {
-                first_cluster = cluster;
-            } else {
-                self.set_fat_entry(prev_cluster, FatEntry::Next(cluster))?;
-            }
-            let start_sector = self.bpb.cluster_to_sector(cluster);
-            for (si, sector) in data_chunk.chunks(SECTOR_SIZE).enumerate() {
-                let mut sector_buf = [0u8; SECTOR_SIZE];
-                sector_buf[..sector.len()].copy_from_slice(sector);
-                self.write_sector_uncached(start_sector + si as u32, &sector_buf)?;
-            }
-            prev_cluster = cluster;
+    /// Writes from a buffer to an existing file starting at a position
+    ///
+    /// Will overwrite existing data.
+    /// Returns the number of bytes written on success
+    /// Does not update file metadata - expect user to call file::close
+    pub(super) fn write_at(&mut self, file: &mut FileHandle, buf: &[u8]) -> Result<usize, FsError> {
+        // If the write buffer is empty we are done
+        if buf.is_empty() {
+            return Ok(0);
         }
-        // First parse the file name for FAT16 8.3 validity
-        let (name, ext) = FileInfo::parse_83_name(filename)?;
-        let file_info = FileInfo {
-            name,
-            extension: ext,
-            attributes: dir::ATTR_ARCHIVE,
-            first_cluster,
-            file_size: data.len() as u32,
-        };
-        // Loop through dir to find empty slot
-        let dir_entry_slot = self.get_avail_dir_entry(dir)?;
-        let volume_type = self.bpb.volume_type;
-        self.modify_sector(dir_entry_slot.sector, |buf| {
-            buf[dir_entry_slot.offset..dir_entry_slot.offset + dir::ENTRY_BYTES]
-                .copy_from_slice(&file_info.as_bytes(volume_type));
-        })?;
-        Ok(())
+        // If this is an empty file we need to allocate the first cluster
+        if file.first_cluster == 0 {
+            file.first_cluster = self.allocate_cluster()?;
+            file.current_cluster = file.first_cluster;
+        }
+        // Find the location associated with the current file position and set cursors
+        let bytes_per_cluster = self.bpb.sectors_per_cluster * SECTOR_SIZE as u32;
+        if file.position > 0 && file.position.is_multiple_of(bytes_per_cluster) {
+            // position sits on a cluster boundary: current_cluster is the cluster
+            // that ends here, so step to the one that starts here.
+            file.current_cluster = self.next_or_new_cluster(file.current_cluster)?;
+        }
+        let loc = self.get_file_position_location(file);
+        let mut sector = loc.sector;
+        let mut offset = loc.offset;
+        let mut write_pos = 0;
+        let mut num_bytes_written = 0u32;
+        loop {
+            // Copy as many bytes as fit between the cursor and the end of the sector.
+            let byte_count = (SECTOR_SIZE - offset).min(buf.len() - write_pos);
+            self.modify_sector(sector, |sector_buf| {
+                sector_buf[offset..offset + byte_count]
+                    .copy_from_slice(&buf[write_pos..write_pos + byte_count])
+            })?;
+            write_pos += byte_count;
+            num_bytes_written += byte_count as u32;
+            // Done once the whole write buffer has been consumed.
+            if write_pos == buf.len() {
+                break;
+            }
+            // The sector is full but data remains: advance to the next sector,
+            // following the FAT chain (or allocating a cluster) at a cluster boundary.
+            let last_sector_in_cluster =
+                self.bpb.cluster_to_sector(file.current_cluster) + self.bpb.sectors_per_cluster - 1;
+            if sector == last_sector_in_cluster {
+                file.current_cluster = self.next_or_new_cluster(file.current_cluster)?;
+                sector = self.bpb.cluster_to_sector(file.current_cluster);
+            } else {
+                sector += 1;
+            }
+            offset = 0;
+        }
+        // Update the file details
+        file.position += num_bytes_written;
+        file.size = file.size.max(file.position);
+        Ok(num_bytes_written as usize)
     }
-
-    // /// Writes from a buffer to disk
-    // ///
-    // /// Returns the number of bytes written on success
-    // pub(super) fn write_at(&mut self, file: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
-    //     // Remove existing file if present (ignore NotFound)
-    //     match self.get_file_info(file.dir_entry_location) {
-    //         Ok(file_info) => self.delete_file(file.dir_entry_location, &file_info)?,
-    //         Err(FsError::NotFound) => {}
-    //         Err(e) => return Err(e),
-    //     }
-    //     Ok(0)
-    // }
 
     /// Saves the file size and first_cluster of an existing file
     pub(super) fn save_file_meta_data(&mut self, file: &FileHandle) -> Result<(), FsError> {
