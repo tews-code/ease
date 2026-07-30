@@ -367,6 +367,62 @@ fn touch_created_file_visible_in_ls() {
 }
 
 // =========================================================================
+// Volume::make_dir tests
+// =========================================================================
+
+#[test_case]
+fn mkdir_creates_directory() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "MKDIR1").unwrap();
+
+        // The parent lists it, marked as a directory with an allocated cluster.
+        let (_, fi) = vol.find_file_dir_entry(ROOT, "MKDIR1").unwrap();
+        assert!(
+            fi.attributes & dir::ATTR_DIR != 0,
+            "entry should be flagged as a directory"
+        );
+        let cluster = fi.first_cluster;
+        assert!(cluster != 0, "directory should own an allocated cluster");
+
+        // The new directory contains exactly `.` and `..`, and nothing else
+        // (read_dir stops at the first empty entry after them).
+        let mut names: Vec<[u8; 8]> = Vec::new();
+        let mut clusters: Vec<u32> = Vec::new();
+        let _ = vol.read_dir(Dir::SubDir(cluster), |entry| {
+            names.push(entry.name);
+            clusters.push(entry.first_cluster);
+            ControlFlow::<()>::Continue(())
+        });
+        assert_eq!(names.len(), 2, "new dir should contain only . and ..");
+        assert_eq!(&names[0], b".       ", "first entry is .");
+        assert_eq!(&names[1], b"..      ", "second entry is ..");
+        assert_eq!(clusters[0], cluster, ". points to the dir itself");
+        assert_eq!(clusters[1], 0, ".. points to the root (cluster 0)");
+    });
+}
+
+#[test_case]
+fn mkdir_duplicate_rejected() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "MKDIR2").unwrap();
+        assert!(matches!(
+            vol.make_dir(ROOT, "MKDIR2"),
+            Err(FsError::DuplicateDirName)
+        ));
+    });
+}
+
+#[test_case]
+fn mkdir_name_with_extension_rejected() {
+    with_volume(|vol| {
+        assert!(matches!(
+            vol.make_dir(ROOT, "MKDIR3.TXT"),
+            Err(FsError::DirNameHasExtension)
+        ));
+    });
+}
+
+// =========================================================================
 // Volume::delete_file tests
 // =========================================================================
 

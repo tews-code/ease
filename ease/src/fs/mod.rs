@@ -102,7 +102,9 @@ pub enum FsError {
     DirectoryNotEmpty,
     DirFull,
     DirectoryEntryNotInUse,
+    DirNameHasExtension,
     DiskFull,
+    DuplicateDirName,
     FileInUse,
     FileNotOpen,
     NotFound,
@@ -163,7 +165,6 @@ pub(crate) enum VolumeType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[expect(dead_code)]
 pub(crate) enum Dir {
     Root,        // Root directory details are held in VolumeType
     SubDir(u32), // First cluster

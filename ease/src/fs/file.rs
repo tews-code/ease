@@ -132,6 +132,10 @@ impl Drop for FileHandle {
     }
 }
 
+pub(crate) fn mkdir(dir: Dir, dirname: &str) -> Result<(), FsError> {
+    with_volume(|vol| vol.make_dir(dir, dirname))
+}
+
 pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, FsError> {
     // Need both volume and table locks for safe opening
     // The table lock disables IRQs, so must always be the inner lock

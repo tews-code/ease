@@ -252,6 +252,25 @@ pub fn ls(console: &mut Console, args: &Args) {
     });
 }
 
+/// Creates a subdirectory
+#[allow(dead_code)]
+pub fn mkdir(console: &mut Console, args: &Args) {
+    let dir = Dir::Root;
+    for dirname in args.positionals.as_slice().iter() {
+        match file::mkdir(dir, dirname) {
+            Ok(()) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::DuplicateDirName => "directory already exists",
+                    FsError::InvalidName => "invalid directory name",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "mkdir: {}: {}", dirname, msg);
+            }
+        }
+    }
+}
+
 /// Panics the system.
 #[allow(dead_code)]
 pub fn panic(_console: &mut Console) {

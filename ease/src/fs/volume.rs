@@ -91,16 +91,20 @@ impl Volume {
 
     /// Extend a cluster-based file chain by one new cluster
     ///
-    /// Cluster is zeroed
+    /// Cluster is NOT zeroed - use zero_cluster if that is needed
     fn extend_cluster_chain(&mut self, current_cluster: u32) -> Result<u32, FsError> {
         let next_cluster = self.allocate_cluster()?;
         self.set_fat_entry(current_cluster, FatEntry::Next(next_cluster))?;
-        // Now zero the new cluster
-        let sector = self.bpb.cluster_to_sector(next_cluster);
-        for i in 0..self.bpb.sectors_per_cluster {
-            self.write_sector_uncached(sector + i, &[0u8; SECTOR_SIZE])?;
-        }
         Ok(next_cluster)
+    }
+
+    /// Zero a cluster
+    fn zero_cluster(&mut self, cluster: u32) -> Result<(), FsError> {
+        let start_sector = self.bpb.cluster_to_sector(cluster);
+        for i in start_sector..start_sector + self.bpb.sectors_per_cluster {
+            self.write_sector_uncached(i, &[0u8; SECTOR_SIZE])?;
+        }
+        Ok(())
     }
 
     /// Move to the next cluster in a file chain: follow the existing FAT link,
@@ -212,6 +216,8 @@ impl Volume {
                 }
                 // Now extend the current cluster
                 let next_cluster = self.extend_cluster_chain(curr_cluster)?;
+                // Zero this - zero means Empty
+                self.zero_cluster(next_cluster)?;
                 // Finally offer the first slot as available
                 Ok(Location {
                     sector: self.bpb.cluster_to_sector(next_cluster),
@@ -221,14 +227,68 @@ impl Volume {
         }
     }
 
-    // /// Make a new directory
-    // pub fn make_dir(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
-    //     // Check if the directory name already exists in this directory
-    //     let name = FileInfo::parse_83_name(dirname);
-    //     self.read_dir(dir, |entry| {
-    //         if entry
-    //     })
-    // }
+    /// Make a new directory
+    pub fn make_dir(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
+        // Check if the directory name is valid
+        let (name, ext) = FileInfo::parse_83_name(dirname)?;
+        if ext != [b' '; 3] {
+            return Err(FsError::DirNameHasExtension);
+        }
+        // Check for duplicates
+        match self.find_file_dir_entry(dir, dirname) {
+            Ok(_) => return Err(FsError::DuplicateDirName),
+            Err(FsError::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+        // Now create the directory initial cluster and zero - empty entries must be zero
+        let new_cluster = self.allocate_cluster()?;
+        self.zero_cluster(new_cluster)?;
+        // Add the directory entry itself
+        let volume_type = self.bpb.volume_type;
+        // Add the expected self and parent directory entries inside the new directory
+        let wd = Dir::SubDir(new_cluster);
+        let slot = self.get_avail_dir_entry(wd)?;
+        let self_dir_file_info = FileInfo {
+            name: *b".       ",
+            extension: *b"   ",
+            attributes: dir::ATTR_DIR,
+            first_cluster: new_cluster,
+            file_size: 0,
+        };
+        let parent_dir_file_info = FileInfo {
+            name: *b"..      ",
+            extension: *b"   ",
+            attributes: dir::ATTR_DIR,
+            first_cluster: match dir {
+                Dir::Root => 0,
+                Dir::SubDir(c) => c,
+            },
+            file_size: 0,
+        };
+        // Read the sector and write back with new entry
+        self.modify_sector(slot.sector, |buf| {
+            buf[slot.offset..slot.offset + dir::ENTRY_BYTES]
+                .copy_from_slice(&self_dir_file_info.as_bytes(volume_type));
+            buf[slot.offset + dir::ENTRY_BYTES..slot.offset + 2 * dir::ENTRY_BYTES]
+                .copy_from_slice(&parent_dir_file_info.as_bytes(volume_type));
+        })?;
+        // Find an available directoy slot for the parent directory entry
+        let slot = self.get_avail_dir_entry(dir)?;
+        // Construct the directory entry file infos
+        let new_dir_file_info = FileInfo {
+            name,
+            extension: ext,
+            attributes: dir::ATTR_DIR,
+            first_cluster: new_cluster,
+            file_size: 0,
+        };
+        // Read the sector and write back with new entry
+        self.modify_sector(slot.sector, |buf| {
+            buf[slot.offset..slot.offset + dir::ENTRY_BYTES]
+                .copy_from_slice(&new_dir_file_info.as_bytes(volume_type));
+        })?;
+        Ok(())
+    }
 
     /// Read directory
     pub fn read_dir<B, F>(&mut self, dir: Dir, mut f: F) -> Result<ControlFlow<B>, FsError>

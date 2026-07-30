@@ -160,6 +160,7 @@ impl Shell {
             "help" => commands::help(console),
             "hexdump" => commands::hexdump(console, &args),
             "ls" => commands::ls(console, &args),
+            "mkdir" => commands::mkdir(console, &args),
             "panic" => commands::panic(console),
             "rm" => commands::rm(console, &args),
             #[cfg(feature = "paint-stack")]
