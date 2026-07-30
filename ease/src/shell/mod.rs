@@ -14,6 +14,8 @@ pub mod keyboard;
 pub mod line_editor;
 pub mod vt_parse;
 
+const COMMAND_DEPTH: usize = 8;
+
 // ASCII chars that are used for console and serial control
 pub mod ascii {
     pub const BELL: u8 = 0x07;
@@ -38,14 +40,24 @@ pub struct Shell {
 
 /// Struct holding flags and positional arguments
 pub struct Args<'a> {
-    flags: StackVec<&'a str, 8>,
-    positionals: StackVec<&'a str, 8>,
+    flags: StackVec<&'a str, COMMAND_DEPTH>,
+    flag_values: StackVec<(&'a str, &'a str), COMMAND_DEPTH>,
+    positionals: StackVec<&'a str, COMMAND_DEPTH>,
     rest: &'a str,
 }
 
+#[allow(dead_code)]
 impl Args<'_> {
     pub fn has_flag(&self, flag: &str) -> bool {
         self.flags.as_slice().contains(&flag)
+    }
+
+    pub fn flag_value(&self, flag: &str) -> Option<&str> {
+        self.flag_values
+            .as_slice()
+            .iter()
+            .find(|fv| fv.0 == flag)
+            .map(|v| v.1)
     }
 }
 
@@ -120,8 +132,9 @@ impl Shell {
     }
 
     fn parse<'a>(rest: &'a str) -> Args<'a> {
-        let mut flags = StackVec::<&str, 8>::new();
-        let mut positionals = StackVec::<&str, 8>::new();
+        let mut flags = StackVec::<&str, COMMAND_DEPTH>::new();
+        let flag_values = StackVec::<(&str, &str), COMMAND_DEPTH>::new();
+        let mut positionals = StackVec::<&str, COMMAND_DEPTH>::new();
         for token in rest.split_whitespace() {
             if let Some(flag_chars) = token.strip_prefix('-') {
                 for (i, ch) in flag_chars.char_indices() {
@@ -134,6 +147,7 @@ impl Shell {
         }
         Args {
             flags,
+            flag_values,
             positionals,
             rest,
         }
