@@ -132,6 +132,13 @@ impl Drop for FileHandle {
     }
 }
 
+/// Seek within file
+///
+/// Does not support seek beyond file end
+pub(crate) fn lseek(file: &mut FileHandle, seek_bytes: u32) -> Result<(), FsError> {
+    with_volume(|vol| vol.seek(file, seek_bytes))
+}
+
 pub(crate) fn mkdir(dir: Dir, dirname: &str) -> Result<(), FsError> {
     with_volume(|vol| vol.make_dir(dir, dirname))
 }

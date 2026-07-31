@@ -443,6 +443,28 @@ impl Volume {
         Ok(())
     }
 
+    // Seek to absolute position from start of a file
+    pub(super) fn seek(&mut self, file: &mut FileHandle, seek_bytes: u32) -> Result<(), FsError> {
+        if seek_bytes > file.size {
+            return Err(FsError::SeekPastFileEnd);
+        }
+        // Find current cluster for the new position
+        // Clamp the bytes to file size - 1 to avoid EOF overshoot
+        let cluster_idx = seek_bytes.min(file.size.saturating_sub(1))
+            / (self.bpb.sectors_per_cluster * SECTOR_SIZE as u32);
+        let mut current_cluster = file.first_cluster;
+        for _ in 0..cluster_idx {
+            if let Some(next) = self.fat_entry(current_cluster)?.next_in_chain()? {
+                current_cluster = next;
+            } else {
+                return Err(FsError::CorruptFatChain);
+            }
+        }
+        file.position = seek_bytes;
+        file.current_cluster = current_cluster;
+        Ok(())
+    }
+
     // First unlink any clusters, then mark the directory entry as deleted
     pub(super) fn truncate_file(&mut self, file: &mut FileHandle) -> Result<(), FsError> {
         let file_info = self.get_file_info(file.dir_entry_location)?;

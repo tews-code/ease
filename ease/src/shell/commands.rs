@@ -114,19 +114,9 @@ pub fn help(console: &mut Console) {
 /// - Supports -C argument
 #[allow(dead_code)]
 pub fn hexdump(console: &mut Console, arg_str: &str) {
-    let args = match Args::parse(arg_str, &["C"], &["s"]) {
-        Ok(args) => args,
-        Err(e) => {
-            let _ = writeln!(console, "hexdump: invalid arguments - {:?}", e);
-            return;
-        }
-    };
-    const READ_BUF_SIZE: usize = 383;
-    const LINE_LEN: usize = 16;
-
-    /// Print one line: the offset, `byte_len` bytes of `line`, and (for `-C`)
-    /// the ASCII column. Columns past `byte_len` are padded so a short final
-    /// line still aligns.
+    // Print one line: the offset, `byte_len` bytes of `line`, and (for `-C`)
+    // the ASCII column. Columns past `byte_len` are padded so a short final
+    // line still aligns.
     fn emit(
         console: &mut Console,
         args: &Args,
@@ -175,6 +165,28 @@ pub fn hexdump(console: &mut Console, arg_str: &str) {
         }
     }
 
+    let args = match Args::parse(arg_str, &["C"], &["s"]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "hexdump: invalid arguments - {:?}", e);
+            return;
+        }
+    };
+    const READ_BUF_SIZE: usize = 383;
+    const LINE_LEN: usize = 16;
+    // Seek as needed
+    let seek_bytes = if let Some(seek_str) = args.flag_value("s") {
+        match seek_str.parse::<u32>() {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = writeln!(console, "hexdump: invalid argument value - {:?}", e);
+                return;
+            }
+        }
+    } else {
+        0
+    };
+
     // Open the file
     for filename in args.positionals.as_slice().iter() {
         let dir = Dir::Root; // For now all files in root
@@ -189,6 +201,14 @@ pub fn hexdump(console: &mut Console, arg_str: &str) {
                 break;
             }
         };
+        // Seek to the desired byte position
+        match file::lseek(&mut file, seek_bytes) {
+            Ok(_) => {}
+            Err(e) => {
+                let _ = write!(console, "hexdump: {}: Error seeking - {:?}.", filename, e);
+                break;
+            }
+        }
         // The 16-byte line accumulator lives across reads, so a line that
         // straddles a read boundary is stitched back together.
         let mut line = [0u8; LINE_LEN]; // The line currently being assembled.

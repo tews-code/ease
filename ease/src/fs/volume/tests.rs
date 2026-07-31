@@ -423,6 +423,86 @@ fn mkdir_name_with_extension_rejected() {
 }
 
 // =========================================================================
+// Volume::seek (file::lseek) tests
+// =========================================================================
+//
+// BIG.TXT is 64 KB across many 2048-byte clusters, so seeking exercises the
+// FAT-chain walk. Each test seeks, reads, and checks the bytes against the
+// ground-truth full read (read_whole), so it catches a wrong current_cluster.
+
+#[test_case]
+fn seek_within_first_cluster() {
+    let whole = read_whole("BIG.TXT");
+    let offset: usize = 100; // still in cluster index 0
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    file::lseek(&mut handle, offset as u32).unwrap();
+    let mut buf = [0u8; 32];
+    let n = file::read_at(&mut handle, &mut buf).unwrap();
+    handle.close().unwrap();
+    assert_eq!(&buf[..n], &whole[offset..offset + n]);
+}
+
+#[test_case]
+fn seek_to_cluster_boundary() {
+    let whole = read_whole("BIG.TXT");
+    let offset: usize = 2048; // exact start of cluster index 1
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    file::lseek(&mut handle, offset as u32).unwrap();
+    let mut buf = [0u8; 32];
+    let n = file::read_at(&mut handle, &mut buf).unwrap();
+    handle.close().unwrap();
+    assert_eq!(&buf[..n], &whole[offset..offset + n]);
+}
+
+#[test_case]
+fn seek_across_several_clusters() {
+    let whole = read_whole("BIG.TXT");
+    let offset: usize = 5000; // cluster index 2, mid-sector
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    file::lseek(&mut handle, offset as u32).unwrap();
+    let mut buf = [0u8; 64];
+    let n = file::read_at(&mut handle, &mut buf).unwrap();
+    handle.close().unwrap();
+    assert_eq!(&buf[..n], &whole[offset..offset + n]);
+}
+
+#[test_case]
+fn seek_rewind_to_zero() {
+    let whole = read_whole("BIG.TXT");
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    // Advance into a later cluster, then rewind to the start.
+    file::lseek(&mut handle, 6000).unwrap();
+    file::lseek(&mut handle, 0).unwrap();
+    let mut buf = [0u8; 32];
+    let n = file::read_at(&mut handle, &mut buf).unwrap();
+    handle.close().unwrap();
+    assert_eq!(&buf[..n], &whole[..n]);
+}
+
+#[test_case]
+fn seek_past_end_rejected() {
+    let size = find_size("BIG.TXT").unwrap();
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    let result = file::lseek(&mut handle, size + 1);
+    handle.close().unwrap();
+    assert!(matches!(result, Err(FsError::SeekPastFileEnd)));
+}
+
+#[test_case]
+fn seek_to_exact_eof() {
+    // BIG.TXT's size is an exact multiple of the cluster size, so seeking to
+    // exactly the size is the EOF-overshoot case: it must succeed (not walk
+    // one cluster too far), and a read there returns 0.
+    let size = find_size("BIG.TXT").unwrap();
+    let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
+    file::lseek(&mut handle, size).unwrap();
+    let mut buf = [0u8; 16];
+    let n = file::read_at(&mut handle, &mut buf).unwrap();
+    handle.close().unwrap();
+    assert_eq!(n, 0);
+}
+
+// =========================================================================
 // Volume::delete_file tests
 // =========================================================================
 
