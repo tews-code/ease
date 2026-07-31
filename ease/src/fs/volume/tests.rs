@@ -588,6 +588,86 @@ fn cd_nonexistent_rejected() {
 }
 
 // =========================================================================
+// Volume::delete_directory tests
+// =========================================================================
+
+#[test_case]
+fn rmdir_removes_empty_dir() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "RMD1").unwrap();
+        assert!(vol.find_file_dir_entry(ROOT, "RMD1").is_ok());
+        vol.delete_directory(ROOT, "RMD1").unwrap();
+        assert!(matches!(
+            vol.find_file_dir_entry(ROOT, "RMD1"),
+            Err(FsError::NotFound)
+        ));
+    });
+}
+
+#[test_case]
+fn rmdir_then_recreate_reuses_cleanly() {
+    // A clean removal frees the entry and cluster, so the same name can be
+    // created again — which would fail (DuplicateDirName) if the entry lingered.
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "RMD2").unwrap();
+        vol.delete_directory(ROOT, "RMD2").unwrap();
+        vol.make_dir(ROOT, "RMD2").unwrap();
+        assert!(vol.find_file_dir_entry(ROOT, "RMD2").is_ok());
+    });
+}
+
+#[test_case]
+fn rmdir_non_empty_rejected() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "RMD3").unwrap();
+        let (_, fi) = vol.find_file_dir_entry(ROOT, "RMD3").unwrap();
+        vol.create_empty_file(Dir::SubDir(fi.first_cluster), "CHILD.TXT")
+            .unwrap();
+        assert!(matches!(
+            vol.delete_directory(ROOT, "RMD3"),
+            Err(FsError::DirectoryNotEmpty)
+        ));
+        // A rejected removal leaves the directory in place.
+        assert!(vol.find_file_dir_entry(ROOT, "RMD3").is_ok());
+    });
+}
+
+#[test_case]
+fn rmdir_dot_and_dotdot_rejected() {
+    with_volume(|vol| {
+        assert!(matches!(
+            vol.delete_directory(ROOT, "."),
+            Err(FsError::DirectoryIsCurrent)
+        ));
+        assert!(matches!(
+            vol.delete_directory(ROOT, ".."),
+            Err(FsError::DirectoryIsCurrent)
+        ));
+    });
+}
+
+#[test_case]
+fn rmdir_nonexistent_rejected() {
+    with_volume(|vol| {
+        assert!(matches!(
+            vol.delete_directory(ROOT, "NOSUCHRMD"),
+            Err(FsError::NotFound)
+        ));
+    });
+}
+
+#[test_case]
+fn rmdir_regular_file_rejected() {
+    with_volume(|vol| {
+        vol.create_empty_file(ROOT, "RMDFILE.TXT").unwrap();
+        assert!(matches!(
+            vol.delete_directory(ROOT, "RMDFILE.TXT"),
+            Err(FsError::NotADirectory)
+        ));
+    });
+}
+
+// =========================================================================
 // Volume::delete_file tests
 // =========================================================================
 

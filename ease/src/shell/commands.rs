@@ -373,6 +373,34 @@ pub fn rm(console: &mut Console, dir: Dir, arg_str: &str) {
     }
 }
 
+/// Deletes an empty directory
+#[allow(dead_code)]
+pub fn rmdir(console: &mut Console, dir: Dir, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "rmdir: invalid arguments - {:?}", e);
+            return;
+        }
+    };
+    for dirname in args.positionals.as_slice().iter() {
+        match file::rmdir(dir, dirname) {
+            Ok(()) => {}
+            Err(fs_error) => {
+                let msg = match fs_error {
+                    FsError::DirectoryNotEmpty => "directory not empty",
+                    FsError::DirectoryIsCurrent => "cannot remove '.' or '..'",
+                    FsError::NotADirectory => "not a directory",
+                    FsError::InvalidName => "invalid directory name",
+                    FsError::NotFound => "directory not found",
+                    _ => "device error",
+                };
+                let _ = writeln!(console, "rmdir: {}: {}", dirname, msg);
+            }
+        }
+    }
+}
+
 /// Prints the live thread painted stack high watermark
 #[cfg(feature = "paint-stack")]
 #[allow(dead_code)]

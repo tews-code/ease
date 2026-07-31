@@ -312,19 +312,59 @@ impl Volume {
         Ok(ControlFlow::Continue(()))
     }
 
+    // Helper function for directories - find subdir by name and check it is valid
+    fn subdir_info(&mut self, dir: Dir, dirname: &str) -> Result<(Location, FileInfo), FsError> {
+        let (location, file_info) = self.find_file_dir_entry(dir, dirname)?;
+        if file_info.attributes & dir::ATTR_DIR == 0 || file_info.file_size != 0 {
+            Err(FsError::NotADirectory)
+        } else {
+            Ok((location, file_info))
+        }
+    }
+
     /// Change working directory
     pub fn change_directory(&mut self, wd: &mut Dir, dirname: &str) -> Result<(), FsError> {
         if dirname == "." || (dirname == ".." && *wd == Dir::Root) {
             return Ok(()); // We are done
         }
-        let (_, file_info) = self.find_file_dir_entry(*wd, dirname)?;
-        if file_info.attributes & dir::ATTR_DIR == 0 || file_info.file_size != 0 {
-            return Err(FsError::NotADirectory);
-        }
-        *wd = match file_info.first_cluster {
+        let (_, dir_file_info) = self.subdir_info(*wd, dirname)?;
+        *wd = match dir_file_info.first_cluster {
             0 => Dir::Root,
             c => Dir::SubDir(c),
         };
+        Ok(())
+    }
+
+    /// Deletes an "empty" directory - which only has own and parent records
+    pub fn delete_directory(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
+        if dirname == "." || dirname == ".." {
+            return Err(FsError::DirectoryIsCurrent); // We can only delete subdirs
+        }
+        // Find the sub directory and check it is valid
+        let (location, dir_file_info) = self.subdir_info(dir, dirname)?;
+        // Check if the subdir is empty
+        for entry in self.dir_iter(Dir::SubDir(dir_file_info.first_cluster))? {
+            let entry = entry?;
+            match entry.kind {
+                DirEntryKind::Used(fi) => {
+                    if fi.name == *b".       " || fi.name == *b"..      " {
+                        continue;
+                    } else {
+                        return Err(FsError::DirectoryNotEmpty);
+                    }
+                }
+                DirEntryKind::Deleted | DirEntryKind::Empty => continue,
+                DirEntryKind::Unsupported => return Err(FsError::DirectoryNotEmpty),
+            }
+        }
+        // Now delete
+        self.delete_file_chain(dir_file_info.first_cluster)?;
+        self.modify_sector(location.sector, |buf| {
+            // Change the directory entry first byte to mark as deleted.
+            // For FAT filesystems we only change the first byte - all the
+            // rest of the entry bytes remain in place
+            buf[location.offset] = dir::ENTRY_DEL;
+        })?;
         Ok(())
     }
 
@@ -445,7 +485,7 @@ impl Volume {
         location: Location,
         file_info: &FileInfo,
     ) -> Result<(), FsError> {
-        // Check if this is a file
+        // Check if this is a directory
         if file_info.attributes & dir::ATTR_DIR != 0 {
             return Err(FsError::DirectoryInsteadOfFile);
         }
@@ -494,83 +534,6 @@ impl Volume {
         file.current_cluster = 0;
         Ok(())
     }
-
-    // // Remove a directory
-    // //
-    // // First check whether the directory is empty and not the root directory.
-    // // Then mark the directory entry as deleted
-    // // Does not delete if the directory handle is the same directory
-    // pub fn delete_directory(&mut self, curr_dir: Dir, dirname: &str) -> Result<(), FsError> {
-    //     // Get the sector and offset of the directory by name
-    //     let (location, dir_entry) = self.find_dir_entry_location(curr_dir, dirname)?;
-    //     // Check if this is a file
-    //     if dir_entry.attributes != dir::ATTR_DIR {
-    //         return Err(FsError::FileInsteadOfDirectory);
-    //     }
-    //     // Check if it is the root directory
-    //     match self.bpb.volume_type {
-    //         VolumeType::Fat16((root_dir_start_sector, _)) && root_dir_start_sector == self.bpb.cluster_to_sector() =>
-    //     }
-    //     // Check if it is the current directory
-    //     if dir.start_cluster == dir_entry.first_cluster {
-    //         return Err(FsError::DirectoryIsCurrent);
-    //     }
-    //     // Check if the directory is empty
-    //     if dir_entry.first_cluster == 0 {
-    //         return Err(FsError::DirectoryInvalid);
-    //     }
-    //     // Construct a handle for the directory to be deleted
-    //     let dir = Dir { start_cluster: dir_entry.first_cluster };
-    //     // Read the directory and ensure it is empty other than the first two entries
-    //     for (i, entry) in self.dir_iter(dir)?.enumerate() {
-    //         // First entry should be "."
-    //         match entry? {
-    //             DirEntryKind::Used(d) => {
-    //                 d.name
-    //             }
-    //         }
-    //     }
-    //     // Read the first sector and look at the first two directory entries
-    //     let dir_first_sector = self.read_sector(self.bpb.cluster_to_sector(dir_entry.first_cluster))?;
-    //     // Check first entry is parent directory link
-    //     match DirEntryKind::parse(dir_first_sector[0..dir::ENTRY_BYTES].try_into().unwrap(), self.bpb.volume_type) {
-    //         DirEntryKind::Used(d) => {
-    //             if d.name[0] != b"."
-    //                 || d.extension != b"   ",
-    //                 || d.attributes != dir::ATTR_DIR
-    //                 || d.file_size > 0 {
-    //                     return Err(FsError::DirectoryInvalid);
-    //                 }
-    //         },
-    //         _ => { return Err(FsError::DirectoryInvalid); }
-    //     }
-    //     // Check second entry is same directory link
-    //     match DirEntryKind::parse(dir_first_sector[dir::ENTRY_BYTES..2 * dir::ENTRY_BYTES].try_into().unwrap(), self.bpb.volume_type) {
-    //         DirEntryKind::Used(d) => {
-    //             if d.name[0..2] != b".."
-    //                 || d.extension != b"   ",
-    //                 || d.attributes != dir::ATTR_DIR
-    //                 || d.file_size > 0 {
-    //                     return Err(FsError::DirectoryInvalid);
-    //                 }
-    //         },
-    //         _ => { return Err(FsError::DirectoryInvalid); },
-    //     }
-    //     // Check third entry is empty
-    //     match DirEntryKind::parse(dir_first_sector[dir::ENTRY_BYTES * 2..dir::ENTRY_BYTES * 3].try_into().unwrap(), self.bpb.volume_type) {
-    //         DirEntryKind::Empty => {}
-    //         _ => { return Err(FsError::DirectoryInvalid); }
-    //     }
-    //     self.delete_file_chain(dir_entry.first_cluster)?;
-    //     // Now remove the directory entry itself
-    //     self.modify_sector(location.sector, |buf| {
-    //         // Change the directory entry first byte to mark as deleted.
-    //         // For FAT filesystems we only change the first byte - all the
-    //         // rest of the entry bytes remain in place
-    //         buf[location.offset] = dir::ENTRY_DEL;
-    //     })?;
-    //     Ok(())
-    // }
 
     /// Helper file write function to allocate the first cluster of a new file
     pub fn allocate_cluster(&mut self) -> Result<u32, FsError> {

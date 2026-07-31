@@ -210,6 +210,7 @@ impl Shell {
             "mkdir" => commands::mkdir(console, *wd, rest),
             "panic" => commands::panic(console),
             "rm" => commands::rm(console, *wd, rest),
+            "rmdir" => commands::rmdir(console, *wd, rest),
             #[cfg(feature = "paint-stack")]
             "stacks" => commands::stacks(console),
             "time" => commands::time(console),

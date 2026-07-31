@@ -209,6 +209,10 @@ pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
     })
 }
 
+pub(crate) fn rmdir(dir: Dir, dirname: &str) -> Result<(), FsError> {
+    with_volume(|vol| vol.delete_directory(dir, dirname))
+}
+
 pub(crate) fn truncate(dir: Dir, filename: &str) -> Result<(), FsError> {
     // Try to open the file for writing
     let mut file = open(Access::Write, dir, filename).map_err(|e| match e {
