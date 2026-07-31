@@ -203,6 +203,7 @@ impl Shell {
             "cat" => commands::cat(console, *wd, rest),
             "cd" => commands::cd(console, wd, rest),
             "clear" => commands::clear(console),
+            "date" => commands::date(console),
             "echo" => commands::echo(console, rest),
             "help" => commands::help(console),
             "hexdump" => commands::hexdump(console, *wd, rest),
@@ -213,7 +214,15 @@ impl Shell {
             "rmdir" => commands::rmdir(console, *wd, rest),
             #[cfg(feature = "paint-stack")]
             "stacks" => commands::stacks(console),
-            "time" => commands::time(console),
+            "time" => {
+                // Time another command: `rest` is the command line to run, so
+                // re-enter the dispatcher around a wall-clock reading. Reuses
+                // the whole dispatch (any command, its own args, wd changes).
+                let start_ms = crate::kernel::timer::elapsed_ms();
+                Self::execute(console, wd, rest);
+                let elapsed_ms = crate::kernel::timer::elapsed_ms() - start_ms;
+                let _ = writeln!(console, "time: {} ms", elapsed_ms);
+            }
             "truncate" => commands::truncate(console, *wd, rest),
             "touch" => commands::touch(console, *wd, rest),
             "write" => commands::write(console, *wd, rest),

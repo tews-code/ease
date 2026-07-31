@@ -127,7 +127,8 @@ pub fn help(console: &mut Console) {
     let _ = writeln!(console, "  ls       - List files in directory");
     #[cfg(feature = "paint-stack")]
     let _ = writeln!(console, "  stacks   - Print painted kernel thread stacks");
-    let _ = writeln!(console, "  time     - Show system time since boot [ms]");
+    let _ = writeln!(console, "  date     - Show system time since boot [ms]");
+    let _ = writeln!(console, "  time     - Time another command [ms]");
     let _ = writeln!(console, "  truncate - Truncate file");
     let _ = writeln!(console, "  touch    - Create empty file");
     let _ = writeln!(console, "  rm       - Delete file");
@@ -410,7 +411,7 @@ pub fn stacks(_console: &mut Console) {
 
 /// Prints the elapsed time since boot in milliseconds.
 #[allow(dead_code)]
-pub fn time(console: &mut Console) {
+pub fn date(console: &mut Console) {
     let _ = writeln!(console, "{} [ms]", timer::elapsed_ms());
 }
 
