@@ -36,6 +36,16 @@ const ALLOC_MAX_READS_FAT16: u32 = 30;
 const ALLOC_MAX_READS_FAT32: u32 = 130;
 const WRITE_MAX_WRITES_FAT16: u32 = 52;
 const WRITE_MAX_WRITES_FAT32: u32 = 110;
+// make_dir here is the STEADY-STATE (warm) cost: allocate_cluster finds a free
+// cluster near last_alloc_cluster (already advanced by #3/#4), so its FAT scan
+// is ~free. The COLD first-mkdir after boot additionally pays the full FAT
+// free-cluster scan measured by #3 (fat32=122, fat16=15 reads) — that scan is
+// the ~300ms-1.7s the interactive shell hits, and the thing to optimise.
+// Measured warm: fat32=2r/5w  fat16=2r/8w (fat16 zeroes a bigger cluster).
+const MKDIR_MAX_READS_FAT16: u32 = 4;
+const MKDIR_MAX_READS_FAT32: u32 = 4;
+const MKDIR_MAX_WRITES_FAT16: u32 = 12;
+const MKDIR_MAX_WRITES_FAT32: u32 = 8;
 
 /// Streaming buffer size for the write benchmark. write_at is write-through per
 /// sector, so this directly affects the write count; one sector keeps a
@@ -145,6 +155,37 @@ fn fs_block_io_benchmarks() {
     assert!(
         writes <= WRITE_MAX_WRITES_FAT32,
         "write writes regressed: {writes} > {WRITE_MAX_WRITES_FAT32}"
+    );
+
+    // 5. Create a directory (warm — see the MKDIR_MAX_* note on the cold cost).
+    //    Writes are the FAT update (+ mirror copies), the zeroed data cluster,
+    //    and the "." / ".." + parent-entry writes; warm reads are just the
+    //    read-before-write of the touched sectors.
+    let (reads, writes, cpu) = count(|| {
+        with_volume(|vol| {
+            vol.make_dir(current_dir, "BENCHDIR").unwrap();
+        });
+    });
+    report("make_dir(BENCHDIR)", reads, writes, cpu);
+    #[cfg(feature = "fat16")]
+    assert!(
+        reads <= MKDIR_MAX_READS_FAT16,
+        "mkdir reads regressed: {reads} > {MKDIR_MAX_READS_FAT16}"
+    );
+    #[cfg(feature = "fat16")]
+    assert!(
+        writes <= MKDIR_MAX_WRITES_FAT16,
+        "mkdir writes regressed: {writes} > {MKDIR_MAX_WRITES_FAT16}"
+    );
+    #[cfg(feature = "fat32")]
+    assert!(
+        reads <= MKDIR_MAX_READS_FAT32,
+        "mkdir reads regressed: {reads} > {MKDIR_MAX_READS_FAT32}"
+    );
+    #[cfg(feature = "fat32")]
+    assert!(
+        writes <= MKDIR_MAX_WRITES_FAT32,
+        "mkdir writes regressed: {writes} > {MKDIR_MAX_WRITES_FAT32}"
     );
 
     println!();
