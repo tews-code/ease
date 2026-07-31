@@ -31,6 +31,12 @@ use line_editor::LineEditor;
 
 static PROMPT: &str = "moss> ";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellError {
+    CommandTooLong,
+    FlagMissingValue,
+}
+
 /// Interactive shell with line editing, command history, and framebuffer console.
 pub struct Shell {
     console: Console,
@@ -131,26 +137,43 @@ impl Shell {
         }
     }
 
-    fn parse<'a>(rest: &'a str) -> Args<'a> {
+    fn parse<'a>(rest: &'a str, value_flags: &[&str]) -> Result<Args<'a>, ShellError> {
         let mut flags = StackVec::<&str, COMMAND_DEPTH>::new();
-        let flag_values = StackVec::<(&str, &str), COMMAND_DEPTH>::new();
+        let mut flag_values = StackVec::<(&str, &str), COMMAND_DEPTH>::new();
         let mut positionals = StackVec::<&str, COMMAND_DEPTH>::new();
-        for token in rest.split_whitespace() {
+        let mut tokens = rest.split_whitespace();
+        while let Some(token) = tokens.next() {
             if let Some(flag_chars) = token.strip_prefix('-') {
-                for (i, ch) in flag_chars.char_indices() {
-                    let _ = flags.push(&flag_chars[i..i + ch.len_utf8()]);
+                // Check if this is a value flag
+                if value_flags.contains(&flag_chars) {
+                    if let Some(value) = tokens.next() {
+                        if flag_values.push((flag_chars, value)).is_err() {
+                            return Err(ShellError::CommandTooLong);
+                        }
+                    } else {
+                        return Err(ShellError::FlagMissingValue);
+                    }
+                } else {
+                    // This must be just a flag
+                    for (i, ch) in flag_chars.char_indices() {
+                        if flags.push(&flag_chars[i..i + ch.len_utf8()]).is_err() {
+                            return Err(ShellError::CommandTooLong);
+                        }
+                    }
                 }
             } else {
-                // Positional argument
-                let _ = positionals.push(token);
+                // The rest of the tokens are positionals
+                if positionals.push(token).is_err() {
+                    return Err(ShellError::CommandTooLong);
+                }
             }
         }
-        Args {
+        Ok(Args {
             flags,
             flag_values,
             positionals,
             rest,
-        }
+        })
     }
 
     #[allow(dead_code)]
@@ -165,7 +188,13 @@ impl Shell {
             None => (line, ""),
         };
 
-        let args = Self::parse(rest);
+        let args = match Self::parse(rest, &[]) {
+            Ok(args) => args,
+            Err(e) => {
+                let _ = writeln!(console, "{}: error executing command: {:?}", cmd, e);
+                return;
+            }
+        };
 
         match cmd {
             "cat" => commands::cat(console, &args),
@@ -225,70 +254,70 @@ mod tests {
 
     #[test_case]
     fn parse_empty_input() {
-        let args = Shell::parse("");
-        assert_eq!(args.flags.len(), 0);
-        assert_eq!(args.positionals.len(), 0);
+        let args = Shell::parse("", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 0);
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
     }
 
     #[test_case]
     fn parse_single_positional() {
-        let args = Shell::parse("HELLO.TXT");
-        assert_eq!(args.flags.len(), 0);
-        assert_eq!(args.positionals.len(), 1);
-        assert_eq!(args.positionals[0], "HELLO.TXT");
+        let args = Shell::parse("HELLO.TXT", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 0);
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 1);
+        assert_eq!(args.as_ref().unwrap().positionals[0], "HELLO.TXT");
     }
 
     #[test_case]
     fn parse_multiple_positionals() {
-        let args = Shell::parse("FOO.TXT BAR.TXT");
-        assert_eq!(args.positionals.len(), 2);
-        assert_eq!(args.positionals[0], "FOO.TXT");
-        assert_eq!(args.positionals[1], "BAR.TXT");
+        let args = Shell::parse("FOO.TXT BAR.TXT", &[""]);
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 2);
+        assert_eq!(args.as_ref().unwrap().positionals[0], "FOO.TXT");
+        assert_eq!(args.as_ref().unwrap().positionals[1], "BAR.TXT");
     }
 
     #[test_case]
     fn parse_single_flag() {
-        let args = Shell::parse("-l");
-        assert_eq!(args.flags.len(), 1);
-        assert!(args.has_flag("l"));
-        assert_eq!(args.positionals.len(), 0);
+        let args = Shell::parse("-l", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 1);
+        assert!(args.as_ref().unwrap().has_flag("l"));
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
     }
 
     #[test_case]
     fn parse_multiple_separate_flags() {
-        let args = Shell::parse("-l -a");
-        assert_eq!(args.flags.len(), 2);
-        assert!(args.has_flag("l"));
-        assert!(args.has_flag("a"));
+        let args = Shell::parse("-l -a", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 2);
+        assert!(args.as_ref().unwrap().has_flag("l"));
+        assert!(args.as_ref().unwrap().has_flag("a"));
     }
 
     #[test_case]
     fn parse_combined_flags() {
-        let args = Shell::parse("-la");
-        assert_eq!(args.flags.len(), 2);
-        assert!(args.has_flag("l"));
-        assert!(args.has_flag("a"));
+        let args = Shell::parse("-la", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 2);
+        assert!(args.as_ref().unwrap().has_flag("l"));
+        assert!(args.as_ref().unwrap().has_flag("a"));
     }
 
     #[test_case]
     fn parse_flags_and_positionals_mixed() {
-        let args = Shell::parse("-l HELLO.TXT -a");
-        assert!(args.has_flag("l"));
-        assert!(args.has_flag("a"));
-        assert_eq!(args.positionals.len(), 1);
-        assert_eq!(args.positionals[0], "HELLO.TXT");
+        let args = Shell::parse("-l HELLO.TXT -a", &[""]);
+        assert!(args.as_ref().unwrap().has_flag("l"));
+        assert!(args.as_ref().unwrap().has_flag("a"));
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 1);
+        assert_eq!(args.as_ref().unwrap().positionals[0], "HELLO.TXT");
     }
 
     #[test_case]
     fn has_flag_returns_false_for_absent_flag() {
-        let args = Shell::parse("-l");
-        assert!(!args.has_flag("a"));
+        let args = Shell::parse("-l", &[""]);
+        assert!(!args.as_ref().unwrap().has_flag("a"));
     }
 
     #[test_case]
     fn parse_whitespace_only() {
-        let args = Shell::parse("   ");
-        assert_eq!(args.flags.len(), 0);
-        assert_eq!(args.positionals.len(), 0);
+        let args = Shell::parse("   ", &[""]);
+        assert_eq!(args.as_ref().unwrap().flags.len(), 0);
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
     }
 }
