@@ -32,9 +32,10 @@ use line_editor::LineEditor;
 static PROMPT: &str = "moss> ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ShellError {
+enum ShellError<'a> {
     CommandTooLong,
     FlagMissingValue,
+    UnknownFlag(&'a str),
 }
 
 /// Interactive shell with line editing, command history, and framebuffer console.
@@ -64,6 +65,54 @@ impl Args<'_> {
             .iter()
             .find(|fv| fv.0 == flag)
             .map(|v| v.1)
+    }
+
+    fn parse<'a>(
+        rest: &'a str,
+        flag_set: &[&str],
+        value_flag_set: &[&str],
+    ) -> Result<Args<'a>, ShellError<'a>> {
+        let mut flags = StackVec::<&str, COMMAND_DEPTH>::new();
+        let mut flag_values = StackVec::<(&str, &str), COMMAND_DEPTH>::new();
+        let mut positionals = StackVec::<&str, COMMAND_DEPTH>::new();
+        let mut tokens = rest.split_whitespace();
+        while let Some(token) = tokens.next() {
+            if let Some(flag_chars) = token.strip_prefix('-') {
+                // Check if this is a value flag
+                if value_flag_set.contains(&flag_chars) {
+                    if let Some(value) = tokens.next() {
+                        if flag_values.push((flag_chars, value)).is_err() {
+                            return Err(ShellError::CommandTooLong);
+                        }
+                    } else {
+                        return Err(ShellError::FlagMissingValue);
+                    }
+                } else {
+                    // This must be just a flag - check validitity
+                    for (i, ch) in flag_chars.char_indices() {
+                        let flag_char = &flag_chars[i..i + ch.len_utf8()];
+                        if flag_set.contains(&flag_char) {
+                            if flags.push(flag_char).is_err() {
+                                return Err(ShellError::CommandTooLong);
+                            }
+                        } else {
+                            return Err(ShellError::UnknownFlag(flag_char));
+                        }
+                    }
+                }
+            } else {
+                // The rest of the tokens are positionals
+                if positionals.push(token).is_err() {
+                    return Err(ShellError::CommandTooLong);
+                }
+            }
+        }
+        Ok(Args {
+            flags,
+            flag_values,
+            positionals,
+            rest,
+        })
     }
 }
 
@@ -137,45 +186,6 @@ impl Shell {
         }
     }
 
-    fn parse<'a>(rest: &'a str, value_flags: &[&str]) -> Result<Args<'a>, ShellError> {
-        let mut flags = StackVec::<&str, COMMAND_DEPTH>::new();
-        let mut flag_values = StackVec::<(&str, &str), COMMAND_DEPTH>::new();
-        let mut positionals = StackVec::<&str, COMMAND_DEPTH>::new();
-        let mut tokens = rest.split_whitespace();
-        while let Some(token) = tokens.next() {
-            if let Some(flag_chars) = token.strip_prefix('-') {
-                // Check if this is a value flag
-                if value_flags.contains(&flag_chars) {
-                    if let Some(value) = tokens.next() {
-                        if flag_values.push((flag_chars, value)).is_err() {
-                            return Err(ShellError::CommandTooLong);
-                        }
-                    } else {
-                        return Err(ShellError::FlagMissingValue);
-                    }
-                } else {
-                    // This must be just a flag
-                    for (i, ch) in flag_chars.char_indices() {
-                        if flags.push(&flag_chars[i..i + ch.len_utf8()]).is_err() {
-                            return Err(ShellError::CommandTooLong);
-                        }
-                    }
-                }
-            } else {
-                // The rest of the tokens are positionals
-                if positionals.push(token).is_err() {
-                    return Err(ShellError::CommandTooLong);
-                }
-            }
-        }
-        Ok(Args {
-            flags,
-            flag_values,
-            positionals,
-            rest,
-        })
-    }
-
     #[allow(dead_code)]
     fn execute(console: &mut Console, line: &str) {
         let line = line.trim();
@@ -188,30 +198,22 @@ impl Shell {
             None => (line, ""),
         };
 
-        let args = match Self::parse(rest, &[]) {
-            Ok(args) => args,
-            Err(e) => {
-                let _ = writeln!(console, "{}: error executing command: {:?}", cmd, e);
-                return;
-            }
-        };
-
         match cmd {
-            "cat" => commands::cat(console, &args),
+            "cat" => commands::cat(console, rest),
             "clear" => commands::clear(console),
-            "echo" => commands::echo(console, &args),
+            "echo" => commands::echo(console, rest),
             "help" => commands::help(console),
-            "hexdump" => commands::hexdump(console, &args),
-            "ls" => commands::ls(console, &args),
-            "mkdir" => commands::mkdir(console, &args),
+            "hexdump" => commands::hexdump(console, rest),
+            "ls" => commands::ls(console, rest),
+            "mkdir" => commands::mkdir(console, rest),
             "panic" => commands::panic(console),
-            "rm" => commands::rm(console, &args),
+            "rm" => commands::rm(console, rest),
             #[cfg(feature = "paint-stack")]
             "stacks" => commands::stacks(console),
             "time" => commands::time(console),
-            "truncate" => commands::truncate(console, &args),
-            "touch" => commands::touch(console, &args),
-            "write" => commands::write(console, &args),
+            "truncate" => commands::truncate(console, rest),
+            "touch" => commands::touch(console, rest),
+            "write" => commands::write(console, rest),
             _ => commands::unknown(console, cmd),
         }
     }
@@ -254,14 +256,14 @@ mod tests {
 
     #[test_case]
     fn parse_empty_input() {
-        let args = Shell::parse("", &[""]);
+        let args = Args::parse("", &[], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 0);
         assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
     }
 
     #[test_case]
     fn parse_single_positional() {
-        let args = Shell::parse("HELLO.TXT", &[""]);
+        let args = Args::parse("HELLO.TXT", &[], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 0);
         assert_eq!(args.as_ref().unwrap().positionals.len(), 1);
         assert_eq!(args.as_ref().unwrap().positionals[0], "HELLO.TXT");
@@ -269,7 +271,7 @@ mod tests {
 
     #[test_case]
     fn parse_multiple_positionals() {
-        let args = Shell::parse("FOO.TXT BAR.TXT", &[""]);
+        let args = Args::parse("FOO.TXT BAR.TXT", &[], &[]);
         assert_eq!(args.as_ref().unwrap().positionals.len(), 2);
         assert_eq!(args.as_ref().unwrap().positionals[0], "FOO.TXT");
         assert_eq!(args.as_ref().unwrap().positionals[1], "BAR.TXT");
@@ -277,7 +279,7 @@ mod tests {
 
     #[test_case]
     fn parse_single_flag() {
-        let args = Shell::parse("-l", &[""]);
+        let args = Args::parse("-l", &["l"], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 1);
         assert!(args.as_ref().unwrap().has_flag("l"));
         assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
@@ -285,7 +287,7 @@ mod tests {
 
     #[test_case]
     fn parse_multiple_separate_flags() {
-        let args = Shell::parse("-l -a", &[""]);
+        let args = Args::parse("-l -a", &["l", "a"], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 2);
         assert!(args.as_ref().unwrap().has_flag("l"));
         assert!(args.as_ref().unwrap().has_flag("a"));
@@ -293,7 +295,7 @@ mod tests {
 
     #[test_case]
     fn parse_combined_flags() {
-        let args = Shell::parse("-la", &[""]);
+        let args = Args::parse("-la", &["l", "a"], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 2);
         assert!(args.as_ref().unwrap().has_flag("l"));
         assert!(args.as_ref().unwrap().has_flag("a"));
@@ -301,7 +303,7 @@ mod tests {
 
     #[test_case]
     fn parse_flags_and_positionals_mixed() {
-        let args = Shell::parse("-l HELLO.TXT -a", &[""]);
+        let args = Args::parse("-l HELLO.TXT -a", &["l", "a"], &[]);
         assert!(args.as_ref().unwrap().has_flag("l"));
         assert!(args.as_ref().unwrap().has_flag("a"));
         assert_eq!(args.as_ref().unwrap().positionals.len(), 1);
@@ -310,14 +312,51 @@ mod tests {
 
     #[test_case]
     fn has_flag_returns_false_for_absent_flag() {
-        let args = Shell::parse("-l", &[""]);
+        let args = Args::parse("-l", &["l"], &[]);
         assert!(!args.as_ref().unwrap().has_flag("a"));
     }
 
     #[test_case]
     fn parse_whitespace_only() {
-        let args = Shell::parse("   ", &[""]);
+        let args = Args::parse("   ", &[], &[]);
         assert_eq!(args.as_ref().unwrap().flags.len(), 0);
         assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
+    }
+
+    // --- value flags and flag validation ---
+
+    #[test_case]
+    fn parse_value_flag() {
+        let args = Args::parse("-s 1024", &[], &["s"]);
+        assert_eq!(args.as_ref().unwrap().flag_value("s"), Some("1024"));
+        // A value flag is not also recorded as a boolean flag.
+        assert_eq!(args.as_ref().unwrap().flags.len(), 0);
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 0);
+    }
+
+    #[test_case]
+    fn parse_value_flag_then_positional() {
+        let args = Args::parse("-s 1024 FILE.BIN", &["C"], &["s"]);
+        assert_eq!(args.as_ref().unwrap().flag_value("s"), Some("1024"));
+        assert_eq!(args.as_ref().unwrap().positionals.len(), 1);
+        assert_eq!(args.as_ref().unwrap().positionals[0], "FILE.BIN");
+    }
+
+    #[test_case]
+    fn flag_value_returns_none_when_absent() {
+        let args = Args::parse("-C", &["C"], &["s"]);
+        assert_eq!(args.as_ref().unwrap().flag_value("s"), None);
+    }
+
+    #[test_case]
+    fn parse_unknown_flag_rejected() {
+        let args = Args::parse("-x", &[], &[]);
+        assert!(matches!(args, Err(ShellError::UnknownFlag("x"))));
+    }
+
+    #[test_case]
+    fn parse_value_flag_missing_value() {
+        let args = Args::parse("-s", &[], &["s"]);
+        assert!(matches!(args, Err(ShellError::FlagMissingValue)));
     }
 }

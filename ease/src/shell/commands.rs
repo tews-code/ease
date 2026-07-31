@@ -14,7 +14,14 @@ use crate::shell::{Args, Console, ascii};
 
 /// Reads file content to console
 #[allow(dead_code)]
-pub fn cat(console: &mut Console, args: &Args) {
+pub fn cat(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "cat: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         let mut file = match file::open(file::Access::Read, dir, filename) {
@@ -79,8 +86,8 @@ pub fn clear(console: &mut Console) {
 
 /// Prints arguments to the console.
 #[allow(dead_code)]
-pub fn echo(console: &mut Console, args: &Args) {
-    let _ = writeln!(console, "{}", args.rest);
+pub fn echo(console: &mut Console, arg_str: &str) {
+    let _ = writeln!(console, "{}", arg_str);
 }
 
 /// Prints the list of available commands.
@@ -106,7 +113,14 @@ pub fn help(console: &mut Console) {
 ///
 /// - Supports -C argument
 #[allow(dead_code)]
-pub fn hexdump(console: &mut Console, args: &Args) {
+pub fn hexdump(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &["C"], &["s"]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "hexdump: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     const READ_BUF_SIZE: usize = 383;
     const LINE_LEN: usize = 16;
 
@@ -208,7 +222,7 @@ pub fn hexdump(console: &mut Console, args: &Args) {
                 buf_pos += bytes;
                 line_len += bytes;
                 if line_len == LINE_LEN {
-                    emit(console, args, file_offset, &line, LINE_LEN);
+                    emit(console, &args, file_offset, &line, LINE_LEN);
                     file_offset += LINE_LEN;
                     line_len = 0;
                 }
@@ -219,14 +233,21 @@ pub fn hexdump(console: &mut Console, args: &Args) {
         }
         // Flush the final short line, if the file didn't end on a 16-byte boundary.
         if line_len > 0 {
-            emit(console, args, file_offset, &line, line_len);
+            emit(console, &args, file_offset, &line, line_len);
         }
     }
 }
 
 /// Lists files in current directory
 #[allow(dead_code)]
-pub fn ls(console: &mut Console, args: &Args) {
+pub fn ls(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &["l"], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "ls: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let current_dir = Dir::Root;
     crate::fs::volume::with_volume(|vol| {
         let _ = vol
@@ -254,7 +275,14 @@ pub fn ls(console: &mut Console, args: &Args) {
 
 /// Creates a subdirectory
 #[allow(dead_code)]
-pub fn mkdir(console: &mut Console, args: &Args) {
+pub fn mkdir(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "mkdir: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let dir = Dir::Root;
     for dirname in args.positionals.as_slice().iter() {
         match file::mkdir(dir, dirname) {
@@ -279,7 +307,14 @@ pub fn panic(_console: &mut Console) {
 
 /// Deletes a file
 #[allow(dead_code)]
-pub fn rm(console: &mut Console, args: &Args) {
+pub fn rm(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "rm: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         match file::rm(dir, filename) {
@@ -311,7 +346,14 @@ pub fn time(console: &mut Console) {
 
 /// Creates an empty file
 #[allow(dead_code)]
-pub fn touch(console: &mut Console, args: &Args) {
+pub fn touch(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "touch: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     for filename in args.positionals.as_slice().iter() {
         let current_dir = Dir::Root;
         crate::fs::volume::with_volume(|vol| match vol.create_empty_file(current_dir, filename) {
@@ -330,7 +372,14 @@ pub fn touch(console: &mut Console, args: &Args) {
 
 /// Truncate a file to zero bytes
 #[allow(dead_code)]
-pub fn truncate(console: &mut Console, args: &Args) {
+pub fn truncate(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "truncate: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         match file::truncate(dir, filename) {
@@ -349,7 +398,14 @@ pub fn truncate(console: &mut Console, args: &Args) {
 
 /// Write text to file
 #[allow(dead_code)]
-pub fn write(console: &mut Console, args: &Args) {
+pub fn write(console: &mut Console, arg_str: &str) {
+    let args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "write: invalid arguments - {:?}", e);
+            return;
+        }
+    };
     let dir = Dir::Root;
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
