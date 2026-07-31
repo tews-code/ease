@@ -14,7 +14,7 @@ use crate::shell::{Args, Console, ascii};
 
 /// Reads file content to console
 #[allow(dead_code)]
-pub fn cat(console: &mut Console, arg_str: &str) {
+pub fn cat(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -22,7 +22,6 @@ pub fn cat(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         let mut file = match file::open(file::Access::Read, dir, filename) {
             Ok(file_handle) => file_handle,
@@ -84,6 +83,32 @@ pub fn clear(console: &mut Console) {
     let _ = write!(console, "{}", ascii::FF as char);
 }
 
+/// Change working directory
+#[allow(dead_code)]
+pub fn cd(console: &mut Console, wd: &mut Dir, arg_str: &str) {
+    let mut args = match Args::parse(arg_str, &[], &[]) {
+        Ok(args) => args,
+        Err(e) => {
+            let _ = writeln!(console, "cd: invalid arguments - {:?}", e);
+            return;
+        }
+    };
+    if args.positionals.len() > 1 {
+        let _ = writeln!(console, "cd: too many arguments");
+        return;
+    }
+    if let Some(dirname) = args.positionals.pop() {
+        match file::change_directory(wd, dirname) {
+            Ok(_) => {}
+            Err(e) => {
+                let _ = writeln!(console, "cd: error changing directory - {:?}", e);
+            }
+        }
+    } else {
+        let _ = writeln!(console, "cd: need directory name");
+    }
+}
+
 /// Prints arguments to the console.
 #[allow(dead_code)]
 pub fn echo(console: &mut Console, arg_str: &str) {
@@ -112,8 +137,9 @@ pub fn help(console: &mut Console) {
 /// Shows the raw file details in hex format
 ///
 /// - Supports -C argument
+/// - Supports -s bytes for absolute byte seek
 #[allow(dead_code)]
-pub fn hexdump(console: &mut Console, arg_str: &str) {
+pub fn hexdump(console: &mut Console, dir: Dir, arg_str: &str) {
     // Print one line: the offset, `byte_len` bytes of `line`, and (for `-C`)
     // the ASCII column. Columns past `byte_len` are padded so a short final
     // line still aligns.
@@ -189,7 +215,6 @@ pub fn hexdump(console: &mut Console, arg_str: &str) {
 
     // Open the file
     for filename in args.positionals.as_slice().iter() {
-        let dir = Dir::Root; // For now all files in root
         let mut file = match crate::fs::file::open(file::Access::Read, dir, filename) {
             Ok(file) => file,
             Err(fs_error) => {
@@ -260,7 +285,7 @@ pub fn hexdump(console: &mut Console, arg_str: &str) {
 
 /// Lists files in current directory
 #[allow(dead_code)]
-pub fn ls(console: &mut Console, arg_str: &str) {
+pub fn ls(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &["l"], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -268,10 +293,9 @@ pub fn ls(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let current_dir = Dir::Root;
     crate::fs::volume::with_volume(|vol| {
         let _ = vol
-            .read_dir(current_dir, |entry| {
+            .read_dir(dir, |entry| {
                 let name = entry.filename();
                 if args.has_flag("l") {
                     let _ = writeln!(
@@ -295,7 +319,7 @@ pub fn ls(console: &mut Console, arg_str: &str) {
 
 /// Creates a subdirectory
 #[allow(dead_code)]
-pub fn mkdir(console: &mut Console, arg_str: &str) {
+pub fn mkdir(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -303,7 +327,6 @@ pub fn mkdir(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let dir = Dir::Root;
     for dirname in args.positionals.as_slice().iter() {
         match file::mkdir(dir, dirname) {
             Ok(()) => {}
@@ -327,7 +350,7 @@ pub fn panic(_console: &mut Console) {
 
 /// Deletes a file
 #[allow(dead_code)]
-pub fn rm(console: &mut Console, arg_str: &str) {
+pub fn rm(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -335,7 +358,6 @@ pub fn rm(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         match file::rm(dir, filename) {
             Ok(()) => {}
@@ -352,8 +374,8 @@ pub fn rm(console: &mut Console, arg_str: &str) {
 }
 
 /// Prints the live thread painted stack high watermark
-#[allow(dead_code)]
 #[cfg(feature = "paint-stack")]
+#[allow(dead_code)]
 pub fn stacks(_console: &mut Console) {
     sched::stacks();
 }
@@ -366,7 +388,7 @@ pub fn time(console: &mut Console) {
 
 /// Creates an empty file
 #[allow(dead_code)]
-pub fn touch(console: &mut Console, arg_str: &str) {
+pub fn touch(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -375,8 +397,7 @@ pub fn touch(console: &mut Console, arg_str: &str) {
         }
     };
     for filename in args.positionals.as_slice().iter() {
-        let current_dir = Dir::Root;
-        crate::fs::volume::with_volume(|vol| match vol.create_empty_file(current_dir, filename) {
+        crate::fs::volume::with_volume(|vol| match vol.create_empty_file(dir, filename) {
             Ok(_) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
@@ -392,7 +413,7 @@ pub fn touch(console: &mut Console, arg_str: &str) {
 
 /// Truncate a file to zero bytes
 #[allow(dead_code)]
-pub fn truncate(console: &mut Console, arg_str: &str) {
+pub fn truncate(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -400,7 +421,6 @@ pub fn truncate(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let dir = Dir::Root;
     for filename in args.positionals.as_slice().iter() {
         match file::truncate(dir, filename) {
             Ok(()) => {}
@@ -418,7 +438,7 @@ pub fn truncate(console: &mut Console, arg_str: &str) {
 
 /// Write text to file
 #[allow(dead_code)]
-pub fn write(console: &mut Console, arg_str: &str) {
+pub fn write(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
@@ -426,7 +446,6 @@ pub fn write(console: &mut Console, arg_str: &str) {
             return;
         }
     };
-    let dir = Dir::Root;
     let rest = args.rest.trim();
     let (filename, content) = match rest.find(' ') {
         Some(pos) => (&rest[..pos], &rest[pos + 1..]),

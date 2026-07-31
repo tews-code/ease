@@ -503,6 +503,91 @@ fn seek_to_exact_eof() {
 }
 
 // =========================================================================
+// Volume::change_directory tests
+// =========================================================================
+
+#[test_case]
+fn cd_into_subdir_then_back_to_root() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "CDBACK").unwrap();
+        let (_, fi) = vol.find_file_dir_entry(ROOT, "CDBACK").unwrap();
+        let sub = Dir::SubDir(fi.first_cluster);
+
+        let mut wd = Dir::Root;
+        vol.change_directory(&mut wd, "CDBACK").unwrap();
+        assert_eq!(wd, sub);
+
+        // `..` reads the on-disk entry (first_cluster 0) and climbs to root.
+        vol.change_directory(&mut wd, "..").unwrap();
+        assert_eq!(wd, Dir::Root);
+    });
+}
+
+#[test_case]
+fn cd_dotdot_climbs_to_parent_subdir_not_root() {
+    with_volume(|vol| {
+        // Root / CDOUTER / CDINNER
+        vol.make_dir(ROOT, "CDOUTER").unwrap();
+        let (_, outer_fi) = vol.find_file_dir_entry(ROOT, "CDOUTER").unwrap();
+        let outer = Dir::SubDir(outer_fi.first_cluster);
+        vol.make_dir(outer, "CDINNER").unwrap();
+        let (_, inner_fi) = vol.find_file_dir_entry(outer, "CDINNER").unwrap();
+        let inner = Dir::SubDir(inner_fi.first_cluster);
+
+        let mut wd = Dir::Root;
+        vol.change_directory(&mut wd, "CDOUTER").unwrap();
+        vol.change_directory(&mut wd, "CDINNER").unwrap();
+        assert_eq!(wd, inner);
+        // `..` from the inner dir returns to the outer subdir, not root.
+        vol.change_directory(&mut wd, "..").unwrap();
+        assert_eq!(wd, outer);
+    });
+}
+
+#[test_case]
+fn cd_dot_is_a_noop() {
+    with_volume(|vol| {
+        let mut wd = Dir::Root;
+        vol.change_directory(&mut wd, ".").unwrap();
+        assert_eq!(wd, Dir::Root);
+    });
+}
+
+#[test_case]
+fn cd_dotdot_from_root_stays_root() {
+    with_volume(|vol| {
+        let mut wd = Dir::Root;
+        vol.change_directory(&mut wd, "..").unwrap();
+        assert_eq!(wd, Dir::Root);
+    });
+}
+
+#[test_case]
+fn cd_into_file_rejected() {
+    with_volume(|vol| {
+        vol.create_empty_file(ROOT, "CDFILE.TXT").unwrap();
+        let mut wd = Dir::Root;
+        assert!(matches!(
+            vol.change_directory(&mut wd, "CDFILE.TXT"),
+            Err(FsError::NotADirectory)
+        ));
+        assert_eq!(wd, Dir::Root, "wd must be unchanged on error");
+    });
+}
+
+#[test_case]
+fn cd_nonexistent_rejected() {
+    with_volume(|vol| {
+        let mut wd = Dir::Root;
+        assert!(matches!(
+            vol.change_directory(&mut wd, "NOSUCHDIR"),
+            Err(FsError::NotFound)
+        ));
+        assert_eq!(wd, Dir::Root);
+    });
+}
+
+// =========================================================================
 // Volume::delete_file tests
 // =========================================================================
 

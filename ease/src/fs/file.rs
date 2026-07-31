@@ -132,6 +132,11 @@ impl Drop for FileHandle {
     }
 }
 
+/// Change working directory
+pub(crate) fn change_directory(wd: &mut Dir, dirname: &str) -> Result<(), FsError> {
+    with_volume(|vol| vol.change_directory(wd, dirname))
+}
+
 /// Seek within file
 ///
 /// Does not support seek beyond file end

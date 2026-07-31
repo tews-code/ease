@@ -29,6 +29,8 @@ pub mod ascii {
 
 use line_editor::LineEditor;
 
+use crate::fs::Dir;
+
 static PROMPT: &str = "moss> ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +45,7 @@ pub struct Shell {
     console: Console,
     keyboard: Keyboard,
     line_editor: LineEditor,
+    wd: Dir,
 }
 
 /// Struct holding flags and positional arguments
@@ -53,7 +56,6 @@ pub struct Args<'a> {
     rest: &'a str,
 }
 
-#[allow(dead_code)]
 impl Args<'_> {
     pub fn has_flag(&self, flag: &str) -> bool {
         self.flags.as_slice().contains(&flag)
@@ -116,19 +118,19 @@ impl Args<'_> {
     }
 }
 
+#[allow(dead_code)]
 impl Shell {
     /// Creates a new shell with the given framebuffer console.
-    #[allow(dead_code)]
     pub fn new(console: Console) -> Self {
         Self {
             console,
             keyboard: Keyboard::default(),
             line_editor: LineEditor::new(),
+            wd: Dir::Root,
         }
     }
 
     /// Runs the shell main loop. Polls keyboard, processes input, dispatches commands. Never returns.
-    #[allow(dead_code)]
     pub fn run(&mut self) -> ! {
         loop {
             let _ = write!(self.console, "{PROMPT}");
@@ -163,7 +165,7 @@ impl Shell {
                             self.console.put_char(ascii::LF);
                             let cmd = core::str::from_utf8(self.line_editor.line())
                                 .expect("should be UTF-8");
-                            Self::execute(&mut self.console, cmd);
+                            Self::execute(&mut self.console, &mut self.wd, cmd);
                             self.line_editor.reset();
                             self.console.reset_line();
                             break;
@@ -186,8 +188,7 @@ impl Shell {
         }
     }
 
-    #[allow(dead_code)]
-    fn execute(console: &mut Console, line: &str) {
+    fn execute(console: &mut Console, wd: &mut Dir, line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -199,21 +200,22 @@ impl Shell {
         };
 
         match cmd {
-            "cat" => commands::cat(console, rest),
+            "cat" => commands::cat(console, *wd, rest),
+            "cd" => commands::cd(console, wd, rest),
             "clear" => commands::clear(console),
             "echo" => commands::echo(console, rest),
             "help" => commands::help(console),
-            "hexdump" => commands::hexdump(console, rest),
-            "ls" => commands::ls(console, rest),
-            "mkdir" => commands::mkdir(console, rest),
+            "hexdump" => commands::hexdump(console, *wd, rest),
+            "ls" => commands::ls(console, *wd, rest),
+            "mkdir" => commands::mkdir(console, *wd, rest),
             "panic" => commands::panic(console),
-            "rm" => commands::rm(console, rest),
+            "rm" => commands::rm(console, *wd, rest),
             #[cfg(feature = "paint-stack")]
             "stacks" => commands::stacks(console),
             "time" => commands::time(console),
-            "truncate" => commands::truncate(console, rest),
-            "touch" => commands::touch(console, rest),
-            "write" => commands::write(console, rest),
+            "truncate" => commands::truncate(console, *wd, rest),
+            "touch" => commands::touch(console, *wd, rest),
+            "write" => commands::write(console, *wd, rest),
             _ => commands::unknown(console, cmd),
         }
     }

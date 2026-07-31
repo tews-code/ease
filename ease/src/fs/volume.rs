@@ -312,6 +312,22 @@ impl Volume {
         Ok(ControlFlow::Continue(()))
     }
 
+    /// Change working directory
+    pub fn change_directory(&mut self, wd: &mut Dir, dirname: &str) -> Result<(), FsError> {
+        if dirname == "." || (dirname == ".." && *wd == Dir::Root) {
+            return Ok(()); // We are done
+        }
+        let (_, file_info) = self.find_file_dir_entry(*wd, dirname)?;
+        if file_info.attributes & dir::ATTR_DIR == 0 || file_info.file_size != 0 {
+            return Err(FsError::NotADirectory);
+        }
+        *wd = match file_info.first_cluster {
+            0 => Dir::Root,
+            c => Dir::SubDir(c),
+        };
+        Ok(())
+    }
+
     /// Finds the FileInfo for a given directory entry location
     fn get_file_info(&mut self, location: Location) -> Result<FileInfo, FsError> {
         // Read the current file_info and update
