@@ -668,6 +668,64 @@ fn rmdir_regular_file_rejected() {
 }
 
 // =========================================================================
+// Path resolution tests (resolve_parent / walk_dir)
+// =========================================================================
+
+// These clean up their root-level fixtures (create + remove) so the shared
+// disk image is left unchanged for later layout-sensitive tests.
+
+#[test_case]
+fn path_create_resolve_and_remove() {
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "PATHT").unwrap();
+        let (_, p) = vol.find_file_dir_entry(ROOT, "PATHT").unwrap();
+        let pdir = Dir::SubDir(p.first_cluster);
+
+        // mkdir + touch through a path relative to ROOT.
+        vol.make_dir(ROOT, "PATHT/SUB").unwrap();
+        vol.create_empty_file(ROOT, "PATHT/F.TXT").unwrap();
+        assert!(vol.find_file_dir_entry(pdir, "SUB").is_ok());
+        assert!(vol.find_file_dir_entry(pdir, "F.TXT").is_ok());
+
+        // cd through a multi-component path in one call.
+        let (_, s) = vol.find_file_dir_entry(pdir, "SUB").unwrap();
+        let mut wd = Dir::Root;
+        vol.change_directory(&mut wd, "PATHT/SUB").unwrap();
+        assert_eq!(wd, Dir::SubDir(s.first_cluster));
+
+        // rmdir through a path.
+        vol.delete_directory(ROOT, "PATHT/SUB").unwrap();
+        assert!(matches!(
+            vol.find_file_dir_entry(pdir, "SUB"),
+            Err(FsError::NotFound)
+        ));
+
+        // Clean up so root is left as we found it.
+        let (loc, info) = vol.find_file_dir_entry(pdir, "F.TXT").unwrap();
+        vol.delete_file(loc, &info).unwrap();
+        vol.delete_directory(ROOT, "PATHT").unwrap();
+    });
+}
+
+#[test_case]
+fn rmdir_guard_refuses_the_working_dir_via_path() {
+    // Standing in PGUARD, a path that resolves back to the wd (../PGUARD) is
+    // refused even though the final name isn't "." — the guard is on identity.
+    with_volume(|vol| {
+        vol.make_dir(ROOT, "PGUARD").unwrap();
+        let (_, g) = vol.find_file_dir_entry(ROOT, "PGUARD").unwrap();
+        let wd = Dir::SubDir(g.first_cluster);
+        assert!(matches!(
+            vol.delete_directory(wd, "../PGUARD"),
+            Err(FsError::DirectoryIsCurrent)
+        ));
+        assert!(vol.find_file_dir_entry(ROOT, "PGUARD").is_ok());
+        // Clean up.
+        vol.delete_directory(ROOT, "PGUARD").unwrap();
+    });
+}
+
+// =========================================================================
 // Volume::delete_file tests
 // =========================================================================
 

@@ -229,6 +229,8 @@ impl Volume {
 
     /// Make a new directory
     pub fn make_dir(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
+        // Resolve any leading path; the final component is the new directory name.
+        let (dir, dirname) = self.resolve_parent(dir, dirname)?;
         // Check if the directory name is valid
         let (name, ext) = FileInfo::parse_83_name(dirname)?;
         if ext != [b' '; 3] {
@@ -322,26 +324,82 @@ impl Volume {
         }
     }
 
-    /// Change working directory
-    pub fn change_directory(&mut self, wd: &mut Dir, dirname: &str) -> Result<(), FsError> {
-        if dirname == "." || (dirname == ".." && *wd == Dir::Root) {
-            return Ok(()); // We are done
-        }
-        let (_, dir_file_info) = self.subdir_info(*wd, dirname)?;
-        *wd = match dir_file_info.first_cluster {
-            0 => Dir::Root,
-            c => Dir::SubDir(c),
+    // Helper function to find parent directory
+    // Split `path` into (parent directory, final component) and resolve the
+    // parent. The final component is a name to act on (create/find/remove), not
+    // a directory to enter — so we walk only the part before the last '/'.
+    // A bare name (no '/') resolves the parent to `dir` unchanged.
+    pub(super) fn resolve_parent<'a>(
+        &mut self,
+        dir: Dir,
+        path: &'a str,
+    ) -> Result<(Dir, &'a str), FsError> {
+        let (parent_path, name) = match path.rfind('/') {
+            Some(idx) => (&path[..idx], &path[idx + 1..]),
+            None => ("", path),
         };
+        let parent_dir = self.walk_dir(dir, parent_path)?;
+        Ok((parent_dir, name))
+    }
+
+    // Helper function to walk directories
+    fn walk_dir(&mut self, start_dir: Dir, path: &str) -> Result<Dir, FsError> {
+        // 1. Pick the start: if the path begins with /, start at Dir::Root; otherwise start at the current wd.
+        let mut current_dir = if path.strip_prefix('/').is_some() {
+            Dir::Root
+        } else {
+            start_dir
+        };
+        // 2. Split on / and fold the existing per-component step over each piece,
+        let dirname_iter = path.split_terminator('/');
+        for dirname in dirname_iter {
+            if dirname == ".." && current_dir == Dir::Root {
+                continue;
+            }
+            //skipping empty pieces (handles // and trailing /).
+            if dirname.is_empty() || dirname == "." {
+                continue;
+            }
+            // 3. The result is the Dir the path names. cd a/b/c now works for free.
+            let (_, dir_file_info) = self.subdir_info(current_dir, dirname)?;
+            current_dir = match dir_file_info.first_cluster {
+                0 => Dir::Root,
+                c => Dir::SubDir(c),
+            };
+        }
+        Ok(current_dir)
+    }
+
+    /// Change working directory
+    pub fn change_directory(&mut self, wd: &mut Dir, pathname: &str) -> Result<(), FsError> {
+        let dir = self.walk_dir(*wd, pathname)?;
+        *wd = dir;
         Ok(())
     }
 
     /// Deletes an "empty" directory - which only has own and parent records
     pub fn delete_directory(&mut self, dir: Dir, dirname: &str) -> Result<(), FsError> {
+        // `dir` is the working directory the request came from.
+        let wd = dir;
+        // Resolve any leading path; the final component names the dir to remove.
+        let (dir, dirname) = self.resolve_parent(dir, dirname)?;
+        // A trailing "." / ".." names the current/parent dir, not a removable
+        // target (`rmdir .`, `rmdir a/..`) — reject by spelling before lookup.
         if dirname == "." || dirname == ".." {
-            return Err(FsError::DirectoryIsCurrent); // We can only delete subdirs
+            return Err(FsError::DirectoryIsCurrent);
         }
         // Find the sub directory and check it is valid
         let (location, dir_file_info) = self.subdir_info(dir, dirname)?;
+        // Guard on the RESOLVED identity, not the spelling ("." / ".."): never
+        // remove the root or the directory we're standing in (its cluster is
+        // still referenced by `wd`). Ancestors are caught by the empty check.
+        let target = match dir_file_info.first_cluster {
+            0 => Dir::Root,
+            c => Dir::SubDir(c),
+        };
+        if target == Dir::Root || target == wd {
+            return Err(FsError::DirectoryIsCurrent);
+        }
         // Check if the subdir is empty
         for entry in self.dir_iter(Dir::SubDir(dir_file_info.first_cluster))? {
             let entry = entry?;
@@ -395,6 +453,8 @@ impl Volume {
 
     // Create an empty file ("touch")
     pub fn create_empty_file(&mut self, dir: Dir, filename: &str) -> Result<(), FsError> {
+        // Resolve any leading path; the final component is the new file name.
+        let (dir, filename) = self.resolve_parent(dir, filename)?;
         // Search the directory for the existance of the file
         match self.find_file_dir_entry(dir, filename) {
             Ok(_) => return Err(FsError::AlreadyExists),

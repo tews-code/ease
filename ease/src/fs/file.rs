@@ -152,6 +152,8 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
     // Need both volume and table locks for safe opening
     // The table lock disables IRQs, so must always be the inner lock
     with_volume(|vol| {
+        // Resolve any leading path, then look up the final name.
+        let (dir, filename) = vol.resolve_parent(dir, filename)?;
         // Check if this file already exists
         let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
         // Set up the open file table
@@ -199,6 +201,8 @@ pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
     // Need both volume and table locks for safe deletion
     // The table lock disables IRQs, so must always be the inner lock
     with_volume(|vol| {
+        // Resolve any leading path, then look up the final name.
+        let (dir, filename) = vol.resolve_parent(dir, filename)?;
         // Decline if the file is currently open
         let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
         if OPEN_FILE_TABLE.lock().get_open(location).is_some() {
