@@ -23,7 +23,7 @@ pub fn cat(console: &mut Console, dir: Dir, arg_str: &str) {
         }
     };
     for filename in args.positionals.as_slice().iter() {
-        let mut file = match file::open(file::Access::Read, dir, filename) {
+        let file = match file::open(file::Access::Read, dir, filename) {
             Ok(file_handle) => file_handle,
             Err(fs_error) => {
                 let _ = writeln!(
@@ -37,7 +37,7 @@ pub fn cat(console: &mut Console, dir: Dir, arg_str: &str) {
         let mut buf = [0u8; 256];
         let mut remainder_byte_count = 0;
         loop {
-            let num_bytes = match file::read_at(&mut file, &mut buf[remainder_byte_count..]) {
+            let num_bytes = match file::read_at(&file, &mut buf[remainder_byte_count..]) {
                 Ok(num_bytes) => num_bytes,
                 Err(fs_error) => {
                     let _ = writeln!(
@@ -216,7 +216,7 @@ pub fn hexdump(console: &mut Console, dir: Dir, arg_str: &str) {
 
     // Open the file
     for filename in args.positionals.as_slice().iter() {
-        let mut file = match crate::fs::file::open(file::Access::Read, dir, filename) {
+        let file = match crate::fs::file::open(file::Access::Read, dir, filename) {
             Ok(file) => file,
             Err(fs_error) => {
                 let _ = write!(
@@ -228,7 +228,7 @@ pub fn hexdump(console: &mut Console, dir: Dir, arg_str: &str) {
             }
         };
         // Seek to the desired byte position
-        match file::lseek(&mut file, seek_bytes) {
+        match file::lseek(&file, seek_bytes) {
             Ok(_) => {}
             Err(e) => {
                 let _ = write!(console, "hexdump: {}: Error seeking - {:?}.", filename, e);
@@ -243,7 +243,7 @@ pub fn hexdump(console: &mut Console, dir: Dir, arg_str: &str) {
         // Read buffer is separate to the line accumulator.
         let mut read_buf = [0u8; READ_BUF_SIZE];
         loop {
-            let num_bytes_read = match file::read_at(&mut file, &mut read_buf) {
+            let num_bytes_read = match file::read_at(&file, &mut read_buf) {
                 Ok(num_bytes_read) => num_bytes_read,
                 Err(fs_error) => {
                     let _ = writeln!(
@@ -497,7 +497,7 @@ pub fn write(console: &mut Console, dir: Dir, arg_str: &str) {
     }
     // Open the file for writing
     // Because we truncated the position is zero
-    let mut file = match file::open(file::Access::Write, dir, filename) {
+    let file = match file::open(file::Access::Write, dir, filename) {
         Ok(file) => file,
         Err(e) => {
             let _ = writeln!(console, "write: {}: error on open: {:?}", filename, e);
@@ -507,7 +507,7 @@ pub fn write(console: &mut Console, dir: Dir, arg_str: &str) {
     // Write by looping over buffer
     let write_buf_len = 5;
     for chunk in data.as_bytes().chunks(write_buf_len) {
-        if let Err(e) = file::write_at(&mut file, chunk) {
+        if let Err(e) = file::write_at(&file, chunk) {
             let _ = writeln!(console, "write: {}: error on write: {:?}", filename, e);
             return;
         }

@@ -78,8 +78,10 @@ pub(crate) mod volume;
 mod bench;
 
 use bpb::{Bpb, BpbError};
+use dir::FileInfo;
 use fat::FatChainClusterError;
-pub(crate) use file::FileHandle;
+// #[allow(dead_code)]
+// pub(crate) use file::FileHandle;
 use mbr::{Mbr, MbrError};
 
 const BOOT_SECTOR: u32 = 0;
