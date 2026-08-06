@@ -228,6 +228,47 @@ impl SchedInner {
             }
         }
     }
+
+    /// Evict sibling threads for a faulting multi-thread user process
+    pub(super) fn evict_siblings(
+        &mut self,
+        exit_reason: ExitReason,
+        exit_process_idx: u8,
+        surviving_thread_idx: usize,
+    ) {
+        for idx in 0..THREADS_MAX {
+            let mut release = false;
+            if idx == surviving_thread_idx {
+                continue;
+            }
+            let Some(tcb) = self.thread_blocks.0[idx].as_mut() else {
+                continue;
+            };
+            if tcb
+                .user
+                .as_ref()
+                .is_some_and(|uc| uc.process_idx == exit_process_idx)
+            {
+                match tcb.state {
+                    State::Blocked | State::BlockedUntil(_) => {
+                        panic!("do not yet support blocked user threads")
+                    }
+                    State::Ready | State::Sleeping(_) => release = true,
+                    State::Running => {
+                        tcb.marked_for_exit = true;
+                        ipi::send(hart_id() ^ 1);
+                    }
+                    State::Switching(_) => {
+                        tcb.state = State::Switching(PostSwitch::Dead(exit_reason))
+                    }
+                }
+            }
+            if release {
+                self.thread_blocks.0[idx] = None;
+                self.release_process_thread(exit_process_idx)
+            }
+        }
+    }
 }
 
 // Safety: All access to the TCB array elements is via a spin lock that disables interrupts
@@ -371,38 +412,7 @@ impl Scheduler {
                     .and_then(|tcb| tcb.user.as_ref())
                     .map(|user_context| user_context.process_idx)
                     .expect("Exit reason `ExitReason::Fault` not supported on kernel threads");
-                for idx in 0..THREADS_MAX {
-                    let mut release = false;
-                    if idx == switched_from_idx {
-                        continue;
-                    }
-                    let Some(tcb) = sched.thread_blocks.0[idx].as_mut() else {
-                        continue;
-                    };
-                    if tcb
-                        .user
-                        .as_ref()
-                        .is_some_and(|uc| uc.process_idx == exit_process_idx)
-                    {
-                        match tcb.state {
-                            State::Blocked | State::BlockedUntil(_) => {
-                                panic!("do not yet support blocked user threads")
-                            }
-                            State::Ready | State::Sleeping(_) => release = true,
-                            State::Running => {
-                                tcb.marked_for_exit = true;
-                                ipi::send(hart_id() ^ 1);
-                            }
-                            State::Switching(_) => {
-                                tcb.state = State::Switching(PostSwitch::Dead(exit_reason))
-                            }
-                        }
-                    }
-                    if release {
-                        sched.thread_blocks.0[idx] = None;
-                        sched.release_process_thread(exit_process_idx)
-                    }
-                }
+                sched.evict_siblings(exit_reason, exit_process_idx, switched_from_idx);
             }
             // Set the dead thread to None and early return
             if let Some(process_idx) = sched.thread_blocks.0[switched_from_idx]
