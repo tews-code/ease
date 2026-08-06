@@ -3,6 +3,7 @@
 use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
+use crate::kernel::percpu;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
 
@@ -62,6 +63,11 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
         1 => ExitReason::Fault,
         _ => panic!("unknown user thread exit reason"),
     };
+    if exit_reason == ExitReason::Fault {
+        let current_thread_idx = percpu::current_thread_idx();
+        // This must be a user process
+        sched::evict_siblings(exit_reason, current_thread_idx);
+    }
     sched::exit(exit_reason);
 }
 

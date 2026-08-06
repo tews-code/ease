@@ -230,12 +230,14 @@ impl SchedInner {
     }
 
     /// Evict sibling threads for a faulting multi-thread user process
-    pub(super) fn evict_siblings(
-        &mut self,
-        exit_reason: ExitReason,
-        exit_process_idx: u8,
-        surviving_thread_idx: usize,
-    ) {
+    pub(super) fn evict_siblings(&mut self, exit_reason: ExitReason, surviving_thread_idx: usize) {
+        let process_idx = self.thread_blocks.0[surviving_thread_idx]
+            .as_ref()
+            .expect("thread index should correspond to an active thread control block entry")
+            .user
+            .as_ref()
+            .expect("evict_siblings should be called on a user thread")
+            .process_idx;
         for idx in 0..THREADS_MAX {
             let mut release = false;
             if idx == surviving_thread_idx {
@@ -247,7 +249,7 @@ impl SchedInner {
             if tcb
                 .user
                 .as_ref()
-                .is_some_and(|uc| uc.process_idx == exit_process_idx)
+                .is_some_and(|uc| uc.process_idx == process_idx)
             {
                 match tcb.state {
                     State::Blocked | State::BlockedUntil(_) => {
@@ -265,7 +267,7 @@ impl SchedInner {
             }
             if release {
                 self.thread_blocks.0[idx] = None;
-                self.release_process_thread(exit_process_idx)
+                self.release_process_thread(process_idx)
             }
         }
     }
@@ -386,7 +388,7 @@ impl Scheduler {
             .as_ref()
             .map(|tcb| tcb.state);
         // Now deconstruct the state for dead threads
-        if let Some(State::Switching(PostSwitch::Dead(exit_reason))) = state {
+        if let Some(State::Switching(PostSwitch::Dead(_))) = state {
             // If we have been painting the stack then display high watermark on exit
             #[cfg(feature = "paint-stack")]
             {
@@ -404,16 +406,7 @@ impl Scheduler {
                     }
                 }
             }
-            // For user processes we need to release all the threads in that process on fault.
-            if exit_reason == ExitReason::Fault {
-                // `process_idx` is u8, so Copy, hence lift it out of the threads struct
-                let exit_process_idx = sched.thread_blocks.0[switched_from_idx]
-                    .as_ref()
-                    .and_then(|tcb| tcb.user.as_ref())
-                    .map(|user_context| user_context.process_idx)
-                    .expect("Exit reason `ExitReason::Fault` not supported on kernel threads");
-                sched.evict_siblings(exit_reason, exit_process_idx, switched_from_idx);
-            }
+            // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
             // Set the dead thread to None and early return
             if let Some(process_idx) = sched.thread_blocks.0[switched_from_idx]
                 .as_ref()
@@ -757,6 +750,8 @@ impl Scheduler {
         sched.wake_overshoot[percpu::current_thread_idx()]
     }
 
+    // EXIT
+
     pub(super) fn exit(&self, reason: ExitReason) -> ! {
         self.reschedule(None, PostSwitch::Dead(reason));
         // reschedule switches away. If we get here, no other thread was
@@ -773,6 +768,12 @@ impl Scheduler {
             percpu::idle_thread_idx(),
             self.sched.lock().thread_blocks
         );
+    }
+
+    pub(super) fn evict_siblings(&self, exit_reason: ExitReason, surviving_thread_idx: usize) {
+        self.sched
+            .lock()
+            .evict_siblings(exit_reason, surviving_thread_idx);
     }
 
     // Park the current thread

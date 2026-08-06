@@ -140,6 +140,8 @@ pub fn get_current_cycles(tcb_idx: usize) -> u64 {
     SCHEDULER.get_current_cycles(tcb_idx)
 }
 
+// EXIT
+
 /// Clean up switched status threads
 pub fn post_switch_cleanup() {
     SCHEDULER.post_switch_cleanup();
@@ -150,6 +152,15 @@ pub fn post_switch_cleanup() {
 pub fn exit(reason: ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
+
+/// Exit all sibling threads to the given thread
+///
+/// Passes the exit reason to threads in the Switching state
+pub(crate) fn evict_siblings(exit_reason: ExitReason, surviving_thread_idx: usize) {
+    SCHEDULER.evict_siblings(exit_reason, surviving_thread_idx);
+}
+
+// PARK
 
 /// Park the current thread
 ///
