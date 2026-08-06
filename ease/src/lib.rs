@@ -181,6 +181,7 @@ mod drivers {
 mod kernel {
     pub mod alloc;
     pub mod collection;
+    pub mod fd;
     pub mod ipi {}
     pub mod percpu {
         pub fn set_needs_reschedule() {}

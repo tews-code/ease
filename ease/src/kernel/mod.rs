@@ -7,6 +7,7 @@
 
 pub mod alloc;
 pub mod collection;
+mod fd;
 pub mod ipi;
 pub mod panic;
 pub mod percpu;

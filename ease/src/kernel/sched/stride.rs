@@ -6,10 +6,11 @@ use super::Qos;
 use crate::arch::{csr, hart_id};
 use crate::kernel::alloc::Order;
 use crate::kernel::collection::{AtomicBitmap, bitmap_words_for};
+use crate::kernel::fd;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
-use crate::kernel::sched::process::{PROCS_MAX, Procs};
+use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, Procs};
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
     Threads,
@@ -910,5 +911,38 @@ impl Scheduler {
     pub fn stacks(&self) {
         let sched = self.sched.lock();
         sched.thread_blocks.stacks();
+    }
+
+    /// FILE DESCRIPTORS
+    fn with_current_process_fds<F, R>(&self, f: F) -> Result<R, fd::Error>
+    where
+        F: FnOnce(&mut ProcessControlBlock) -> R,
+    {
+        let mut sched = self.sched.lock();
+        if let Some(proc_idx) = sched.thread_blocks.0[percpu::current_thread_idx()]
+            .as_ref()
+            .unwrap()
+            .user
+            .as_ref()
+            .map(|uc| uc.process_idx)
+        {
+            Ok(f(sched.process_blocks.0[proc_idx as usize]
+                .as_mut()
+                .expect("should be a valid user process")))
+        } else {
+            Err(fd::Error::NotAUserProcess)
+        }
+    }
+
+    pub(super) fn open_fd(&self, fd_kind: fd::Kind) -> Result<usize, fd::Error> {
+        self.with_current_process_fds(|pcb| pcb.fds.open_fd(fd_kind))?
+    }
+
+    pub(super) fn close_fd(&self, fd: usize) -> Result<fd::Kind, fd::Error> {
+        self.with_current_process_fds(|pcb| pcb.fds.close_fd(fd))?
+    }
+
+    pub(super) fn new_process_fds(&self) -> Result<(), fd::Error> {
+        self.with_current_process_fds(|pcb| pcb.fds.new_fds())
     }
 }

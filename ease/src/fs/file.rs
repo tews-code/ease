@@ -263,7 +263,8 @@ pub(crate) fn read_at(file_handle: &FileHandle, buf: &mut [u8]) -> Result<usize,
 pub(crate) fn write_at(file_handle: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
     with_volume(|vol| {
         // Check if the file is open for writing
-        let snapshot = OPEN_FILE_TABLE.lock()
+        let snapshot = OPEN_FILE_TABLE
+            .lock()
             .writable_snapshot(file_handle)
             .ok_or(FsError::OpenForWriteButReadAccess)?;
         // Without holding the open file table lock, pass the small Copy structs to volume

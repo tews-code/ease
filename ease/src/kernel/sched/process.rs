@@ -4,10 +4,12 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::stride::SchedInner;
+use crate::kernel::fd;
 use crate::kernel::sched::{THREADS_MAX, clear_wakeup_signal, usermemmap::UserMemMap};
 
-pub(super) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
+use super::stride::SchedInner;
+
+pub(crate) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
 const THREADS_PER_PROC_MAX: u8 = 6;
 
 static PID_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -17,10 +19,11 @@ pub(crate) struct ProcessHandle {
     pub(super) idx: usize,
 }
 
-pub(super) struct ProcessControlBlock {
+pub(crate) struct ProcessControlBlock {
     pub(super) pid: u32,
     _name: &'static str,
     pub(super) mem_map: UserMemMap,
+    pub(crate) fds: fd::FdsTable,
     thread_count: u8,
 }
 
@@ -30,6 +33,7 @@ impl ProcessControlBlock {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
             _name,
             mem_map,
+            fds: fd::FdsTable::new(),
             thread_count: 0,
         }
     }
@@ -64,12 +68,16 @@ impl Procs {
         self.0.iter().position(|pcb| pcb.is_none())
     }
 
+    /// Installs a new process control block `pcb` into a slot at index `idx`
+    ///
+    /// The existing slot is always empty
     pub(super) fn install_process_control_block(
         &mut self,
         idx: usize,
         pcb: ProcessControlBlock,
     ) -> ProcessHandle {
         let pid = pcb.pid;
+        assert!(self.0[idx].is_none());
         self.0[idx] = Some(pcb);
         ProcessHandle { pid, idx }
     }

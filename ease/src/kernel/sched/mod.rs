@@ -17,6 +17,7 @@ pub(crate) mod usermemmap;
 
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};
+use crate::kernel::fd;
 use crate::kernel::percpu;
 use crate::kernel::sched::process::ProcessHandle;
 use crate::kernel::sync::with_interrupts_disabled;
@@ -266,4 +267,20 @@ pub fn clear_wakeup_signal(idx: usize) {
 #[cfg(feature = "paint-stack")]
 pub fn stacks() {
     SCHEDULER.stacks();
+}
+
+//
+//  FILE DESCRIPTORS
+//
+
+fn open_file_descriptor(fd_kind: fd::Kind) -> Result<usize, fd::Error> {
+    SCHEDULER.open_fd(fd_kind)
+}
+
+fn close_file_descriptor(fd: usize) -> Result<fd::Kind, fd::Error> {
+    SCHEDULER.close_fd(fd)
+}
+
+fn new_process_fds() -> Result<(), fd::Error> {
+    SCHEDULER.new_process_fds()
 }

@@ -177,9 +177,11 @@ impl Scheduler {
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
+        pcb.fds.new_fds();
         let process_handle = sched
             .process_blocks
             .install_process_control_block(pcb_idx, pcb);
+        // Set up file descriptor table
         self.finish_spawn(sched, affinity);
         Some(process_handle)
     }
