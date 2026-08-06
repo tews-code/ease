@@ -11,16 +11,18 @@ CRATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ELF="$1"
 FLASH_BIN="$(dirname "$ELF")/flash.bin"
 
-# Display policy: test binaries (cargo test builds them under deps/) run
-# headless — the GUI repaint path costs >50% of QEMU's CPU and distorts
-# the timing tests (see project notes, 2026-06-05 investigation).
-# Interactive `cargo run` gets a window. Override with EASE_DISPLAY=none
-# or EASE_DISPLAY=<backend>. Keep the window unscaled (1:1) — bilinear
-# scaling is the slow path.
+# Display policy: only interactive `cargo run` gets a window — its final
+# artifact has the bare crate name (debug/ease), stable across cargo
+# versions. Anything else (test binaries carry a -<hash> suffix, and
+# their directory layout changed under cargo 1.99: deps/ -> build/…/out/)
+# runs headless — the GUI repaint path costs >50% of QEMU's CPU and
+# distorts the timing tests (see project notes, 2026-06-05 investigation).
+# Override with EASE_DISPLAY=none or EASE_DISPLAY=<backend>. Keep the
+# window unscaled (1:1) — bilinear scaling is the slow path.
 case "${EASE_DISPLAY:-auto}" in
-    auto) case "$ELF" in
-              */deps/*) DISPLAY_ARG="-display none" ;;
-              *)        DISPLAY_ARG="" ;;
+    auto) case "$(basename "$ELF")" in
+              ease) DISPLAY_ARG="" ;;
+              *)    DISPLAY_ARG="-display none" ;;
           esac ;;
     none) DISPLAY_ARG="-display none" ;;
     *)    DISPLAY_ARG="-display ${EASE_DISPLAY}" ;;

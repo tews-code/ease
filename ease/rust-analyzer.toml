@@ -11,5 +11,3 @@
 # Without --all-targets, rust-analyzer runs plain `cargo check`,
 # which builds lib + bin in their non-test config and succeeds.
 # Lib host tests are still run by ci.sh under their proper target.
-[check]
-allTargets = false
