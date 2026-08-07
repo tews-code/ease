@@ -177,7 +177,7 @@ impl Scheduler {
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
-        pcb.fds.new_fds();
+        pcb.fds.new_process();
         let process_handle = sched
             .process_blocks
             .install_process_control_block(pcb_idx, pcb);

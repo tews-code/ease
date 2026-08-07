@@ -949,38 +949,51 @@ impl Scheduler {
 
     // FILE DESCRIPTORS
 
-    /// Run a closure on the file descriptors for current thread
+    /// Run a closure on the current process
     ///
-    /// Returns file descriptor error if the thread is not a user process thread
-    fn with_current_process_fds<F, R>(&self, f: F) -> Result<R, fd::Error>
+    /// # Panics #
+    /// Panics if the thread is not a user thread
+    fn with_current_process<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut ProcessControlBlock) -> R,
     {
         let mut sched = self.sched.lock();
-        if let Some(proc_idx) = sched.thread_blocks.0[percpu::current_thread_idx()]
+        let process_idx = sched.thread_blocks.0[percpu::current_thread_idx()]
             .as_ref()
-            .unwrap()
+            .expect("the current running thread must have a valid TCB set up")
             .user
             .as_ref()
-            .map(|uc| uc.process_idx)
-        {
-            Ok(f(sched.process_blocks.0[proc_idx as usize]
-                .as_mut()
-                .expect("should be a valid user process")))
-        } else {
-            Err(fd::Error::NotAUserProcess)
-        }
+            .expect("the closure must be run on a user thread")
+            .process_idx;
+
+        f(sched.process_blocks.0[process_idx as usize]
+            .as_mut()
+            .unwrap())
     }
 
     pub(super) fn open_fd(&self, fd_kind: fd::Kind) -> Result<usize, fd::Error> {
-        self.with_current_process_fds(|pcb| pcb.fds.open_fd(fd_kind))?
+        self.with_current_process(|pcb| pcb.fds.open(fd_kind))
     }
 
     pub(super) fn close_fd(&self, fd: usize) -> Result<fd::Kind, fd::Error> {
-        self.with_current_process_fds(|pcb| pcb.fds.close_fd(fd))?
+        self.with_current_process(|pcb| pcb.fds.close(fd))
     }
 
-    pub(super) fn new_process_fds(&self) -> Result<(), fd::Error> {
-        self.with_current_process_fds(|pcb| pcb.fds.new_fds())
+    pub(super) fn new_process_fds(&self) {
+        self.with_current_process(|pcb| pcb.fds.new_process());
+    }
+
+    /// Claim the file descriptor table for a process from the last thread
+    ///
+    /// Returns None if more than one thread is still in this process.
+    /// This method is used for closing open file descriptors cleanly when a process closes
+    pub(super) fn claim_current_fds(&self) -> Option<[Option<fd::Kind>; fd::MAX]> {
+        self.with_current_process(|pcb| {
+            if pcb.thread_count() == 1 {
+                Some(pcb.fds.take_all())
+            } else {
+                None
+            }
+        })
     }
 }

@@ -23,7 +23,7 @@ pub(crate) struct ProcessControlBlock {
     pub(super) pid: u32,
     _name: &'static str,
     pub(super) mem_map: UserMemMap,
-    pub(crate) fds: fd::FdsTable,
+    pub(crate) fds: fd::Table,
     thread_count: u8,
 }
 
@@ -33,7 +33,7 @@ impl ProcessControlBlock {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
             _name,
             mem_map,
-            fds: fd::FdsTable::new(),
+            fds: fd::Table::new(),
             thread_count: 0,
         }
     }
@@ -99,6 +99,17 @@ impl SchedInner {
             .expect("should only be decrementing thread count on a valid process control block")
             .dec_thread_count();
         if thread_count == 0 {
+            // Make sure the file descriptors have been cleaned up before emptying the slot
+            // Known gap - if two threads of one user process voluntarily exit at the same time and see
+            // the fds table at the same and don't remove the fds
+            assert!(
+                self.process_blocks.0[process_idx as usize]
+                    .as_mut()
+                    .unwrap()
+                    .fds
+                    .is_empty(),
+                "process control block has no threads but still has open file descriptors"
+            );
             self.process_blocks.0[process_idx as usize] = None;
         }
     }

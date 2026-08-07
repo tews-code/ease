@@ -75,7 +75,7 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
         }
     }
     // All other threads in the process are closed - use this thread for final cleanup
-    // CLEAN UP FDS
+    sched::close_current_file_descriptors();
     sched::exit(exit_reason);
 }
 

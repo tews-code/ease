@@ -162,6 +162,13 @@ pub(crate) fn sibling_thread_count(thread_idx: usize) -> u8 {
     SCHEDULER.sibling_thread_count(thread_idx)
 }
 
+/// Close all open file descriptors
+pub(crate) fn close_current_file_descriptors() {
+    if let Some(fds) = SCHEDULER.claim_current_fds() {
+        fd::Table::close_all(fds);
+    }
+}
+
 /// Exit all sibling threads to the given thread, leaving the given thread still running
 ///
 /// Passes the exit reason to threads in the Switching state
@@ -301,6 +308,6 @@ fn close_file_descriptor(fd: usize) -> Result<fd::Kind, fd::Error> {
     SCHEDULER.close_fd(fd)
 }
 
-fn new_process_fds() -> Result<(), fd::Error> {
-    SCHEDULER.new_process_fds()
+fn new_process_fds() {
+    SCHEDULER.new_process_fds();
 }
