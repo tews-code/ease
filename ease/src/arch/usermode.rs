@@ -56,7 +56,9 @@ pub(crate) extern "C" fn user_entry(entry: extern "C" fn()) {
     );
 }
 
-// Entered via trap return from exit_from_user; a0 carries the ExitReason discriminant
+/// All user threads exit via this function which runs without locks held
+///
+/// It is entered via trap return from `exit_from_user`; `a0` carries the ExitReason
 pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     let exit_reason = match reason {
         0 => ExitReason::Exit,

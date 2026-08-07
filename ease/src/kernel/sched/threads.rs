@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::Qos;
+use crate::kernel::sched::process::PROCS_MAX;
 use crate::kernel::sched::stride::PRIORITY_MIN;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_stack_watermark;
@@ -73,6 +74,7 @@ pub(super) struct ThreadControlBlock {
     pub(super) last_started_cycles: u64,  // Cycle stamp from last switch
     pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
     pub(super) marked_for_exit: bool, // If set then thread will be forced to exit on next schedule
+    pub(super) resources_released: bool, // If set then thread no longer uses any resources (e.g. file descriptors) except for cleanup
     #[cfg(feature = "trace")]
     pub(super) ready_since: u64, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
 }
@@ -117,6 +119,12 @@ impl ThreadControlBlock {
             }
             _ => None,
         }
+    }
+    /// Get the process index of this thread control block
+    ///
+    /// Returns the process index or None if not a user thread
+    fn process_idx(&self) -> Option<u8> {
+        self.user.as_ref().map(|uc| uc.process_idx)
     }
 }
 
@@ -171,6 +179,7 @@ impl Threads {
             pass: pass_baseline,
             last_started_cycles: now,
             next_waiter: None,
+            resources_released: false,
             marked_for_exit: false,
             #[cfg(feature = "trace")]
             ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
@@ -323,15 +332,6 @@ impl Threads {
         slice_end.min(wake.unwrap_or(u64::MAX))
     }
 
-    // Returns whether the thread belongs to a process `pid`
-    #[allow(dead_code)]
-    pub(super) fn belongs_to_process(&self, idx: usize, pid: usize) -> bool {
-        self.0[idx]
-            .as_ref()
-            .and_then(|tcb| tcb.user.as_ref())
-            .is_some_and(|uc| uc.process_idx as usize == pid)
-    }
-
     // Debug - print the painted stack depth for running threads
     #[cfg(feature = "paint-stack")]
     pub(super) fn stacks(&self) {
@@ -345,5 +345,30 @@ impl Threads {
                 )
             }
         }
+    }
+    /// Get the process index of a given thread index
+    ///
+    /// Returns an option on the process index: None if not a user thread or the slot index is not set up
+    /// # Panics #
+    /// Panics if `thread_idx >= THREADS_MAX`
+    pub(super) fn process_idx_of(&self, thread_idx: usize) -> Option<u8> {
+        self.0[thread_idx]
+            .as_ref()
+            .and_then(|tcb| tcb.process_idx())
+    }
+    /// Determines if any threads are resource holders for process with `process_idx`
+    ///
+    /// # Panics #
+    /// Panics if `process_idx >= PROCS_MAX`
+    pub(super) fn any_resource_holders(&self, process_idx: u8) -> bool {
+        assert!((process_idx as usize) < PROCS_MAX);
+        self.0.iter().any(|tcb| {
+            tcb.as_ref().is_some_and(|t| {
+                t.user
+                    .as_ref()
+                    .is_some_and(|uc| uc.process_idx == process_idx)
+                    && !t.resources_released
+            })
+        })
     }
 }

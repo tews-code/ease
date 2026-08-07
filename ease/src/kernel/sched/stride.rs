@@ -10,7 +10,7 @@ use crate::kernel::fd;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
-use crate::kernel::sched::process::{PROCS_MAX, ProcessControlBlock, Procs};
+use crate::kernel::sched::process::{PROCS_MAX, Procs};
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
     Threads,
@@ -796,6 +796,36 @@ impl Scheduler {
             .lock()
             .evict_siblings(exit_reason, surviving_thread_idx);
     }
+    /// Claim the file descriptor table of a process from the last (cleanup) thread
+    ///
+    /// Returns None if another thread has not yet released its resources.
+    /// # Panics #
+    /// Panics if called on a kernel thread
+    pub(super) fn claim_current_fds(&self) -> Option<[Option<fd::Kind>; fd::MAX]> {
+        let mut sched = self.sched.lock();
+        let current_thread_idx = percpu::current_thread_idx();
+        // Set this thread to no longer use resources
+        sched.thread_blocks.0[current_thread_idx]
+            .as_mut()
+            .expect("current thread must have a valid TCB set up")
+            .resources_released = true;
+        // Look across the process's threads to see if this is the last surviving thread - it can then safely clean up
+        let process_idx = sched
+            .thread_blocks
+            .process_idx_of(current_thread_idx)
+            .expect("current thread must be a user thread");
+        if !sched.thread_blocks.any_resource_holders(process_idx) {
+            Some(
+                sched.process_blocks.0[process_idx as usize]
+                    .as_mut()
+                    .unwrap()
+                    .fds
+                    .take_all(),
+            )
+        } else {
+            None
+        }
+    }
 
     // PARK
 
@@ -949,51 +979,34 @@ impl Scheduler {
 
     // FILE DESCRIPTORS
 
-    /// Run a closure on the current process
+    /// Run a closure on the current process's file descriptors
     ///
     /// # Panics #
     /// Panics if the thread is not a user thread
-    fn with_current_process<F, R>(&self, f: F) -> R
+    fn with_current_process_fds<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&mut ProcessControlBlock) -> R,
+        F: FnOnce(&mut fd::Table) -> R,
     {
         let mut sched = self.sched.lock();
-        let process_idx = sched.thread_blocks.0[percpu::current_thread_idx()]
-            .as_ref()
-            .expect("the current running thread must have a valid TCB set up")
-            .user
-            .as_ref()
-            .expect("the closure must be run on a user thread")
-            .process_idx;
-
-        f(sched.process_blocks.0[process_idx as usize]
+        let process_idx = sched
+            .thread_blocks
+            .process_idx_of(percpu::current_thread_idx())
+            .expect("the current thread should always have a valid TCB set up");
+        f(&mut sched.process_blocks.0[process_idx as usize]
             .as_mut()
-            .unwrap())
+            .unwrap()
+            .fds)
     }
 
     pub(super) fn open_fd(&self, fd_kind: fd::Kind) -> Result<usize, fd::Error> {
-        self.with_current_process(|pcb| pcb.fds.open(fd_kind))
+        self.with_current_process_fds(|fds| fds.open(fd_kind))
     }
 
     pub(super) fn close_fd(&self, fd: usize) -> Result<fd::Kind, fd::Error> {
-        self.with_current_process(|pcb| pcb.fds.close(fd))
+        self.with_current_process_fds(|fds| fds.close(fd))
     }
 
     pub(super) fn new_process_fds(&self) {
-        self.with_current_process(|pcb| pcb.fds.new_process());
-    }
-
-    /// Claim the file descriptor table for a process from the last thread
-    ///
-    /// Returns None if more than one thread is still in this process.
-    /// This method is used for closing open file descriptors cleanly when a process closes
-    pub(super) fn claim_current_fds(&self) -> Option<[Option<fd::Kind>; fd::MAX]> {
-        self.with_current_process(|pcb| {
-            if pcb.thread_count() == 1 {
-                Some(pcb.fds.take_all())
-            } else {
-                None
-            }
-        })
+        self.with_current_process_fds(|fds| fds.new_process());
     }
 }
