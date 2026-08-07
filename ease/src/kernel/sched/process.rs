@@ -38,6 +38,11 @@ impl ProcessControlBlock {
         }
     }
 
+    // Get the thread count
+    pub(super) fn thread_count(&self) -> u8 {
+        self.thread_count
+    }
+
     // Adds to the thread count and returns the new value if not above the cap
     //
     // Errors if the process can't have any more threads

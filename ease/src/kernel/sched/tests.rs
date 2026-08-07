@@ -2090,3 +2090,35 @@ fn fault_kills_whole_process() {
         "process with spinning sibling was never killed after fault"
     );
 }
+
+// The deterministic variant of fault_kills_whole_process: the spinner is
+// given time to be genuinely Running on the other hart before the fault
+// arrives, so eviction must take the doom+IPI path and the faulting
+// thread's wait-for-siblings loop in user_thread_exit actually iterates
+// (with an immediately-reaped sibling the count is already down when the
+// loop first checks). A double-release of the straggler would panic in
+// release_process_thread and fail the run.
+#[test_case]
+fn fault_waits_for_running_sibling_before_release() {
+    let handle = crate::kernel::sched::spawn_process("t-fltw", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    // The spinner never blocks, and this test thread occupies the current
+    // hart by sleeping, so after a few slices the spinner is Running on
+    // the other hart and stays there.
+    crate::kernel::sched::sleep(50);
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "process was never released after faulting with a running sibling"
+    );
+}

@@ -4,8 +4,8 @@ use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
 use crate::kernel::percpu;
-use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
+use crate::kernel::sched::{ExitReason, sleep};
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -67,7 +67,15 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
         let current_thread_idx = percpu::current_thread_idx();
         // This must be a user process
         sched::evict_siblings(exit_reason, current_thread_idx);
+        while sched::sibling_thread_count(current_thread_idx) > 0 {
+            // Wait until this is the last thread
+            sleep(500); // To be replaced with a Completion
+            // Two concerns: the lost-wakeup between count-check and park (needs the park_if_blocked pattern)
+            // and release-side wake running under the sched lock (must ride the needs_wakeup/post-switch drain, not call unpark).
+        }
     }
+    // All other threads in the process are closed - use this thread for final cleanup
+    // CLEAN UP FDS
     sched::exit(exit_reason);
 }
 

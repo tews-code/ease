@@ -153,7 +153,16 @@ pub fn exit(reason: ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
 
-/// Exit all sibling threads to the given thread
+/// Get number of sibling threads in a process - used for clean exit.
+/// Does not include the given thread in the count
+///
+/// # Panics #
+/// Panics if the thread index is not a valid user thread
+pub(crate) fn sibling_thread_count(thread_idx: usize) -> u8 {
+    SCHEDULER.sibling_thread_count(thread_idx)
+}
+
+/// Exit all sibling threads to the given thread, leaving the given thread still running
 ///
 /// Passes the exit reason to threads in the Switching state
 pub(crate) fn evict_siblings(exit_reason: ExitReason, surviving_thread_idx: usize) {

@@ -752,6 +752,27 @@ impl Scheduler {
 
     // EXIT
 
+    /// Get the number of sibling threads in a process - used for clean exit
+    /// Does not include the given thread in the count.
+    ///
+    /// # Panics #
+    /// Panics if called with an invalid thread index or called on a kernel thread
+    pub(super) fn sibling_thread_count(&self, thread_idx: usize) -> u8 {
+        let sched = self.sched.lock();
+        let process_idx = sched.thread_blocks.0[thread_idx]
+            .as_ref()
+            .expect("the thread index should correspond with a live thread in the TCB")
+            .user
+            .as_ref()
+            .expect("the thread should have user context")
+            .process_idx;
+        sched.process_blocks.0[process_idx as usize]
+            .as_ref()
+            .expect("the process index must reference a live process in the PCB")
+            .thread_count()
+            - 1
+    }
+
     pub(super) fn exit(&self, reason: ExitReason) -> ! {
         self.reschedule(None, PostSwitch::Dead(reason));
         // reschedule switches away. If we get here, no other thread was
@@ -775,6 +796,8 @@ impl Scheduler {
             .lock()
             .evict_siblings(exit_reason, surviving_thread_idx);
     }
+
+    // PARK
 
     // Park the current thread
     #[allow(dead_code)]
@@ -924,7 +947,11 @@ impl Scheduler {
         sched.thread_blocks.stacks();
     }
 
-    /// FILE DESCRIPTORS
+    // FILE DESCRIPTORS
+
+    /// Run a closure on the file descriptors for current thread
+    ///
+    /// Returns file descriptor error if the thread is not a user process thread
     fn with_current_process_fds<F, R>(&self, f: F) -> Result<R, fd::Error>
     where
         F: FnOnce(&mut ProcessControlBlock) -> R,
