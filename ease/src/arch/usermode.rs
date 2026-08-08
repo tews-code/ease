@@ -3,9 +3,8 @@
 use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
-use crate::kernel::percpu;
+use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
-use crate::kernel::sched::{ExitReason, sleep};
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -56,29 +55,19 @@ pub(crate) extern "C" fn user_entry(entry: extern "C" fn()) {
     );
 }
 
-/// All user threads exit via this function which runs without locks held
+/// User threads that exit via this function are faulting or voluntary exit.
+/// Threads that are exited in `post_switch_cleanup` do not pass through this function.
+/// It is possible for multiple threads in the same process running on different HARTs to
+/// arrive in this function simultaneously.
 ///
-/// It is entered via trap return from `exit_from_user`; `a0` carries the ExitReason
+/// It is entered via trap return from `exit_from_user`; `a0` carries the ExitReason.
 pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     let exit_reason = match reason {
         0 => ExitReason::Exit,
         1 => ExitReason::Fault,
         _ => panic!("unknown user thread exit reason"),
     };
-    if exit_reason == ExitReason::Fault {
-        let current_thread_idx = percpu::current_thread_idx();
-        // This must be a user process
-        sched::evict_siblings(exit_reason, current_thread_idx);
-        while sched::sibling_thread_count(current_thread_idx) > 0 {
-            // Wait until this is the last thread
-            sleep(500); // To be replaced with a Completion
-            // Two concerns: the lost-wakeup between count-check and park (needs the park_if_blocked pattern)
-            // and release-side wake running under the sched lock (must ride the needs_wakeup/post-switch drain, not call unpark).
-        }
-    }
-    // All other threads in the process are closed - use this thread for final cleanup
-    sched::close_current_file_descriptors();
-    sched::exit(exit_reason);
+    sched::exit_user_thread(exit_reason);
 }
 
 #[unsafe(no_mangle)]

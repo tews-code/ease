@@ -4,10 +4,15 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::stride::{SchedInner, Scheduler};
+use super::threads::PostSwitch;
+use super::usermemmap::UserMemMap;
+use super::{THREADS_MAX, clear_wakeup_signal};
+use crate::arch::hart_id;
 use crate::kernel::fd;
-use crate::kernel::sched::{THREADS_MAX, clear_wakeup_signal, usermemmap::UserMemMap};
-
-use super::stride::SchedInner;
+use crate::kernel::ipi;
+use crate::kernel::percpu;
+use crate::kernel::sched::{ExitReason, State, sleep};
 
 pub(crate) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
 const THREADS_PER_PROC_MAX: u8 = 6;
@@ -25,6 +30,7 @@ pub(crate) struct ProcessControlBlock {
     pub(super) mem_map: UserMemMap,
     pub(crate) fds: fd::Table,
     thread_count: u8,
+    teardown_thread: Option<usize>, // Index of the thread that performs the resource release for the entire process
 }
 
 impl ProcessControlBlock {
@@ -35,6 +41,7 @@ impl ProcessControlBlock {
             mem_map,
             fds: fd::Table::new(),
             thread_count: 0,
+            teardown_thread: None,
         }
     }
 
@@ -64,6 +71,18 @@ impl ProcessControlBlock {
         self.thread_count -= 1;
         self.thread_count
     }
+
+    // Sets the teardown thread
+    //
+    // Returns `true` on success or `false` if the teardown thread is already set
+    pub(super) fn set_teardown_thread(&mut self, thread_idx: usize) -> bool {
+        if self.teardown_thread.is_none() {
+            self.teardown_thread = Some(thread_idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 pub(super) struct Procs(pub(super) [Option<ProcessControlBlock>; PROCS_MAX]);
@@ -72,7 +91,6 @@ impl Procs {
     pub(super) fn find_process_slot(&self) -> Option<usize> {
         self.0.iter().position(|pcb| pcb.is_none())
     }
-
     /// Installs a new process control block `pcb` into a slot at index `idx`
     ///
     /// The existing slot is always empty
@@ -89,6 +107,33 @@ impl Procs {
 }
 
 impl SchedInner {
+    /// Claim the file descriptor table of a process from the last (cleanup) thread
+    ///
+    /// Returns None if another thread has not yet released its resources.
+    /// # Panics #
+    /// Panics if called on a kernel thread
+    pub(super) fn claim_fds(
+        &mut self,
+        process_idx: u8,
+        thread_idx: usize,
+    ) -> Option<[Option<fd::Kind>; fd::MAX]> {
+        // Set this thread to no longer use resources
+        self.thread_blocks.0[thread_idx]
+            .as_mut()
+            .expect("current thread must have a valid TCB set up")
+            .resources_released = true;
+        if !self.thread_blocks.any_resource_holders(process_idx) {
+            Some(
+                self.process_blocks.0[process_idx as usize]
+                    .as_mut()
+                    .unwrap()
+                    .fds
+                    .take_all(),
+            )
+        } else {
+            None
+        }
+    }
     // Decrements the process thread count and releases the process control
     // block if the thread count reaches zero.
     // Also removes any wakeup flag in the scheduler associated with the thread
@@ -112,5 +157,111 @@ impl SchedInner {
             );
             self.process_blocks.0[process_idx as usize] = None;
         }
+    }
+    /// Evict sibling threads for a faulting multi-thread user process
+    pub(super) fn evict_sibling_threads(
+        &mut self,
+        exit_reason: ExitReason,
+        process_idx: u8,
+        surviving_thread_idx: usize,
+    ) {
+        for idx in 0..THREADS_MAX {
+            let mut release = false;
+            if idx == surviving_thread_idx {
+                continue;
+            }
+            if self.thread_blocks.process_idx_of(idx) == Some(process_idx) {
+                let tcb = self.thread_blocks.0[idx].as_mut().unwrap();
+                match tcb.state {
+                    State::Blocked | State::BlockedUntil(_) => {
+                        panic!("do not yet support blocked user threads")
+                    }
+                    State::Ready | State::Sleeping(_) => release = true,
+                    State::Running => {
+                        tcb.marked_for_exit = true;
+                        ipi::send(hart_id() ^ 1);
+                    }
+                    State::Switching(_) => {
+                        tcb.state = State::Switching(PostSwitch::Dead(exit_reason))
+                    }
+                }
+            }
+            if release {
+                self.thread_blocks.0[idx] = None;
+                self.release_process_thread(process_idx)
+            }
+        }
+    }
+    /// Attempt to claim the resource freeing role as the first exiting thread in a faulting process.
+    /// This method does not check the validitiy of the given thread index
+    ///
+    /// Returns `true` if the role was claimed, otherwise `false` if the role has already been claimed
+    /// by another thread.
+    ///
+    /// # Panics #
+    /// Panics if:
+    /// - the given process_idx >= PROCS_MAX
+    /// - the process_idx doesn't correspond to a valid PCB
+    pub(super) fn claim_teardown_role(&mut self, process_idx: u8, thread_idx: usize) -> bool {
+        self.process_blocks.0[process_idx as usize]
+            .as_mut()
+            .expect("should be a valid process")
+            .set_teardown_thread(thread_idx)
+    }
+    /// Get the current thread count of the given process index
+    ///
+    /// # Panics #
+    /// Panics if:
+    /// - the given process_idx >= PROCS_MAX
+    /// - the process_idx doesn't correspond to a valid PCB
+    pub(super) fn thread_count(&self, process_idx: u8) -> u8 {
+        self.process_blocks.0[process_idx as usize]
+            .as_ref()
+            .expect("process index must index a valid PCB slot")
+            .thread_count()
+    }
+}
+
+impl Scheduler {
+    /// Exits a user thread. If the thread is faulting it will attempt to take responsibility
+    /// for releasing process resources. If it is a normal exit the last thread in the process will
+    /// do the same.
+    ///
+    /// # Panics #
+    /// Panics if called on a kernel thread
+    pub(super) fn exit_user_thread(&self, reason: ExitReason) -> ! {
+        let current_thread_idx = percpu::current_thread_idx();
+        let process_idx = self
+            .sched
+            .lock()
+            .thread_blocks
+            .process_idx_of(current_thread_idx)
+            .expect("the current thread must be a user thread which is part of a process");
+        if reason == ExitReason::Fault {
+            // Set this thread to be the teardown thread for the entire process, if that role isn't already taken
+            if self
+                .sched
+                .lock()
+                .claim_teardown_role(process_idx, current_thread_idx)
+            {
+                self.sched
+                    .lock()
+                    .evict_sibling_threads(reason, process_idx, current_thread_idx);
+                while self.sched.lock().thread_count(process_idx) > 1 {
+                    // NOTE - guard is dropped here (as this is a Rust while loop)
+                    // Wait until this is the last thread
+                    sleep(500); // To be replaced with a Completion
+                    // Two concerns: the lost-wakeup between count-check and park (needs the park_if_blocked pattern)
+                    // and release-side wake running under the sched lock (must ride the needs_wakeup/post-switch drain, not call unpark).
+                }
+            }
+        }
+        // Mark this thread as no longer using resources
+        let fds = self.sched.lock().claim_fds(process_idx, current_thread_idx);
+        if let Some(fds) = fds {
+            fd::Table::close_all(fds);
+        }
+        // Exit this thread
+        self.exit(reason);
     }
 }

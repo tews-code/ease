@@ -2122,3 +2122,34 @@ fn fault_waits_for_running_sibling_before_release() {
         "process was never released after faulting with a running sibling"
     );
 }
+
+// Only faulting threads may enter the teardown-thread election. A thread that
+// exits voluntarily first must not consume the election slot: if it does, the
+// later faulter loses, skips sibling eviction altogether, and the immortal
+// spinner survives — the process is never killed. The spinner is spawned first
+// so the process outlives the voluntary exiter.
+#[test_case]
+fn voluntary_exit_does_not_block_later_fault_kill() {
+    let handle = crate::kernel::sched::spawn_process("t-velec", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    // user_test issues the EXIT syscall, so this thread exits voluntarily.
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_test)
+        .expect("voluntary exiter should join the process");
+    // Let it pass all the way through user_thread_exit and be released.
+    crate::kernel::sched::sleep(50);
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "fault did not kill the process after an earlier voluntary exit"
+    );
+}

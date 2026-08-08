@@ -23,12 +23,10 @@ use crate::kernel::sched::process::ProcessHandle;
 use crate::kernel::sync::with_interrupts_disabled;
 
 use stride::SCHEDULER;
-pub(crate) use threads::THREADS_MAX;
 
-#[allow(unused_imports)]
+#[expect(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
-#[allow(unused_imports)]
-pub(crate) use threads::{ExitReason, State, ThreadHandle};
+pub(crate) use threads::{ExitReason, State, THREADS_MAX, ThreadHandle};
 
 #[derive(Debug, Copy, Clone)]
 pub enum Qos {
@@ -140,7 +138,7 @@ pub fn get_current_cycles(tcb_idx: usize) -> u64 {
     SCHEDULER.get_current_cycles(tcb_idx)
 }
 
-// EXIT
+// THREAD EXIT
 
 /// Clean up switched status threads
 pub fn post_switch_cleanup() {
@@ -153,27 +151,8 @@ pub fn exit(reason: ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
 
-/// Get number of sibling threads in a process - used for clean exit.
-/// Does not include the given thread in the count
-///
-/// # Panics #
-/// Panics if the thread index is not a valid user thread
-pub(crate) fn sibling_thread_count(thread_idx: usize) -> u8 {
-    SCHEDULER.sibling_thread_count(thread_idx)
-}
-
-/// Close all open file descriptors
-pub(crate) fn close_current_file_descriptors() {
-    if let Some(fds) = SCHEDULER.claim_current_fds() {
-        fd::Table::close_all(fds);
-    }
-}
-
-/// Exit all sibling threads to the given thread, leaving the given thread still running
-///
-/// Passes the exit reason to threads in the Switching state
-pub(crate) fn evict_siblings(exit_reason: ExitReason, surviving_thread_idx: usize) {
-    SCHEDULER.evict_siblings(exit_reason, surviving_thread_idx);
+pub(crate) fn exit_user_thread(reason: ExitReason) -> ! {
+    SCHEDULER.exit_user_thread(reason);
 }
 
 // PARK

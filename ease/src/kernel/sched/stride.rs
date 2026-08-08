@@ -19,7 +19,7 @@ use crate::kernel::sched::threads::{
 use crate::kernel::stack::print_stack_watermark;
 use crate::kernel::stack::{STACK_CANARY, check_canary};
 use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard, with_interrupts_disabled};
-use crate::kernel::{ipi, percpu, timer};
+use crate::kernel::{percpu, timer};
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -225,49 +225,6 @@ impl SchedInner {
                         csr::mscratch::write(&raw const __hart1_irq_stack_top as usize);
                     }
                 }
-            }
-        }
-    }
-
-    /// Evict sibling threads for a faulting multi-thread user process
-    pub(super) fn evict_siblings(&mut self, exit_reason: ExitReason, surviving_thread_idx: usize) {
-        let process_idx = self.thread_blocks.0[surviving_thread_idx]
-            .as_ref()
-            .expect("thread index should correspond to an active thread control block entry")
-            .user
-            .as_ref()
-            .expect("evict_siblings should be called on a user thread")
-            .process_idx;
-        for idx in 0..THREADS_MAX {
-            let mut release = false;
-            if idx == surviving_thread_idx {
-                continue;
-            }
-            let Some(tcb) = self.thread_blocks.0[idx].as_mut() else {
-                continue;
-            };
-            if tcb
-                .user
-                .as_ref()
-                .is_some_and(|uc| uc.process_idx == process_idx)
-            {
-                match tcb.state {
-                    State::Blocked | State::BlockedUntil(_) => {
-                        panic!("do not yet support blocked user threads")
-                    }
-                    State::Ready | State::Sleeping(_) => release = true,
-                    State::Running => {
-                        tcb.marked_for_exit = true;
-                        ipi::send(hart_id() ^ 1);
-                    }
-                    State::Switching(_) => {
-                        tcb.state = State::Switching(PostSwitch::Dead(exit_reason))
-                    }
-                }
-            }
-            if release {
-                self.thread_blocks.0[idx] = None;
-                self.release_process_thread(process_idx)
             }
         }
     }
@@ -750,28 +707,7 @@ impl Scheduler {
         sched.wake_overshoot[percpu::current_thread_idx()]
     }
 
-    // EXIT
-
-    /// Get the number of sibling threads in a process - used for clean exit
-    /// Does not include the given thread in the count.
-    ///
-    /// # Panics #
-    /// Panics if called with an invalid thread index or called on a kernel thread
-    pub(super) fn sibling_thread_count(&self, thread_idx: usize) -> u8 {
-        let sched = self.sched.lock();
-        let process_idx = sched.thread_blocks.0[thread_idx]
-            .as_ref()
-            .expect("the thread index should correspond with a live thread in the TCB")
-            .user
-            .as_ref()
-            .expect("the thread should have user context")
-            .process_idx;
-        sched.process_blocks.0[process_idx as usize]
-            .as_ref()
-            .expect("the process index must reference a live process in the PCB")
-            .thread_count()
-            - 1
-    }
+    // THREAD EXIT
 
     pub(super) fn exit(&self, reason: ExitReason) -> ! {
         self.reschedule(None, PostSwitch::Dead(reason));
@@ -789,42 +725,6 @@ impl Scheduler {
             percpu::idle_thread_idx(),
             self.sched.lock().thread_blocks
         );
-    }
-
-    pub(super) fn evict_siblings(&self, exit_reason: ExitReason, surviving_thread_idx: usize) {
-        self.sched
-            .lock()
-            .evict_siblings(exit_reason, surviving_thread_idx);
-    }
-    /// Claim the file descriptor table of a process from the last (cleanup) thread
-    ///
-    /// Returns None if another thread has not yet released its resources.
-    /// # Panics #
-    /// Panics if called on a kernel thread
-    pub(super) fn claim_current_fds(&self) -> Option<[Option<fd::Kind>; fd::MAX]> {
-        let mut sched = self.sched.lock();
-        let current_thread_idx = percpu::current_thread_idx();
-        // Set this thread to no longer use resources
-        sched.thread_blocks.0[current_thread_idx]
-            .as_mut()
-            .expect("current thread must have a valid TCB set up")
-            .resources_released = true;
-        // Look across the process's threads to see if this is the last surviving thread - it can then safely clean up
-        let process_idx = sched
-            .thread_blocks
-            .process_idx_of(current_thread_idx)
-            .expect("current thread must be a user thread");
-        if !sched.thread_blocks.any_resource_holders(process_idx) {
-            Some(
-                sched.process_blocks.0[process_idx as usize]
-                    .as_mut()
-                    .unwrap()
-                    .fds
-                    .take_all(),
-            )
-        } else {
-            None
-        }
     }
 
     // PARK

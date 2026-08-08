@@ -356,6 +356,7 @@ impl Threads {
             .as_ref()
             .and_then(|tcb| tcb.process_idx())
     }
+    ///
     /// Determines if any threads are resource holders for process with `process_idx`
     ///
     /// # Panics #
