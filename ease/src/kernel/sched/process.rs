@@ -12,7 +12,7 @@ use crate::arch::hart_id;
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
-use crate::kernel::sched::{ExitReason, State, sleep};
+use crate::kernel::sched::{self, ExitReason, State};
 
 pub(crate) const PROCS_MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
 const THREADS_PER_PROC_MAX: u8 = 6;
@@ -134,19 +134,33 @@ impl SchedInner {
             None
         }
     }
-    // Decrements the process thread count and releases the process control
-    // block if the thread count reaches zero.
-    // Also removes any wakeup flag in the scheduler associated with the thread
-    pub(super) fn release_process_thread(&mut self, process_idx: u8) {
-        clear_wakeup_signal(process_idx as usize);
+    /// Decrements the process thread count and releases the process control
+    /// block if the thread count reaches zero.
+    /// Also removes any wakeup flag in the scheduler associated with the thread
+    ///
+    /// # Panics #
+    /// Panics if
+    /// - the process id >= PROCS_MAX
+    /// - process id does not correspond to a valid PCB
+    /// - decrementing the number of processes when there are none left
+    /// - the file descriptor table is already empty
+    pub(super) fn release_process_thread(&mut self, process_idx: u8, thread_idx: usize) {
+        clear_wakeup_signal(thread_idx);
         let thread_count = self.process_blocks.0[process_idx as usize]
             .as_mut()
             .expect("should only be decrementing thread count on a valid process control block")
             .dec_thread_count();
+        // Check if there is a declared teardown claimant and wake them in case they need to get going - but skip ourselves
+        if let Some(teardown_thread_idx) = self.process_blocks.0[process_idx as usize]
+            .as_ref()
+            .and_then(|pcb| pcb.teardown_thread)
+            && teardown_thread_idx != thread_idx
+        {
+            sched::set_needs_wakeup(teardown_thread_idx);
+            // NOTE - we do not call percpu::set_needs_reschedule as we can happily wait on the next switch
+        }
         if thread_count == 0 {
             // Make sure the file descriptors have been cleaned up before emptying the slot
-            // Known gap - if two threads of one user process voluntarily exit at the same time and see
-            // the fds table at the same and don't remove the fds
             assert!(
                 self.process_blocks.0[process_idx as usize]
                     .as_mut()
@@ -188,7 +202,7 @@ impl SchedInner {
             }
             if release {
                 self.thread_blocks.0[idx] = None;
-                self.release_process_thread(process_idx)
+                self.release_process_thread(process_idx, idx)
             }
         }
     }
@@ -228,7 +242,8 @@ impl Scheduler {
     /// do the same.
     ///
     /// # Panics #
-    /// Panics if called on a kernel thread
+    /// Panics if
+    /// - called on a kernel thread
     pub(super) fn exit_user_thread(&self, reason: ExitReason) -> ! {
         let current_thread_idx = percpu::current_thread_idx();
         let process_idx = self
@@ -247,12 +262,17 @@ impl Scheduler {
                 self.sched
                     .lock()
                     .evict_sibling_threads(reason, process_idx, current_thread_idx);
-                while self.sched.lock().thread_count(process_idx) > 1 {
-                    // NOTE - guard is dropped here (as this is a Rust while loop)
-                    // Wait until this is the last thread
-                    sleep(500); // To be replaced with a Completion
-                    // Two concerns: the lost-wakeup between count-check and park (needs the park_if_blocked pattern)
-                    // and release-side wake running under the sched lock (must ride the needs_wakeup/post-switch drain, not call unpark).
+                loop {
+                    let mut sched = self.sched.lock();
+                    if sched.thread_count(process_idx) == 1 {
+                        break;
+                    }
+                    sched.thread_blocks.0[current_thread_idx]
+                        .as_mut()
+                        .expect("current thread must have a valid TCB")
+                        .state = State::Blocked;
+                    drop(sched);
+                    self.park_if_blocked();
                 }
             }
         }

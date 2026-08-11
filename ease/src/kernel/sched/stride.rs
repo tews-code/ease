@@ -364,13 +364,9 @@ impl Scheduler {
                 }
             }
             // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
-            // Set the dead thread to None and early return
-            if let Some(process_idx) = sched.thread_blocks.0[switched_from_idx]
-                .as_ref()
-                .and_then(|tcb| tcb.user.as_ref())
-                .map(|uc| uc.process_idx)
-            {
-                sched.release_process_thread(process_idx);
+            // Set the dead thread to None and return early
+            if let Some(process_idx) = sched.thread_blocks.process_idx_of(switched_from_idx) {
+                sched.release_process_thread(process_idx, switched_from_idx);
             }
             sched.thread_blocks.0[switched_from_idx] = None;
             return;
