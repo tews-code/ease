@@ -2153,3 +2153,114 @@ fn voluntary_exit_does_not_block_later_fault_kill() {
         "fault did not kill the process after an earlier voluntary exit"
     );
 }
+
+// Multi-sibling teardown: the shepherd's wait loop has to survive more than
+// one sibling release. With two immortal spinners the thread count comes down
+// in two steps, so the shepherd parks, is woken by the first release,
+// re-checks, parks again, and only then finds itself alone. A wake aimed at
+// the wrong thread index, or a loop that gives up after a single wake, leaves
+// the shepherd parked (or exiting early) with a spinner still in the process,
+// and the handle never goes stale.
+#[test_case]
+fn fault_waits_for_two_running_siblings() {
+    let handle = crate::kernel::sched::spawn_process("t-flt2", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_spin_forever)
+        .expect("second spinner should join the process");
+    // Let both spinners settle into the run queue before the fault arrives, so
+    // eviction has real siblings to chase rather than a just-spawned process.
+    crate::kernel::sched::sleep(50);
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "process with two spinning siblings was never killed after fault"
+    );
+}
+
+// A voluntary exit racing the fault. The exiter can be anywhere in
+// user_thread_exit when the eviction sweep reaches it — including between
+// claiming the fd table and dying — so this is the interleaving where the
+// table could be claimed twice or abandoned. Either way the process must die,
+// and release_process_thread's "still has open file descriptors" assert must
+// not fire. Deliberately no sleep between the two spawns: the overlap is the
+// point, and which side wins varies across runs.
+#[test_case]
+fn fault_kill_races_a_voluntary_exit() {
+    let handle = crate::kernel::sched::spawn_process("t-fltr", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    // Settle the spinner onto the other hart first, so the exiter and the
+    // faulter are the two threads actually contending here.
+    crate::kernel::sched::sleep(50);
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_test)
+        .expect("voluntary exiter should join the process");
+    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "process was never killed when a fault raced a voluntary exit"
+    );
+}
+
+// The teardown thread must actually empty the fd table, not just abandon it
+// with the PCB. Every process starts with three descriptors (keyboard,
+// console, debug console), so a slot is never trivially clean: if the fault
+// path skipped the close, either release_process_thread trips its
+// "still has open file descriptors" assert on the way out, or the next
+// process to claim that slot trips Table::new_process's "previous process
+// teardown didn't clear file descriptor table". The replacement takes the
+// first free slot, which is the one just recycled unless another test's
+// process is still draining — in which case this still exercises spawn after
+// a fault kill, just not the recycle.
+#[test_case]
+fn process_slot_reused_after_fault_kill() {
+    let faulted = crate::kernel::sched::spawn_process("t-recy", crate::user::user_spin_forever)
+        .expect("process spawn should succeed");
+    crate::kernel::sched::spawn_user(&faulted, crate::user::user_fault_now)
+        .expect("faulter should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&faulted, crate::user::user_test).is_none() {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(killed, "faulting process was never killed");
+
+    // Claim the freed slot and run a process through it normally.
+    let reused = crate::kernel::sched::spawn_process("t-recyb", crate::user::user_test)
+        .expect("process spawn into the recycled slot should succeed");
+    assert!(
+        reused.pid != faulted.pid,
+        "recycled process slot must get a fresh pid"
+    );
+    let mut drained = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&reused, crate::user::user_test).is_none() {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(drained, "replacement process never released");
+}
