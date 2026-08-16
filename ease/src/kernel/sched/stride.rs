@@ -762,7 +762,7 @@ impl Scheduler {
 
     // Helper function used by unpark and wake_sleeping_threads
     pub(super) fn wake_by_index(&self, threads: &mut Threads, idx: usize) {
-        let (did_unpark, affinity) = threads.make_unparked_ready(idx);
+        let (did_unpark, affinity) = threads.make_blocked_ready(idx);
         if did_unpark {
             // If the unparked thread has affinity for the other hart, send an IPI
             if let Some(h) = affinity

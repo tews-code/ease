@@ -188,10 +188,26 @@ impl SchedInner {
                 let tcb = self.thread_blocks.0[idx].as_mut().unwrap();
                 match tcb.state {
                     State::Blocked | State::BlockedUntil(_) => {
-                        panic!("do not yet support blocked user threads")
+                        // Set marked for exit
+                        tcb.marked_for_exit = true;
+                        // Now set to Ready
+                        let (did_unpark, affinity) = self.thread_blocks.make_blocked_ready(idx);
+                        if !did_unpark {
+                            panic!("did not unpark blocked user thread");
+                        }
+                        if let Some(hart) = affinity
+                            && hart as usize != crate::arch::hart_id()
+                        {
+                            // This is for the other HART
+                            ipi::send(hart as usize);
+                        } else {
+                            // This is for us
+                            percpu::set_needs_reschedule();
+                        }
                     }
                     State::Ready | State::Sleeping(_) => release = true,
                     State::Running => {
+                        // If it is running, it must be on the other HART so send an IPI
                         tcb.marked_for_exit = true;
                         ipi::send(hart_id() ^ 1);
                     }

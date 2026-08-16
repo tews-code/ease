@@ -200,36 +200,38 @@ impl Threads {
             );
         }
     }
-
-    // pull the pure state-flip into Threads — make_ready(&mut self, idx) -> Option<affinity>: flip Blocked/BlockedUntil/Switching(Blocked*) → Ready, stamp ready_since, and return Some(affinity) if it actually unparked (else None). No lock, no drop, no IPI. Then:
-    // Make a thread ready, returns affinity if unparked
-    pub(super) fn make_unparked_ready(&mut self, idx: usize) -> (bool, Option<u8>) {
-        let mut did_unpark: bool = false;
-        if let Some(tcb) = self.0[idx].as_mut() {
-            match tcb.state {
-                State::Blocked | State::BlockedUntil(_) => {
-                    did_unpark = true;
-                    tcb.state = State::Ready;
-                    #[cfg(feature = "trace")]
-                    {
-                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
-                    }
-                    (did_unpark, tcb.affinity)
+    /// Make a blocked thread ready, returning the HART affinity if unblocked.
+    /// Works for threads that are currently blocked or switching to blocked.
+    /// If the thread is not blocked no action is taken.
+    ///
+    /// # Panics #
+    /// Panics if
+    /// - the thread index is greater than THREADS_MAX
+    /// - the given index does not index a valid TCB
+    pub(super) fn make_blocked_ready(&mut self, idx: usize) -> (bool, Option<u8>) {
+        assert!(idx < THREADS_MAX);
+        let tcb = self.0[idx]
+            .as_mut()
+            .expect("the thread index must be for a valid TCB");
+        match tcb.state {
+            State::Blocked | State::BlockedUntil(_) => {
+                tcb.state = State::Ready;
+                #[cfg(feature = "trace")]
+                {
+                    tcb.ready_since = timer::elapsed(); // stamp Ready entry to track how long it stays in this state
                 }
-                State::Switching(PostSwitch::Blocked)
-                | State::Switching(PostSwitch::BlockedUntil(_)) => {
-                    did_unpark = true;
-                    tcb.state = State::Switching(PostSwitch::Ready);
-                    #[cfg(feature = "trace")]
-                    {
-                        tcb.ready_since = timer::elapsed(); // stamp Ready entry
-                    }
-                    (did_unpark, tcb.affinity)
-                }
-                _ => (did_unpark, None),
+                (true, tcb.affinity)
             }
-        } else {
-            (did_unpark, None)
+            State::Switching(PostSwitch::Blocked)
+            | State::Switching(PostSwitch::BlockedUntil(_)) => {
+                tcb.state = State::Switching(PostSwitch::Ready);
+                #[cfg(feature = "trace")]
+                {
+                    tcb.ready_since = timer::elapsed(); // stamp Ready entry to track how long it stays in this state
+                }
+                (true, tcb.affinity)
+            }
+            _ => (false, None),
         }
     }
 
