@@ -60,6 +60,25 @@ pub extern "C" fn user_fault_now() {
     }
 }
 
+/// Test-only: issues the TEST_BLOCK syscall, which parks the thread in kernel
+/// space forever. Used to prove fault-kill reaches a Blocked sibling. The
+/// spin loop after the ecall is defensive — the kernel never resumes this
+/// thread's user code.
+#[cfg(all(test, feature = "test-sched"))]
+#[allow(dead_code)]
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_block_forever() {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") crate::syscall::TEST_BLOCK,
+        );
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// Spins forever and never exits — only dies if the kernel kills it.
 /// Used to prove fault-kill reaches sibling threads.
 #[allow(dead_code)]

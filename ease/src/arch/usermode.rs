@@ -70,6 +70,20 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     sched::exit_user_thread(exit_reason);
 }
 
+/// Test-only landing point for the TEST_BLOCK syscall: park this thread
+/// until it is destroyed by fault eviction. Runs in M-mode on the user
+/// stack, exactly like `user_thread_exit`. The loop makes each wake a
+/// spurious one — the wait condition is never satisfied — so a woken,
+/// `marked_for_exit` thread re-parks and dies in `reschedule`'s
+/// marked-for-exit conversion (or via `schedule` if preempted first).
+#[cfg(all(test, feature = "test-sched"))]
+pub(crate) extern "C" fn user_thread_block() -> ! {
+    loop {
+        sched::set_self_blocked();
+        sched::park_if_blocked();
+    }
+}
+
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 pub(crate) extern "C" fn resume_kernel() {
