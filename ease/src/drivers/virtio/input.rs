@@ -26,6 +26,7 @@ const ASCII_QUEUE_LEN: usize = 64;
 static KEYBOARD: IrqSpinLock<Option<Keyboard>> = IrqSpinLock::new(None);
 static EVENTS_PENDING: Completion = Completion::new();
 static ASCII_KEY_QUEUE: SpscRingBuf<u8, ASCII_QUEUE_LEN> = SpscRingBuf::new();
+pub(crate) static ASCII_KEY_PENDING: Completion = Completion::new();
 
 // Events use the Linux evdev format
 #[derive(Debug, Clone, Copy)]
@@ -205,6 +206,7 @@ impl Decoder {
     }
 }
 
+/// Decodes keystrokes and turns them into ASCII characters on the ASCII_KEY_QUEUE
 fn keyboard_service() {
     let mut key_events = StackVec::<Event, { VIRTQ_ENTRY_NUM * 2 }>::new();
     let mut decoder = Decoder::new();
@@ -243,6 +245,8 @@ fn keyboard_service() {
                     // If the queue is full the keystroke is dropped: blocking
                     // here would back-pressure into the device ring instead.
                     let _ = ASCII_KEY_QUEUE.push(ch);
+                    // Let the blocked thread know
+                    ASCII_KEY_PENDING.signal();
                 }
                 Emit::Unknown(k) => {
                     println!("Unknown key code {}", k);

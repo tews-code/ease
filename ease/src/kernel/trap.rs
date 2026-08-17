@@ -16,6 +16,7 @@ use crate::kernel::panic;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
+use crate::syscall;
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -109,15 +110,24 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
 #[cfg_attr(feature = "profile", profile)]
 fn handle_ecall(frame: &mut TrapFrame) {
     match frame.syscall() {
-        crate::syscall::EXIT => {
+        syscall::EXIT => {
             exit_from_user(frame, ExitReason::Exit);
         }
-        crate::syscall::PUT_CHAR => {
+        syscall::PUT_CHAR => {
             // Advance mepc
             frame.mepc += 4;
             if let Some(c) = char::from_u32(frame.a0 as u32) {
                 crate::dprint!("{c}");
             }
+        }
+        syscall::GET_CHAR => {
+            // Set up frame for user exit trampoline
+            frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
+            frame.a1 = frame.user_sp;
+            frame.a2 = syscall::GET_CHAR;
+            frame.mepc = usermode::user_thread_block as *const () as usize;
+            frame.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+            frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
         }
         // Test-only: park this thread in kernel space forever. Mirrors the
         // scheduled branch of `exit_from_user` — return from the trap into an
@@ -126,6 +136,9 @@ fn handle_ecall(frame: &mut TrapFrame) {
         // never legitimately resumes user code, it dies via fault eviction.
         #[cfg(all(test, feature = "test-sched"))]
         crate::syscall::TEST_BLOCK => {
+            frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
+            frame.a1 = frame.user_sp;
+            frame.a2 = syscall::TEST_BLOCK;
             frame.mepc = usermode::user_thread_block as *const () as usize;
             frame.mstatus &= !mstatus::MPIE; // Trampoline starts with interrupts disabled
             frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
@@ -141,6 +154,7 @@ fn handle_ecall(frame: &mut TrapFrame) {
 fn exit_from_user(frame: &mut TrapFrame, reason: ExitReason) {
     // Confirm whether we are a synchronous or scheduled based on presence of PerCpu.kernel_resume_sp
     if percpu::kernel_resume_sp() != 0 {
+        // Synchronous branch
         #[cfg(all(test, feature = "test-user"))]
         // Store the exit reason in percpu for testing purposes only
         percpu::set_user_exit_reason(reason);
@@ -150,6 +164,7 @@ fn exit_from_user(frame: &mut TrapFrame, reason: ExitReason) {
         // Switch mepc to return to M-mode
         frame.mepc = crate::arch::usermode::resume_kernel as *const () as usize;
     } else {
+        // Scheduled branch
         // Set up frame for user exit trampoline
         frame.a0 = reason as usize;
         frame.mepc = usermode::user_thread_exit as *const () as usize;

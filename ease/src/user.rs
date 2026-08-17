@@ -2,6 +2,38 @@
 
 use core::arch::naked_asm;
 
+use crate::syscall;
+
+/// Proto shell
+///
+/// Echos character read from the keyboard until `x` at which
+/// point it quits
+#[allow(dead_code)]
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn echo() {
+    let mut ch: usize = 0;
+    loop {
+        while ch == 0 {
+            unsafe {
+                core::arch::asm!(
+                    "ecall",
+                    clobber_abi("C"),
+                    out("a0") ch,
+                    in("a7") syscall::GET_CHAR,
+                );
+            }
+        }
+        match ch {
+            0 => {}
+            val if val == b'x' as usize => user_exit(),
+            _ => {
+                user_print(ch);
+                ch = 0;
+            }
+        }
+    }
+}
+
 #[allow(dead_code)]
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_print_a() {
@@ -10,7 +42,7 @@ pub extern "C" fn user_print_a() {
             core::arch::asm!(
                 "ecall",
                 inout("a0") b'A' as usize => _,
-                in("a7") crate::syscall::PUT_CHAR,
+                in("a7") syscall::PUT_CHAR,
             );
         }
     }
@@ -24,7 +56,7 @@ pub extern "C" fn user_print_b() {
             core::arch::asm!(
                 "ecall",
                 inout("a0") b'B' as usize => _,
-                in("a7") crate::syscall::PUT_CHAR,
+                in("a7") syscall::PUT_CHAR,
             );
         }
     }
@@ -36,7 +68,7 @@ pub extern "C" fn user_test() {
     unsafe {
         core::arch::asm!(
             "ecall",
-            in("a7") crate::syscall::EXIT,
+            in("a7") syscall::EXIT,
         );
     }
     loop {
@@ -71,7 +103,7 @@ pub extern "C" fn user_block_forever() {
     unsafe {
         core::arch::asm!(
             "ecall",
-            in("a7") crate::syscall::TEST_BLOCK,
+            in("a7") syscall::TEST_BLOCK,
         );
     }
     loop {
@@ -113,6 +145,18 @@ pub extern "C" fn user_return_test() {
     core::hint::black_box(0u32);
 }
 
+#[allow(dead_code)]
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_print(b: usize) {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a0") b,
+            in("a7") syscall::PUT_CHAR,
+        );
+    }
+}
+
 #[unsafe(no_mangle)]
 #[unsafe(naked)]
 #[unsafe(link_section = ".user_text")]
@@ -121,6 +165,6 @@ pub extern "C" fn user_exit() -> ! {
         "li a7, {exit}",
         "ecall",
         "unimp",
-        exit = const crate::syscall::EXIT,
+        exit = const syscall::EXIT,
     );
 }

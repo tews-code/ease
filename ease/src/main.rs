@@ -49,6 +49,7 @@ use crate::board::uart;
 use crate::board::virtio;
 use crate::fs::VolumeType;
 use crate::kernel::sched;
+use crate::kernel::sched::spawn_process;
 
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -137,6 +138,8 @@ fn kernel_init() {
             // builds it's pure background contention — the runner never feeds
             // it input — so it skews the latency-sensitive scheduler tests.
             // Spawn it only outside test builds.
+            #[cfg(not(test))]
+            spawn_process("userecho", crate::user::echo);
             #[cfg(not(test))]
             sched::Builder::new()
                 .with_stack_class(Order::KB16)

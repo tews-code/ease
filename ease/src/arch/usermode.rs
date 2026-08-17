@@ -3,8 +3,10 @@
 use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
+use crate::drivers::virtio;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
+use crate::syscall;
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -70,17 +72,28 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     sched::exit_user_thread(exit_reason);
 }
 
-/// Test-only landing point for the TEST_BLOCK syscall: park this thread
-/// until it is destroyed by fault eviction. Runs in M-mode on the user
-/// stack, exactly like `user_thread_exit`. The loop makes each wake a
-/// spurious one — the wait condition is never satisfied — so a woken,
-/// `marked_for_exit` thread re-parks and dies in `reschedule`'s
-/// marked-for-exit conversion (or via `schedule` if preempted first).
-#[cfg(all(test, feature = "test-sched"))]
-pub(crate) extern "C" fn user_thread_block() -> ! {
-    loop {
-        sched::set_self_blocked();
-        sched::park_if_blocked();
+pub(crate) extern "C" fn user_thread_block(
+    return_address: usize,
+    user_sp: usize,
+    syscall: usize,
+) -> ! {
+    match syscall {
+        #[cfg(all(test, feature = "test-sched"))]
+        syscall::TEST_BLOCK => loop {
+            sched::set_self_blocked();
+            sched::park_if_blocked();
+        },
+        syscall::GET_CHAR => {
+            loop {
+                if let Some(b) = virtio::input::read_byte() {
+                    resume_user(b as usize, 0, return_address, user_sp);
+                } else {
+                    // Block using a completion on the key press
+                    virtio::input::ASCII_KEY_PENDING.wait();
+                }
+            }
+        }
+        _ => panic!("unexpected blocking syscall: {}", syscall),
     }
 }
 
@@ -169,6 +182,34 @@ pub extern "C" fn user_first_run() -> ! {
         "mret",
         post_switch_cleanup = sym post_switch_cleanup,
         num_slots = const crate::arch::trap::NUM_SLOTS,
+    );
+}
+
+/// Return to user thread from M mode
+#[unsafe(naked)]
+pub extern "C" fn resume_user(
+    return_val1: usize,
+    return_val2: usize,
+    resume_address: usize,
+    user_sp: usize,
+) -> ! {
+    naked_asm!(
+        // Note that `return_val1` is already in a0 as it is the first function argument
+        // Set up stack pointer
+        "mv sp, a3",
+        //Ensure interrupts are enabled in user mode
+        "li t0, {mstatus_MIE}",
+        "csrc mstatus, t0",
+        "li t0, {mstatus_MPP}",
+        "csrc mstatus, t0",
+        "li t0, {mstatus_MPIE}",
+        "csrc mstatus, t0",
+        // Set the return address to the user thread
+        "csrw mepc, a2",
+        "mret",
+        mstatus_MIE = const crate::arch::csr::mstatus::MIE,
+        mstatus_MPP = const crate::arch::csr::mstatus::MPP,
+        mstatus_MPIE = const crate::arch::csr::mstatus::MPIE
     );
 }
 
