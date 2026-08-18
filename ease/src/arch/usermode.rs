@@ -3,7 +3,7 @@
 use core::arch::naked_asm;
 
 use crate::arch::csr::mstatus;
-use crate::drivers::virtio;
+use crate::drivers::keyboard;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
 use crate::syscall;
@@ -85,11 +85,11 @@ pub(crate) extern "C" fn user_thread_block(
         },
         syscall::GET_CHAR => {
             loop {
-                if let Some(b) = virtio::input::read_byte() {
+                if let Some(b) = keyboard::read_byte() {
                     resume_user(b as usize, 0, return_address, user_sp);
                 } else {
                     // Block using a completion on the key press
-                    virtio::input::ASCII_KEY_PENDING.wait();
+                    keyboard::ASCII_KEY_PENDING.wait();
                 }
             }
         }

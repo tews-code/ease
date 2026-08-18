@@ -1,6 +1,7 @@
 //! OS standard memory regions
-// Region sizes must be power-of-two and aligned to their own size (NAPOT)
-// This is true for buddy allocator needs, used for stacks and PMP
+//!
+//! Region sizes must be power-of-two and aligned to their own size (NAPOT)
+//! This is true for buddy allocator needs, used for stacks and PMP
 
 use core::alloc::Layout;
 use core::ptr::NonNull;

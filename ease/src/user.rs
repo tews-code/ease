@@ -13,15 +13,13 @@ use crate::syscall;
 pub extern "C" fn echo() {
     let mut ch: usize = 0;
     loop {
-        while ch == 0 {
-            unsafe {
-                core::arch::asm!(
-                    "ecall",
-                    clobber_abi("C"),
-                    out("a0") ch,
-                    in("a7") syscall::GET_CHAR,
-                );
-            }
+        unsafe {
+            core::arch::asm!(
+                "ecall",
+                clobber_abi("C"),
+                out("a0") ch,
+                in("a7") syscall::GET_CHAR,
+            );
         }
         match ch {
             0 => {}

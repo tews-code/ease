@@ -83,15 +83,6 @@ pub fn direct_write_byte(byte: u8) {
     crate::io::test_io::capture(byte);
 }
 
-/// UART reader for QEMU
-pub struct UartReader;
-
-impl UartReader {
-    pub fn read_byte(&self) -> Option<u8> {
-        RX_BUF.pop()
-    }
-}
-
 // Interrupt handler for UART
 //
 // Called by trap handler - interrupts are disabled
@@ -126,17 +117,4 @@ pub fn handle_interrupt() {
         }
         _ => {} // No interrupt pending or modem status — ignore
     }
-}
-
-/// Enables UART RX interrupts
-pub fn enable_rx_interrupt() {
-    mmio::write8(uart::BASE, IER, 1);
-}
-
-pub struct UartInitToken(());
-
-/// Initialise the UART
-pub fn init() -> UartInitToken {
-    enable_rx_interrupt();
-    UartInitToken(())
 }

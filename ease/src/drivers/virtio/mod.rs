@@ -7,7 +7,7 @@ use crate::arch::mmio;
 
 pub(crate) mod blk;
 pub(crate) mod input;
-
+pub(crate) mod keyboard;
 mod queue;
 
 // Virtio magic and version

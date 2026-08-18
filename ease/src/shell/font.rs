@@ -5,7 +5,7 @@ use crate::drivers::ramfb::{Colour, FrameBuffer};
 pub const WIDTH: usize = 8;
 pub const HEIGHT: usize = 16;
 
-const FONT_DATA: &[u8] = include_bytes!("../../resources/VGA8.F16");
+const FONT_DATA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/VGA8.F16"));
 const BYTES_PER_GLYPH: usize = 16;
 
 fn glyph(char_code: u8) -> &'static [u8] {

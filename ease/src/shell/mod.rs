@@ -2,6 +2,7 @@
 
 use core::fmt::Write;
 
+use crate::drivers;
 use crate::kernel::collection::StackVec;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
@@ -135,13 +136,7 @@ impl Shell {
         loop {
             let _ = write!(self.console, "{PROMPT}");
             loop {
-                if let Some(event) = self.keyboard.poll(|| {
-                    let mut b = crate::drivers::uart::UartReader.read_byte();
-                    if b.is_none() {
-                        b = crate::drivers::virtio::input::read_byte();
-                    }
-                    b
-                }) {
+                if let Some(event) = self.keyboard.poll(drivers::keyboard::read_byte) {
                     // Send event to line editor
                     match self.line_editor.process(event) {
                         EditResult::CursorMove | EditResult::LineEdit => {

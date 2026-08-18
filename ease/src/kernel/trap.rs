@@ -215,7 +215,7 @@ fn handle_external_irq() {
             virtio::blk::handle_virtio_interrupt();
         }
         board::virtio::keyboard::IRQ => {
-            virtio::input::handle_virtio_interrupt();
+            virtio::keyboard::handle_interrupt();
         }
         _ => panic!("Unknown external interrupt: {}", irq),
     }

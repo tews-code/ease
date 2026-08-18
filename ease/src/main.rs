@@ -41,7 +41,6 @@ mod testrunner;
 mod user;
 
 use drivers::ramfb::FrameBuffer;
-use drivers::uart::UartInitToken;
 use kernel::alloc::Order;
 use kernel::percpu;
 
@@ -49,7 +48,6 @@ use crate::board::uart;
 use crate::board::virtio;
 use crate::fs::VolumeType;
 use crate::kernel::sched;
-use crate::kernel::sched::spawn_process;
 
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
@@ -65,7 +63,7 @@ fn shell_main(fb: FrameBuffer) {
     shell.run();
 }
 
-fn interrupts_init_hart0(_uart_token: UartInitToken) {
+fn interrupts_init_hart0() {
     arch::interrupts::enable();
 }
 
@@ -83,10 +81,9 @@ fn kernel_init() {
     kernel::timer::init();
     drivers::plic::init();
     drivers::plic::enable(uart::IRQ);
-    let uart_init_token = drivers::uart::init();
     sched::bootstrap(0);
     kernel::ipi::init();
-    interrupts_init_hart0(uart_init_token);
+    interrupts_init_hart0();
 
     // Spawn the trace sampler on HART0 BEFORE the init thread, so it is
     // already sampling while the init thread runs (and exits) on this hart.
@@ -120,7 +117,7 @@ fn kernel_init() {
         .spawn(|| {
             drivers::virtio::blk::virtio_blk_init();
             drivers::plic::enable(virtio::blk::IRQ);
-            drivers::virtio::input::virtio_keyboard_init();
+            drivers::virtio::keyboard::init();
             drivers::plic::enable(virtio::keyboard::IRQ);
             match fs::init() {
                 Ok(s) => println!(
@@ -139,7 +136,7 @@ fn kernel_init() {
             // it input — so it skews the latency-sensitive scheduler tests.
             // Spawn it only outside test builds.
             #[cfg(not(test))]
-            spawn_process("userecho", crate::user::echo);
+            sched::spawn_process("userecho", crate::user::echo);
             #[cfg(not(test))]
             sched::Builder::new()
                 .with_stack_class(Order::KB16)
