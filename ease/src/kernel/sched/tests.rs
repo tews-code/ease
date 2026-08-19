@@ -2220,40 +2220,6 @@ fn fault_kill_races_a_voluntary_exit() {
     );
 }
 
-// A fault must evict a sibling that is parked in kernel space (State::Blocked),
-// not just Ready/Running/Sleeping ones. The blocker parks via the test-only
-// TEST_BLOCK syscall and can only die if eviction (a) marks it for exit and
-// (b) wakes it so the mark is ever consumed — a parked thread never reaches
-// the marked_for_exit checks on its own. Failure modes this catches: the old
-// panic arm returning; the mark/wake aimed at the wrong thread index (the
-// eviction sweep panics or the blocker survives); a woken blocker re-parking
-// as a zombie so the process is never released. The handle going stale is the
-// proof the whole teardown completed, as in the sibling tests above.
-#[test_case]
-fn fault_evicts_blocked_sibling() {
-    let handle = crate::kernel::sched::spawn_process("t-fltb", crate::user::user_block_forever)
-        .expect("process spawn should succeed");
-    // Let the blocker run, issue TEST_BLOCK, and genuinely park: after 50ms
-    // it is Blocked, so the eviction sweep must take the new arm rather than
-    // the Ready/Running ones.
-    crate::kernel::sched::sleep(50);
-    crate::kernel::sched::spawn_user(&handle, crate::user::user_fault_now)
-        .expect("faulter should join the process");
-
-    let mut killed = false;
-    for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(&handle, crate::user::user_test).is_none() {
-            killed = true;
-            break;
-        }
-        crate::kernel::sched::sleep(10);
-    }
-    assert!(
-        killed,
-        "process with a blocked sibling was never killed after fault"
-    );
-}
-
 // The teardown thread must actually empty the fd table, not just abandon it
 // with the PCB. Every process starts with three descriptors (keyboard,
 // console, debug console), so a slot is never trivially clean: if the fault

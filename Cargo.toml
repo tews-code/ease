@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["ease", "ease-macros"]
+members = ["ease", "ease-abi", "ease-macros"]
+exclude = ["ease-ulib", "ease-user"]
 
 [profile.test]
 opt-level = 1

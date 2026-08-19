@@ -7,6 +7,7 @@ use crate::kernel::collection::StackVec;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
 use crate::shell::line_editor::EditResult;
+use crate::syscall::ascii;
 
 pub mod commands;
 pub mod console;
@@ -16,17 +17,6 @@ pub mod line_editor;
 pub mod vt_parse;
 
 const COMMAND_DEPTH: usize = 8;
-
-// ASCII chars that are used for console and serial control
-pub mod ascii {
-    pub const BELL: u8 = 0x07;
-    pub const BS: u8 = 0x08;
-    pub const TAB: u8 = 0x09;
-    pub const LF: u8 = 0x0A;
-    pub const FF: u8 = 0x0C;
-    pub const CR: u8 = 0x0D;
-    pub const DEL: u8 = 0x7F;
-}
 
 use line_editor::LineEditor;
 

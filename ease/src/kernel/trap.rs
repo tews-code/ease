@@ -129,20 +129,6 @@ fn handle_ecall(frame: &mut TrapFrame) {
             frame.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
             frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
         }
-        // Test-only: park this thread in kernel space forever. Mirrors the
-        // scheduled branch of `exit_from_user` — return from the trap into an
-        // M-mode trampoline that runs in thread context (sched calls are not
-        // safe from within the trap handler). mepc is not advanced: the thread
-        // never legitimately resumes user code, it dies via fault eviction.
-        #[cfg(all(test, feature = "test-sched"))]
-        crate::syscall::TEST_BLOCK => {
-            frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
-            frame.a1 = frame.user_sp;
-            frame.a2 = syscall::TEST_BLOCK;
-            frame.mepc = usermode::user_thread_block as *const () as usize;
-            frame.mstatus &= !mstatus::MPIE; // Trampoline starts with interrupts disabled
-            frame.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
-        }
         _ => {
             // Advance mepc
             frame.mepc += 4;

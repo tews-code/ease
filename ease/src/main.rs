@@ -26,7 +26,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 // Bring the print/println macros in first so other modules can benefit
 #[macro_use]
 mod io;
-
+pub(crate) use ease_abi as syscall;
 mod arch;
 mod bench;
 mod board;
@@ -35,7 +35,6 @@ mod fs;
 mod kernel;
 mod qemu;
 mod shell;
-mod syscall;
 #[cfg(test)]
 mod testrunner;
 mod user;
@@ -135,8 +134,8 @@ fn kernel_init() {
             // builds it's pure background contention — the runner never feeds
             // it input — so it skews the latency-sensitive scheduler tests.
             // Spawn it only outside test builds.
-            #[cfg(not(test))]
-            sched::spawn_process("userecho", crate::user::echo);
+            // #[cfg(not(test))]
+            // sched::spawn_process("line", crate::user::line);
             #[cfg(not(test))]
             sched::Builder::new()
                 .with_stack_class(Order::KB16)

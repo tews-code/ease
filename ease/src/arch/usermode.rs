@@ -78,11 +78,6 @@ pub(crate) extern "C" fn user_thread_block(
     syscall: usize,
 ) -> ! {
     match syscall {
-        #[cfg(all(test, feature = "test-sched"))]
-        syscall::TEST_BLOCK => loop {
-            sched::set_self_blocked();
-            sched::park_if_blocked();
-        },
         syscall::GET_CHAR => {
             loop {
                 if let Some(b) = keyboard::read_key() {

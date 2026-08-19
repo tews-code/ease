@@ -45,6 +45,7 @@ test-all = ["test-alloc", "test-boot-data", "test-clint", "test-collections", "t
 
 [dependencies]
 ease-macros = { path = "../ease-macros" }
+ease-abi = { path = "../ease-abi" }
 
 [package.metadata.docs.rs]
 targets = ["riscv32imac-unknown-none-elf"]
