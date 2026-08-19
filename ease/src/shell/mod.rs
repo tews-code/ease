@@ -136,7 +136,7 @@ impl Shell {
         loop {
             let _ = write!(self.console, "{PROMPT}");
             loop {
-                if let Some(event) = self.keyboard.poll(drivers::keyboard::read_byte) {
+                if let Some(event) = self.keyboard.poll(drivers::keyboard::read_key) {
                     // Send event to line editor
                     match self.line_editor.process(event) {
                         EditResult::CursorMove | EditResult::LineEdit => {

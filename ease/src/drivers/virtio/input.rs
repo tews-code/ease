@@ -19,8 +19,28 @@ use alloc::boxed::Box;
 use core::mem;
 use core::ptr::{read_volatile, write_volatile};
 
+//evdev codes
+pub(crate) mod evdev {
+    pub(crate) const EV_SYN: u16 = 0;
+    pub(crate) const EV_KEY: u16 = 1;
+    pub(crate) const VALUE_RELEASE: u32 = 0;
+    pub(crate) const VALUE_PRESS: u32 = 1;
+    pub(crate) const VALUE_HOLD: u32 = 2;
+}
+
+pub(crate) mod key_code {
+    pub(crate) const BACKSPACE: u16 = 14;
+    pub(crate) const CONTROL: u16 = 29;
+    pub(crate) const LEFT_SHIFT: u16 = 42;
+    pub(crate) const RIGHT_SHIFT: u16 = 54;
+    pub(crate) const LEFT_OPT: u16 = 56;
+    pub(crate) const CAPS_LOCK: u16 = 58;
+    pub(crate) const RIGHT_OPT: u16 = 100;
+    pub(crate) const UP_ARROW: u16 = 103;
+}
+
 // Virtio input events use the Linux evdev format
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub(crate) struct Event {
     pub(crate) event_type: u16,

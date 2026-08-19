@@ -85,11 +85,11 @@ pub(crate) extern "C" fn user_thread_block(
         },
         syscall::GET_CHAR => {
             loop {
-                if let Some(b) = keyboard::read_byte() {
-                    resume_user(b as usize, 0, return_address, user_sp);
+                if let Some(b) = keyboard::read_key() {
+                    resume_user(b, 0, return_address, user_sp);
                 } else {
                     // Block using a completion on the key press
-                    keyboard::ASCII_KEY_PENDING.wait();
+                    keyboard::KEY_PENDING.wait();
                 }
             }
         }
