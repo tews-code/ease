@@ -79,15 +79,13 @@ MEMORY {
     PSRAM       : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB */
 }
 
+/* Include the user memory definitions that are shared between user programs and the OS */
+INCLUDE memory-shared-qemu.x
+
 __idle_stack_size       = 2K;
 __irq_stack_size        = 1K + 512;
 __scratch_ram_text_size = 2K;
 __kernel_heap_size      = 128K;
-__user_text_size        = 4K;   /* Temporary while user processes are compiled with the kernel */
-__user_data_size        = 2K;   /* Temporary while user processes are compiled with the kernel */
-__user_bss_size         = 2K;   /* Temporary while user processes are compiled with the kernel */
-__user_heap_sram_size   = 256K;
-__user_heap_psram_size  = 4M;
 __fb_width = 640; __fb_height = 480; __fb_bytes_pp = 4; /* 640  x 480 x 4 bytes = ~1.2MiB */
 
 __sram_pd1_end  = ORIGIN(SRAM_PD1) + LENGTH(SRAM_PD1);
@@ -220,7 +218,7 @@ SECTIONS {
     } > PSRAM
 
     /* Temporarily put all user threads .text in 4KB window in PSRAM */
-    .user_text : ALIGN(4K) {
+    .user_text __user_text_origin : {
         __user_text_start = .;
         *(.user_text .user_text.*)
         . = __user_text_start + __user_text_size;
@@ -229,7 +227,7 @@ SECTIONS {
     __user_text_lma = LOADADDR(.user_text);
 
     /* Temporarily put all user threads .data and .bss in 4KB window in PSRAM */
-    .user_data : ALIGN(4K) {
+    .user_data __user_data_origin : {
         __user_data_bss_start = .;
         __user_data_start = .;
         *(.user_data .user_data.*)
@@ -238,7 +236,7 @@ SECTIONS {
     } > PSRAM AT > FLASH
     __user_data_lma = LOADADDR(.user_data);
 
-    .user_bss (NOLOAD) : {
+    .user_bss __user_bss_origin (NOLOAD) : {
         __user_bss_start = .;
         *(.user_bss .user_bss.*)
         . = __user_bss_start + __user_bss_size;
@@ -262,6 +260,7 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.eh_frame_hdr) *(.eh_frame)} /* Discard comment strings to keep binary small */
 }
 
+ASSERT(__heap_psram_end == __user_text_origin, "user .text is should be immediately after the heap PSRAM allocation")
 ASSERT(__scratch_ram_text_size % 4  == 0, "scratch text size must be word-multiple (copy_region)")
 ASSERT(__irq_stack_size        % 16 == 0, "irq stack size must be 16-multiple (paint + ABI sp)")
 ASSERT(__idle_stack_size       % 16 == 0, "idle stack size must be 16-multiple (paint + ABI sp)")
