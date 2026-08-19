@@ -1,4 +1,12 @@
+//! User binaries for EASE
+
 #![no_std]
+#![no_main]
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
 
 /// Proto shell
 ///
