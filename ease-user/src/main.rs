@@ -3,9 +3,14 @@
 #![no_std]
 #![no_main]
 
+use ease_ulib as lib;
+use ease_ulib::ascii as ascii;
+
 #[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    loop {}
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {
+        core::hint::spin_loop()
+    }
 }
 
 /// Proto shell
@@ -13,7 +18,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Fills a buffer with characters from the keyboard and reprints on Enter
 #[allow(dead_code)]
 #[unsafe(link_section = ".user_text")]
-pub extern "C" fn line() {
+pub extern "C" fn shell() -> ! {
     const LINE_LEN: usize = 64;
     let mut buf = [0u8; LINE_LEN];
     let mut pos = 0;
@@ -35,4 +40,9 @@ pub extern "C" fn line() {
             }
         }
     }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn _start() -> ! {
+    shell();
 }

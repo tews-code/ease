@@ -1,9 +1,10 @@
+//! User library for EASE programs
+
 #![no_std]
 
-use syscall;
+use ease_abi as syscall;
+pub use ease_abi::ascii;
 
-#[allow(dead_code)]
-#[unsafe(link_section = ".user_text")]
 pub fn put_char(b: u8) {
     unsafe {
         core::arch::asm!(
@@ -14,8 +15,6 @@ pub fn put_char(b: u8) {
     }
 }
 
-#[allow(dead_code)]
-#[unsafe(link_section = ".user_text")]
 pub fn get_key() -> Option<usize> {
     let mut key: usize = 0;
     unsafe {
