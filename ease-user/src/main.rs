@@ -16,8 +16,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 /// Proto shell
 ///
 /// Fills a buffer with characters from the keyboard and reprints on Enter
-#[allow(dead_code)]
-#[unsafe(link_section = ".user_text")]
 pub extern "C" fn shell() -> ! {
     const LINE_LEN: usize = 64;
     let mut buf = [0u8; LINE_LEN];
