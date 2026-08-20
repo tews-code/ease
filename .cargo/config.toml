@@ -2,6 +2,5 @@
 target = "riscv32imac-unknown-none-elf"
 
 [target.riscv32imac-unknown-none-elf]
-rustflags = ["-C", "link-arg=-Tease/memory-qemu.x"]
 runner = "./ease/scripts/run.sh"
 
