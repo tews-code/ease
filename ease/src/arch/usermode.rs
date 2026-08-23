@@ -6,7 +6,7 @@ use crate::arch::csr::mstatus;
 use crate::drivers::keyboard;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup};
-use crate::syscall;
+use ease_abi::syscall;
 
 unsafe extern "C" {
     static __heap_pd0_end: u8;
@@ -81,7 +81,7 @@ pub(crate) extern "C" fn user_thread_block(
         syscall::GET_CHAR => {
             loop {
                 if let Some(b) = keyboard::read_key() {
-                    resume_user(b, 0, return_address, user_sp);
+                    resume_user(0, b, return_address, user_sp);
                 } else {
                     // Block using a completion on the key press
                     keyboard::KEY_PENDING.wait();
@@ -181,15 +181,18 @@ pub extern "C" fn user_first_run() -> ! {
 }
 
 /// Return to user thread from M mode
+///
+/// `error` is returned in `a0` with 0 indicating success
+/// `value` is returned in `a1`
 #[unsafe(naked)]
 pub extern "C" fn resume_user(
-    return_val1: usize,
-    return_val2: usize,
+    error: usize,
+    value: usize,
     resume_address: usize,
     user_sp: usize,
 ) -> ! {
     naked_asm!(
-        // Note that `return_val1` is already in a0 as it is the first function argument
+        // Note that `error` is already in a0 and value is already in a1 as they are the first function arguments
         // Set up stack pointer
         "mv sp, a3",
         //Ensure interrupts are enabled in user mode
@@ -242,8 +245,13 @@ mod test {
         use crate::arch::csr::pmp::{NAPOT, R, W, X};
         use crate::arch::pmp::Pmp;
 
-        // Initialise a user memory map - copy .text, .data and zero .bss
-        crate::kernel::sched::usermemmap::UserMemMap::load_user_image();
+        // Copy the kernel's .user_text/.user_data into the user window and
+        // zero .bss. The loader's fixed-region map is dropped straight away:
+        // these tests install their own PMP set below, and `user_entry`
+        // takes the fn directly rather than a `UserEntry`.
+        let _ =
+            crate::kernel::sched::userloader::load_user_image(crate::user::Image::Flash(user_test))
+                .expect("flash image load cannot fail: fixed regions, no allocation");
 
         let text_base = &raw const __user_text_start as usize;
         let text_size = &raw const __user_text_end as usize - text_base;

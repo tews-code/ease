@@ -10,7 +10,7 @@ use crate::kernel::fd;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
-use crate::kernel::sched::process::{PROCS_MAX, Procs};
+use crate::kernel::sched::process;
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
     Threads,
@@ -212,7 +212,7 @@ impl SchedInner {
                     .as_ref()
                     .expect("process should be configured before this thread is scheduled")
                     .mem_map
-                    .to_pmp(&user_context.user_stack);
+                    .to_pmp(&user_context.stack);
                 pmp_config.activate();
             } else {
                 // Kernel thread has IRQ stack top in mscratch
@@ -250,7 +250,7 @@ impl Scheduler {
         Self {
             sched: IrqSpinLock::new(SchedInner {
                 thread_blocks: Threads([const { None }; THREADS_MAX]),
-                process_blocks: Procs([const { None }; PROCS_MAX]),
+                process_blocks: process::Procs([const { None }; process::MAX]),
                 #[cfg(feature = "trace")]
                 wake_overshoot: [0; THREADS_MAX],
             }),
@@ -366,7 +366,7 @@ impl Scheduler {
             // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
             // Set the dead thread to None and return early
             if let Some(process_idx) = sched.thread_blocks.process_idx_of(switched_from_idx) {
-                sched.release_process_thread(process_idx, switched_from_idx);
+                self.release_process_thread(&mut sched, process_idx, switched_from_idx);
             }
             sched.thread_blocks.0[switched_from_idx] = None;
             return;

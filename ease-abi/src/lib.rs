@@ -1,15 +1,41 @@
 //! System Calls
 //!
-//! Shared system call definitions.
+//! Shared system call definitions and
+//! Syscall error codes.
+//!
+//! We take inspiration from the RISCV SBI approach on syscall responses:
+//!  `a0` holds 0 on success or a syscall error code on failure
+//!  `a1` holds the value on success or zero on error
+//!
 //! Also holds
 //! - a module of decoded special keys for console
 //! - common ASCII codes
 
 #![no_std]
 
-pub const EXIT: usize = 0;
-pub const PUT_CHAR: usize = 1;
-pub const GET_CHAR: usize = 2;
+pub mod syscall {
+    pub const EXIT: usize = 0;
+    pub const PUT_CHAR: usize = 1;
+    pub const GET_CHAR: usize = 2;
+}
+
+/// Syscall error codes
+#[repr(usize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    // Skip 0 as it indicates success
+    NotFound  = 1,
+}
+
+impl TryFrom<usize> for Error {
+    type Error = usize; // when decoding fails, hand back the raw number so it can be printed
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            v if v == Error::NotFound as usize => Ok(Error::NotFound),
+            _ => Err(value),
+        }
+    }
+}
 
 pub mod special_key {
     // All special keys are placed above 0xFF

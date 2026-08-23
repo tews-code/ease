@@ -4,6 +4,8 @@
 
 use core::ptr::NonNull;
 
+use crate::sched::userloader;
+
 #[repr(C, align(16))]
 #[derive(Default)]
 pub(crate) struct TrapFrame {
@@ -53,13 +55,13 @@ impl TrapFrame {
     }
 
     pub(crate) fn init_for_user_entry(
-        user_entry: extern "C" fn(),
+        entry: userloader::UserEntry,
         user_stack_top: NonNull<u8>,
         user_exit: usize,
     ) -> Self {
         Self {
             ra: user_exit,
-            mepc: user_entry as usize,
+            mepc: entry.addr(),
             mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
             user_sp: user_stack_top.addr().into(),
             ..Default::default()

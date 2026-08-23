@@ -8,6 +8,7 @@ use core::ptr::NonNull;
 use super::usermode::user_first_run;
 use crate::arch::trap::TrapFrame;
 use crate::kernel::alloc::MemRegion;
+use crate::kernel::sched::userloader;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::paint_stack;
 use crate::kernel::stack::set_canary;
@@ -83,7 +84,7 @@ impl Context {
     // - user stack top must be the top of a live, U-mode-accessible region
     pub unsafe fn init_user_stack(
         kernel_stack: &mut MemRegion,
-        user_entry: extern "C" fn(),
+        entry: userloader::UserEntry,
         user_stack_top: NonNull<u8>,
         user_exit: usize,
     ) -> NonNull<u8> {
@@ -108,7 +109,7 @@ impl Context {
                 as *mut TrapFrame;
             core::ptr::write(
                 trap_frame_ptr,
-                TrapFrame::init_for_user_entry(user_entry, user_stack_top, user_exit),
+                TrapFrame::init_for_user_entry(entry, user_stack_top, user_exit),
             );
         }
         // Set up a switch context

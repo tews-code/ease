@@ -16,7 +16,7 @@ use crate::kernel::panic;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
-use crate::syscall;
+use ease_abi::syscall;
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -119,6 +119,8 @@ fn handle_ecall(frame: &mut TrapFrame) {
             if let Some(c) = char::from_u32(frame.a0 as u32) {
                 crate::dprint!("{c}");
             }
+            frame.a0 = 0; // Report success
+            frame.a1 = 0;
         }
         syscall::GET_CHAR => {
             // Set up frame for user exit trampoline

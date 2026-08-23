@@ -1,33 +1,26 @@
-//! User binaries for EASE
+//! Built in shell for EASE
 
 #![no_std]
 #![no_main]
 
 use ease_ulib as lib;
-use ease_ulib::ascii as ascii;
-
-#[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {
-        core::hint::spin_loop()
-    }
-}
+use lib::ascii;
 
 /// Proto shell
 ///
 /// Fills a buffer with characters from the keyboard and reprints on Enter
-pub extern "C" fn shell() -> ! {
+pub extern "C" fn main() {
     const LINE_LEN: usize = 64;
     let mut buf = [0u8; LINE_LEN];
     let mut pos = 0;
     loop {
-        if let Some(key) = lib::get_key() {
+        if let Some(key) = lib::get_key().unwrap() {
             let key = key as u8;
             if key == ascii::CR {
-                lib::put_char(ascii::CR);
-                lib::put_char(ascii::LF);
+                let _ = lib::put_char(ascii::CR);
+                let _ = lib::put_char(ascii::LF);
                 for i in 0..pos {
-                    lib::put_char(buf[i]);
+                    let _ = lib::put_char(buf[i]);
                 }
                 pos = 0;
             } else {
@@ -41,6 +34,7 @@ pub extern "C" fn shell() -> ! {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn _start() -> ! {
-    shell();
+extern "C" fn _start() {
+    main();
+    lib::exit();
 }

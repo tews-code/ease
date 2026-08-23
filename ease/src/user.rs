@@ -2,10 +2,59 @@
 
 use core::arch::naked_asm;
 
-use crate::syscall;
+use ease_abi::syscall;
+
+pub(crate) const PROGRAMS: Programs = Programs(&[
+    Program {
+        name: "shell",
+        image: Image::Blob(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
+            "shell.bin"
+        ))),
+    },
+    Program {
+        name: "echo",
+        image: Image::Flash(echo),
+    },
+    Program {
+        name: "user_test",
+        image: Image::Flash(user_test),
+    },
+    Program {
+        name: "user_spin_forever",
+        image: Image::Flash(user_spin_forever),
+    },
+]);
+
+/// User programs are either built into the OS binary as functions and loaded from flash
+/// or binary blobs created by the ease-user package and loaded as bytes
+#[derive(Clone, Copy)]
+pub(crate) enum Image {
+    Blob(&'static [u8]),    // The blob holds the entire user program as a byte array
+    Flash(extern "C" fn()), // Function linked into the kernel image
+}
+/// A program and its name for lookup
+struct Program {
+    name: &'static str,
+    image: Image,
+}
+/// Table of user programs
+pub(crate) struct Programs(&'static [Program]);
+
+impl Programs {
+    pub(crate) fn find(&self, name: &str) -> Option<Image> {
+        for program in self.0.iter() {
+            if program.name == name {
+                return Some(program.image); // Only return the first if there are duplicate names
+            }
+        }
+        None
+    }
+}
 
 mod lib {
-    use crate::syscall;
+    use ease_abi::syscall;
 
     #[allow(dead_code)]
     #[unsafe(link_section = ".user_text")]

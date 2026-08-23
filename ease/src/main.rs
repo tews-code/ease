@@ -128,21 +128,16 @@ fn kernel_init() {
                 ),
                 Err(e) => println!("Failed to mount storage: {e:?}"),
             }
-            let fb = FrameBuffer::init();
+            let _fb = FrameBuffer::init();
             // The interactive shell is a permanent runnable thread (its idle
             // loop WFIs while still the Running thread on its hart). In test
             // builds it's pure background contention — the runner never feeds
             // it input — so it skews the latency-sensitive scheduler tests.
             // Spawn it only outside test builds.
-            // #[cfg(not(test))]
-            // sched::spawn_process("line", crate::user::line);
             #[cfg(not(test))]
-            sched::Builder::new()
-                .with_stack_class(Order::KB16)
-                .spawn(move || shell_main(fb))
-                .expect("spawn shell");
-            #[cfg(test)]
-            let _ = fb; // framebuffer still initialised; shell just not spawned
+            if let Err(e) = sched::spawn_process("shell") {
+                dprintln!("Error spawning process: {:?}", e);
+            }
             // Set the flag to allow HART1 to progress
             INIT_COMPLETE.store(true, Ordering::Release);
         })

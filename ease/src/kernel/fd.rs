@@ -11,6 +11,7 @@ use crate::fs::FileHandle;
 pub(super) const MAX: usize = 8; // We let each process open up to MAX files
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(super) enum Error {
     NotAUserProcess,
     NotEnoughSlots(Kind),
@@ -19,6 +20,7 @@ pub(super) enum Error {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(super) enum Kind {
     Keyboard,
     Console,

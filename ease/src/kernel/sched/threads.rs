@@ -7,11 +7,12 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::Qos;
-use crate::kernel::sched::process::PROCS_MAX;
+use crate::kernel::sched::process;
 use crate::kernel::sched::stride::PRIORITY_MIN;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_stack_watermark;
 use crate::kernel::timer;
+use crate::sched::userloader;
 
 use super::deadline::Deadline;
 
@@ -53,11 +54,9 @@ pub(crate) enum State {
     Sleeping(Deadline),
 }
 
-// user_entry is read from assembly
-#[allow(dead_code)]
 pub(super) struct UserContext {
-    pub(super) user_stack: MemRegion,
-    pub(super) user_entry: extern "C" fn(),
+    pub(super) stack: MemRegion,
+    pub(super) entry: userloader::UserEntry,
     pub(super) process_idx: u8,
 }
 
@@ -364,7 +363,7 @@ impl Threads {
     /// # Panics #
     /// Panics if `process_idx >= PROCS_MAX`
     pub(super) fn any_resource_holders(&self, process_idx: u8) -> bool {
-        assert!((process_idx as usize) < PROCS_MAX);
+        assert!((process_idx as usize) < process::MAX);
         self.0.iter().any(|tcb| {
             tcb.as_ref().is_some_and(|t| {
                 t.user

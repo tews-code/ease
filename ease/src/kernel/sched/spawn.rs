@@ -8,10 +8,10 @@ use crate::kernel::percpu;
 use crate::kernel::sync::IrqSpinLockGuard;
 use crate::kernel::timer;
 
-use super::process::{ProcessControlBlock, ProcessHandle};
+use super::process;
 use super::stride::{SLICE, SchedInner, Scheduler};
 use super::threads::{ThreadControlBlockSpec, ThreadHandle, UserContext};
-use super::usermemmap::UserMemMap;
+use super::userloader;
 use super::{ExitReason, Qos, SCHEDULER};
 
 impl Scheduler {
@@ -74,8 +74,8 @@ impl Scheduler {
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_user(
         &self,
-        process: &ProcessHandle,
-        user_entry: extern "C" fn(),
+        process: &process::Handle,
+        entry: userloader::UserEntry,
         priority: u8,
         kernel_stack_order: Order,
         user_stack_order: Order,
@@ -101,7 +101,7 @@ impl Scheduler {
         let user_exit = crate::user::user_exit as *const () as usize;
         let thread_handle = sched.thread_blocks.acquire(
             |kernel_stack_region| unsafe {
-                Context::init_user_stack(kernel_stack_region, user_entry, user_stack_top, user_exit)
+                Context::init_user_stack(kernel_stack_region, entry, user_stack_top, user_exit)
             },
             ThreadControlBlockSpec {
                 kernel_stack,
@@ -109,8 +109,8 @@ impl Scheduler {
                 priority,
                 affinity,
                 user: Some(UserContext {
-                    user_stack,
-                    user_entry,
+                    stack: user_stack,
+                    entry,
                     process_idx: process.idx as u8,
                 }),
             },
@@ -130,60 +130,78 @@ impl Scheduler {
         self.finish_spawn(sched, affinity);
         Some(thread_handle)
     }
-
-    // Spawn a new user process
+    /// Spawn a new user process
+    ///
+    /// The process starts with one user thread.
+    /// Note that additional threads added later will share the same `UserMemMap`.
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_process(
         &self,
         name: &'static str,
-        user_entry: extern "C" fn(),
         priority: u8,
         kernel_stack_order: Order,
         user_stack_order: Order,
+        loaded_image: userloader::LoadedImage,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Option<ProcessHandle> {
-        let mem_map = UserMemMap::for_process().ok()?;
-        let mut pcb = ProcessControlBlock::new(name, mem_map);
+    ) -> Result<process::Handle, process::SpawnError> {
+        let userloader::LoadedImage {
+            user_mem_map,
+            entry,
+        } = loaded_image;
+        let mut pcb = process::ControlBlock::new(name, user_mem_map);
         // Allocate stacks before locking
         let kernel_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
+                .ok_or(process::SpawnError::NotEnoughMemory)?;
         let user_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)
+                .ok_or(process::SpawnError::NotEnoughMemory)?;
         // Take the lock
         let mut sched = self.sched.lock();
         // Get a process slot
-        let pcb_idx = sched.process_blocks.find_process_slot()?;
+        let pcb_idx = sched
+            .process_blocks
+            .find_process_slot()
+            .ok_or(process::SpawnError::TooManyProcesses)?;
         let user_stack_top = user_stack.top();
         let user_exit = crate::user::user_exit as *const () as usize;
-        let thread_handle = sched.thread_blocks.acquire(
-            |kernel_stack_region| unsafe {
-                Context::init_user_stack(kernel_stack_region, user_entry, user_stack_top, user_exit)
-            },
-            ThreadControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: Some(UserContext {
-                    user_stack,
-                    user_entry,
-                    process_idx: pcb_idx as u8,
-                }),
-            },
-        )?;
+        let thread_handle = sched
+            .thread_blocks
+            .acquire(
+                |kernel_stack_region| unsafe {
+                    Context::init_user_stack(
+                        kernel_stack_region,
+                        loaded_image.entry,
+                        user_stack_top,
+                        user_exit,
+                    )
+                },
+                ThreadControlBlockSpec {
+                    kernel_stack,
+                    qos,
+                    priority,
+                    affinity,
+                    user: Some(UserContext {
+                        stack: user_stack,
+                        entry,
+                        process_idx: pcb_idx as u8,
+                    }),
+                },
+            )
+            .ok_or(process::SpawnError::NotEnoughThreads)?;
         self.needs_wakeup.clear(thread_handle.idx); // Make sure threads don't launch with stale wakeup
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
+        // Set up file descriptor table
         pcb.fds.new_process();
         let process_handle = sched
             .process_blocks
             .install_process_control_block(pcb_idx, pcb);
-        // Set up file descriptor table
         self.finish_spawn(sched, affinity);
-        Some(process_handle)
+        Ok(process_handle)
     }
 }
 

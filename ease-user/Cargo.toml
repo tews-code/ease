@@ -5,3 +5,15 @@ edition = "2024"
 
 [dependencies]
 ease-ulib = { path = "../ease-ulib" }
+
+[profile.dev]
+opt-level = "s"      # size-optimised; -O0 doesn't fit the 4 KB window
+lto = "fat"          # whole-program view lets core::fmt be dead-stripped
+codegen-units = 1    # required for LTO to see everything at once
+debug = true         # DWARF stays in the ELF; objcopy drops it from the .bin
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = true         # keep symbols for addr2line/backtraces; never shipped

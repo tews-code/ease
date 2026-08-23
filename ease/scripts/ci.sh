@@ -95,6 +95,16 @@ echo "=== Disk Image ==="
 ./scripts/mkdisk.sh "$FS_TYPE"
 
 echo ""
+echo "=== User Programs ==="
+# The kernel `include_bytes!`s the user program blobs from
+# ../ease-user/target/riscv32imac-unknown-none-elf/debug/*.bin, so they must
+# exist (and be fresh) before any kernel compile below. ease-user is excluded
+# from the workspace (it links against its own user-window linker script), so
+# it gets its own cargo invocation here; userblob.sh then objcopies each ELF
+# in src/bin/ to a flat binary and checks it is the fixed program size.
+(cd ../ease-user && cargo build && ./scripts/userblob.sh)
+
+echo ""
 echo "=== Clippy ==="
 # Clippy must see the same feature set as the QEMU test run, otherwise
 # cfg-gated code looks dead under the Cargo.toml default but live under

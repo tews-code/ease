@@ -13,17 +13,16 @@ mod tests;
 mod threads;
 #[cfg(feature = "trace")]
 pub mod trace;
-pub(crate) mod usermemmap;
+pub(crate) mod userloader;
+pub(crate) mod usermem;
 
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::fd;
 use crate::kernel::percpu;
-use crate::kernel::sched::process::ProcessHandle;
 use crate::kernel::sync::with_interrupts_disabled;
-
+use crate::user;
 use stride::SCHEDULER;
-
 #[expect(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
 pub(crate) use threads::{ExitReason, State, THREADS_MAX, ThreadHandle};
@@ -228,14 +227,20 @@ pub fn current_wake_overshoot() -> u64 {
 }
 
 /// Spawn a user process
-#[allow(dead_code)]
-pub fn spawn_process(name: &'static str, user_entry: extern "C" fn()) -> Option<ProcessHandle> {
+pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::SpawnError> {
+    // Look up this program in the table
+    let image = user::PROGRAMS
+        .find(name)
+        .ok_or(process::SpawnError::NotFound)?;
+    // Load the image into memory
+    let loaded_image = userloader::load_user_image(image)?;
+    // Spawn the process
     SCHEDULER.spawn_process(
         name,
-        user_entry,
         PRIORITY_DEFAULT,
         Order::KB4,
         Order::KB4,
+        loaded_image,
         Qos::High,
         None,
     )
@@ -243,10 +248,10 @@ pub fn spawn_process(name: &'static str, user_entry: extern "C" fn()) -> Option<
 
 /// Spawn a user thread
 #[allow(dead_code)]
-pub fn spawn_user(process: &ProcessHandle, user_entry: extern "C" fn()) -> Option<ThreadHandle> {
+pub fn spawn_user(process: &process::Handle, entry: userloader::UserEntry) -> Option<ThreadHandle> {
     SCHEDULER.spawn_user(
         process,
-        user_entry,
+        entry,
         PRIORITY_DEFAULT,
         Order::KB4,
         Order::KB4,
