@@ -2019,6 +2019,34 @@ fn user_process_exits_and_releases_slot() {
     );
 }
 
+// A user thread that simply returns (no EXIT `ecall`) must still exit
+// cleanly: `TrapFrame::init_for_user_entry` installs `user_exit` as `ra`,
+// so the `ret` lands in the shim that issues the EXIT syscall. Both the
+// process's first thread and a later `spawn_user` thread get that `ra`
+// through the same function, so a released slot proves the contract.
+#[test_case]
+fn user_thread_plain_return_exits_via_ra_shim() {
+    let handle = crate::kernel::sched::spawn_process("user_return_test")
+        .expect("process spawn should succeed");
+    let mut released = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(
+            &handle,
+            UserEntry::from_fn(crate::user::user_return_test),
+        )
+        .is_none()
+        {
+            released = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        released,
+        "process slot was never released after its plain-returning threads exited"
+    );
+}
+
 // A recycled slot gets a fresh pid, and the old handle is refused even
 // if its slot has been reoccupied (ABA protection).
 #[test_case]

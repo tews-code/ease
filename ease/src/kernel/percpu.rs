@@ -4,12 +4,9 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::hart_id;
-#[cfg(all(test, feature = "test-user"))]
-use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::THREADS_MAX;
 
 #[repr(C)]
-#[allow(dead_code)]
 struct PerCpu {
     online: UnsafeCell<bool>,
     idle_thread_idx: UnsafeCell<u8>,
@@ -17,11 +14,8 @@ struct PerCpu {
     current_stack_base: UnsafeCell<*mut u8>,
     switching_from_thread_idx: UnsafeCell<Option<u8>>,
     needs_reschedule: AtomicBool,
-    preempt_mstatus: UnsafeCell<usize>,
-    preempt_mepc: UnsafeCell<usize>,
-    kernel_resume_sp: UnsafeCell<usize>,
-    #[cfg(all(test, feature = "test-user"))]
-    user_exit_reason: UnsafeCell<ExitReason>, // Stores the exit reason for synchronous user thread testing
+    preempt_mstatus: UnsafeCell<usize>, // Deferred work resumes with this mstatus
+    preempt_mepc: UnsafeCell<usize>,    // Deferred work resumes with this mepc
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -38,9 +32,6 @@ impl PerCpu {
             needs_reschedule: AtomicBool::new(false),
             preempt_mstatus: UnsafeCell::new(0),
             preempt_mepc: UnsafeCell::new(0),
-            kernel_resume_sp: UnsafeCell::new(0),
-            #[cfg(all(test, feature = "test-user"))]
-            user_exit_reason: UnsafeCell::new(ExitReason::Exit),
         }
     }
 }
@@ -227,43 +218,4 @@ pub fn preempt_mstatus() -> usize {
 pub fn set_preempt_mstatus(mstatus: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_cpu().preempt_mstatus.get() = mstatus }
-}
-
-/// Get the stack pointer to resume the kernel from user space
-pub fn kernel_resume_sp() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().kernel_resume_sp.get() }
-}
-
-/// Set the stack pointer to resume the kernel from user space
-pub fn set_kernel_resume_sp(sp: usize) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().kernel_resume_sp.get() = sp }
-}
-
-/// Take the kernel resume stack pointer
-pub fn take_kernel_resume_sp() -> usize {
-    let hart = this_cpu();
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    let kernel_resume_sp: usize;
-    unsafe {
-        kernel_resume_sp = *hart.kernel_resume_sp.get();
-        *hart.kernel_resume_sp.get() = 0;
-    }
-    kernel_resume_sp
-}
-
-/// Get the stack pointer to resume the kernel from user space
-#[allow(dead_code)]
-#[cfg(all(test, feature = "test-user"))]
-pub fn user_exit_reason() -> ExitReason {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().user_exit_reason.get() }
-}
-
-/// Set the stack pointer to resume the kernel from user space
-#[cfg(all(test, feature = "test-user"))]
-pub fn set_user_exit_reason(reason: ExitReason) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().user_exit_reason.get() = reason }
 }

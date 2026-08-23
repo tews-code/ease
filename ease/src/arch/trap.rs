@@ -4,7 +4,8 @@
 
 use core::ptr::NonNull;
 
-use crate::sched::userloader;
+use crate::arch::{csr::mstatus, usermode};
+use crate::sched::{ExitReason, userloader};
 
 #[repr(C, align(16))]
 #[derive(Default)]
@@ -53,7 +54,7 @@ impl TrapFrame {
     pub(crate) fn is_from_user(&self) -> bool {
         (self.mstatus & crate::arch::csr::mstatus::MPP) == 0
     }
-
+    /// Initialise a frame for the user entry trampoline
     pub(crate) fn init_for_user_entry(
         entry: userloader::UserEntry,
         user_stack_top: NonNull<u8>,
@@ -66,6 +67,13 @@ impl TrapFrame {
             user_sp: user_stack_top.addr().into(),
             ..Default::default()
         }
+    }
+    /// Set up the frame for the user exit trampoline
+    pub(crate) fn set_up_for_user_exit(&mut self, reason: ExitReason) {
+        self.a0 = reason as usize;
+        self.mepc = usermode::user_thread_exit as *const () as usize;
+        self.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+        self.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
     }
 }
 
