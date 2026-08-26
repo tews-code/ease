@@ -1,11 +1,102 @@
 //! Entry for EASE traps
 //!
-//! Saves context and calls handler, returns with `mret`.
+//! EASE uses an IRQ stack per HART to use the hot path SRAM (SRAM8 for HART0, SRAM9 for HART1).
+//! As a consequence, the IRQ stack is only used for the initial trap. Unless there is an immediate
+//! return, the trap handler needs to use a trampoline to move off the IRQ stack and back onto the
+//! interrupted thread's stack (while it is suspended) in order to proceed outside of the trap
+//! handler itself.
+//! A preempt trampoline (per-HART) is available to save caller-saved registers to forge a Rust function
+//! call, allowing for further function calls, e.g. taking the scheduler lock and rescheduling.
 
+/*
+                    KERNEL THREAD PREEMPT TRAP PATH
+
+                          Kernel Thread
+                              M-Mode
+                        (Interrupts enabled)
+
+       Kernel Stack             o
+     (for this thread)          |
+        +--top--+               |
+        |-------|               |                               Interrupt trap automatically sets:
+  sp -> |-------|               |                                 - mepc <- interrupted instruction (which has not yet run)
+        |-------|               |     / --------------            - pc <- mtvec (set to per-HART trap vector at boot)
+        |-------|               |    /                            - mcause <- high bit = 1 (interrupt), low bits = 7 (timer)
+        |-------|               |   /      Timer                  - mstatus.MPIE <- mstatus.MIE (current interrupt status = enabled)
+        |-------|         pc -> | -/       Interrupt              - mstatus.MIE <- 0 (interrupts disabled)
+        |-------|               | <-\      runs                   - mstatus.MPP <- 11 (came from M-mode)
+        +-base--+               |    \     here
+                                |     \
+                                |      \--------------
+                                |
+                                |
+                                |
+                                v
+
+
+                        Timer Interrupt                     All traps land on the IRQ stack, but only one trap is allowed at a time.
+                              M-Mode                        We store the interrupted thread's state, then look at the trap reason.
+                     (Interrupts Disabled)                  If the trap reason means further work, we need to get off the IRQ stack.
+
+                    pc (from mtvec) ->  o  arch::trap::per_hart_trap_vector
+                                        |  - swap interrupted sp with mscratch - to switch to IRQ stack while remembering original sp
+               IRQ Stack                |  - Store the trap frame inc interrupted thread's mepc and mstatus
+             (for this HART)            |
+        +-> +--top--+ <- Set in         +-> o  kernel::trap::trap_handler_impl
+        |   |mstatus|   mscratch            |  - Examine mcause for trap reason
+     stack  |--mepc-|   at boot             |
+     frame  |--tp---|                       +-> o  sched::mark_for_preempt
+        |   |--gp---|                           +-> o  timer::set_next_deadline(timer::elapsed() + SLICE)
+  sp -> +-> |--ra --|                           +-> o  percpu::set_needs_reschedule();
+            |-------|                       o <-o
+            |-------|                       |  - If needs reschedule (which we just set!) then proceed down this path. Otherwise mret back to the original thread directly.
+            |-------|                       |  - Stash mepc and mstatus in percpu  - these are the original thread's details
+            +-base--+                       +-> o  arch::trap::set_up_for_divert_to_kernel
+                                                |  - store trampoline address in frame's mepc
+                                                |  - set frame's mstatus to previous M-mode with interrupts disabled
+                                        o <-----o
+                                        |  - Restore trap frame (with mepc altered to point to preempt trampoline, mstatus set to ret to M-mode interrupts disabled)
+                                        |  - Swap sp back with mscratch - sp now goes back to interrupted thread's stack
+                                        o  - mret
+                                                                                                                    mret automatically sets:
+                                                                                                                    - pc <- mepc
+                                                                                                                    - HART mode <- mstatus.MPP (11 - M-mode)
+                                                                                                                    - mstatus.MIE <- mstatus.MPIE (disable interrupts)
+                    Preempt Trampoline     If we need to make Rust calls, we can't be on the IRQ stack.             - mstatus.MPIE <- 1
+                        M-Mode             So we move to the interrupted thread's kernel stack and use that space.  - mstatus.MPP <- 00 (always least privileged U mode)
+                 (Interrupts Disabled)     Then we forge a Rust function call by saving the caller-saved regs.
+
+
+             pc (from mepc) ->  o  arch::trap::preempt_trampoline_h0 - Needs to forge a caller frame so that we can make a Rust call (the thread didn't ask for it)
+                                |  - store caller frame
+                                |  - fetch and store original thread's mepc and mstatus from percpu stash
+         Kernel Stack           |
+       (for this thread)        +-> o  sched::schedule
+            +--top--+               |  - takes scheduler lock
+            |-------|               |  - performs reschedule
+        +-> |mstatus|                   ...
+        |   |--mepc-|                     Scheduler may switch, or keep current thread scheduled. On switch, interrupts may be enabled.
+     caller |--a0---|                   ...
+     frame  |--t0---|               |  - scheduler re-schedules this thread
+        |   |--gp---|               +-> o  sched::post_switch_cleanup
+  sp -> +-> |--ra---|           + <-+
+            |-------|          |  - restore mstatus (first, to keep interrupts off as MIE is 0)
+            |-------|          |  - Now safely restore mepc - which is the original thread's interrupted instruction
+            |-------|          |  - restore caller frame
+            +-base--+          o  - mret back to the original thread
+
+
+
+
+
+
+*/
 use core::ptr::NonNull;
 
-use crate::arch::{csr::mstatus, usermode};
-use crate::sched::{ExitReason, userloader};
+use crate::arch::{csr::mstatus, percore_text};
+use crate::kernel::percpu;
+use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
+use crate::sched::{self, userloader};
 
 #[repr(C, align(16))]
 #[derive(Default)]
@@ -42,7 +133,7 @@ pub(crate) struct TrapFrame {
     s11: usize,
     pub(crate) mepc: usize,
     pub(crate) mstatus: usize,
-    pub(crate) user_sp: usize,
+    pub(crate) sp: usize,
     _pad: [usize; 3],
 }
 
@@ -50,7 +141,16 @@ impl TrapFrame {
     pub(crate) fn syscall(&self) -> usize {
         self.a7
     }
-
+    /// Divert mret to a kernel function given in `mepc`
+    ///
+    /// Disables interrupts and sets to run in M-mode after `mret`
+    pub(crate) fn set_up_for_divert_to_kernel(&mut self, mepc: usize) {
+        // Set up frame for trampoline
+        self.mepc = mepc;
+        self.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+        self.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
+    }
+    /// Check if a user thread had the trap
     pub(crate) fn is_from_user(&self) -> bool {
         (self.mstatus & crate::arch::csr::mstatus::MPP) == 0
     }
@@ -64,34 +164,62 @@ impl TrapFrame {
             ra: user_exit,
             mepc: entry.addr(),
             mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
-            user_sp: user_stack_top.addr().into(),
+            sp: user_stack_top.addr().into(),
             ..Default::default()
         }
-    }
-    /// Set up the frame for the user exit trampoline
-    pub(crate) fn set_up_for_user_exit(&mut self, reason: ExitReason) {
-        self.a0 = reason as usize;
-        self.mepc = usermode::user_thread_exit as *const () as usize;
-        self.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
-        self.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
     }
 }
 
 pub(crate) const NUM_SLOTS: usize = 36;
 const _: () = assert!(core::mem::size_of::<TrapFrame>() == NUM_SLOTS * 4);
-// ra is always at the top
 const _: () = assert!(core::mem::offset_of!(TrapFrame, ra) == 0);
 const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 6) * 4);
 const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 5) * 4);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, user_sp) == (NUM_SLOTS - 4) * 4);
+const _: () = assert!(core::mem::offset_of!(TrapFrame, sp) == (NUM_SLOTS - 4) * 4);
 const _: () = assert!(
     core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
     "trap frame size must be a multiple of its alignment so it lands aligned at top of a stack"
 );
 
-use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
+/// Caller-saved registers
+///
+/// Also holds `mepc` and `mstatus` for returning from Rust functions in trap handler deferred execution
+#[repr(C, align(16))]
+#[derive(Default)]
+pub(crate) struct CallerSavedFrame {
+    ra: usize,
+    gp: usize,
+    tp: usize,
+    t0: usize,
+    t1: usize,
+    t2: usize,
+    t3: usize,
+    t4: usize,
+    t5: usize,
+    t6: usize,
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    mepc: usize,
+    mstatus: usize,
+}
 
-crate::arch::percore_text::per_hart_trap_vector!(
+pub(crate) const CALLER_SAVED_SLOTS: usize = 20;
+// Compile-time checks: if a field or a `sw` in the shim moves, the build fails
+// here instead of the dispatcher silently reading the wrong register.
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, ra) == 0);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a0) == 4 * 10);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a1) == 4 * 11);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
+const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
+
+percore_text::per_hart_trap_vector!(
     ".sram8_text",
     _trap_vector_h0,
     trap_handler_h0,
@@ -99,7 +227,7 @@ crate::arch::percore_text::per_hart_trap_vector!(
     _trap_vector_h1,
     trap_handler_h1,
     NUM_SLOTS,
-    crate::arch::csr::mstatus::MPP,
+    mstatus::MPP,
     r#"
     # Swap sp with IRQ stack top in mscratch
     csrrw sp, mscratch, sp
@@ -200,7 +328,7 @@ crate::arch::percore_text::per_hart_trap_vector!(
     "#
 );
 
-crate::arch::percore_text::naked_asm_function!(
+percore_text::naked_asm_function!(
     ".sram8_text",
     preempt_trampoline_h0,
     ".sram9_text",
@@ -264,8 +392,8 @@ crate::arch::percore_text::naked_asm_function!(
     "addi sp, sp, +4 * 20",
 
     "mret",
-    preempt_mepc = sym crate::kernel::percpu::preempt_mepc,
-    preempt_mstatus = sym crate::kernel::percpu::preempt_mstatus,
-    schedule = sym crate::kernel::sched::schedule,
+    preempt_mepc = sym percpu::resume_mepc,
+    preempt_mstatus = sym percpu::resume_mstatus,
+    schedule = sym sched::schedule,
     )
 );

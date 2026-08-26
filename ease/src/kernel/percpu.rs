@@ -6,6 +6,12 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::hart_id;
 use crate::kernel::sched::THREADS_MAX;
 
+enum DeferredWork {
+    Preempt,
+    // Syscall(usize),
+    // Exit(ExitReason),
+}
+
 #[repr(C)]
 struct PerCpu {
     online: UnsafeCell<bool>,
@@ -14,8 +20,9 @@ struct PerCpu {
     current_stack_base: UnsafeCell<*mut u8>,
     switching_from_thread_idx: UnsafeCell<Option<u8>>,
     needs_reschedule: AtomicBool,
-    preempt_mstatus: UnsafeCell<usize>, // Deferred work resumes with this mstatus
-    preempt_mepc: UnsafeCell<usize>,    // Deferred work resumes with this mepc
+    resume_work: UnsafeCell<DeferredWork>, // On trap return the thread's deferred work
+    resume_mstatus: UnsafeCell<usize>,     // Deferred work resumes with this mstatus
+    resume_mepc: UnsafeCell<usize>,        // Deferred work resumes with this mepc
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -30,8 +37,9 @@ impl PerCpu {
             current_stack_base: UnsafeCell::new(core::ptr::null_mut()),
             switching_from_thread_idx: UnsafeCell::new(None),
             needs_reschedule: AtomicBool::new(false),
-            preempt_mstatus: UnsafeCell::new(0),
-            preempt_mepc: UnsafeCell::new(0),
+            resume_work: UnsafeCell::new(DeferredWork::Preempt), // On trap return the thread's deferred work
+            resume_mstatus: UnsafeCell::new(0),
+            resume_mepc: UnsafeCell::new(0),
         }
     }
 }
@@ -196,26 +204,26 @@ pub fn set_needs_reschedule() {
     this_cpu().needs_reschedule.store(true, Ordering::Release);
 }
 
-/// Get the preempt_mepc state of this thread
-pub fn preempt_mepc() -> usize {
+/// Get the resume_mepc state of this thread
+pub fn resume_mepc() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().preempt_mepc.get() }
+    unsafe { *this_cpu().resume_mepc.get() }
 }
 
-/// Set the preempt_mepc state of this thread
-pub fn set_preempt_mepc(mepc: usize) {
+/// Set the resume_mepc state of this thread
+pub fn set_resume_mepc(mepc: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().preempt_mepc.get() = mepc }
+    unsafe { *this_cpu().resume_mepc.get() = mepc }
 }
 
-/// Get the preempt_mstatus state of this thread
-pub fn preempt_mstatus() -> usize {
+/// Get the resume_mstatus state of this thread
+pub fn resume_mstatus() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().preempt_mstatus.get() }
+    unsafe { *this_cpu().resume_mstatus.get() }
 }
 
-/// Set the preempt_mstatus state of this thread
-pub fn set_preempt_mstatus(mstatus: usize) {
+/// Set the resume_mstatus state of this thread
+pub fn set_resume_mstatus(mstatus: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().preempt_mstatus.get() = mstatus }
+    unsafe { *this_cpu().resume_mstatus.get() = mstatus }
 }
