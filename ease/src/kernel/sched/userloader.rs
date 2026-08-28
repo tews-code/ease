@@ -35,6 +35,12 @@ impl UserEntry {
     pub(crate) fn from_fn(f: extern "C" fn()) -> Self {
         Self(f as usize)
     }
+    /// Build an entry from a raw address. Used by tests to address a blob
+    /// image's `_start` (the window base), which has no fn item to name.
+    #[allow(dead_code)]
+    pub(crate) const fn from_addr(addr: usize) -> Self {
+        Self(addr)
+    }
     pub(crate) const fn addr(&self) -> usize {
         self.0
     }

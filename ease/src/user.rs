@@ -14,6 +14,14 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         ))),
     },
     Program {
+        name: "slow-exit",
+        image: Image::Blob(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
+            "slow-exit.bin"
+        ))),
+    },
+    Program {
         name: "echo",
         image: Image::Flash(echo),
     },

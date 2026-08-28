@@ -2295,6 +2295,85 @@ fn fault_kill_races_a_voluntary_exit() {
     );
 }
 
+/// Ground-truth process liveness: the slot still holds a PCB with this
+/// handle's pid. Reads the scheduler tables directly (tests live inside
+/// the sched module) so polling doesn't have to spawn probe threads.
+fn process_alive(handle: &super::process::Handle) -> bool {
+    super::SCHEDULER.sched.lock().process_blocks.0[handle.idx]
+        .as_ref()
+        .is_some_and(|pcb| pcb.pid == handle.pid)
+}
+
+// A process is capped at THREADS_PER_PROC_MAX (6) threads. Fill one to the
+// cap — four spinners plus a faulter joining last — and prove a seventh
+// thread never joins. In the common interleaving the probe is refused at
+// the cap while the process is still alive, exercising spawn_user's
+// rollback branch (thread-count Err => release the just-acquired TCB); if
+// a tick lets the faulter win first, the probe is refused for a stale
+// handle instead. Both uphold the invariant, so the assert holds every run.
+// The faulter doubles as cleanup: a cap-full process of immortal spinners
+// has no other way to die, so the final poll also proves fault-kill
+// reaches every member of a full process.
+#[test_case]
+fn seventh_thread_never_joins_a_process() {
+    let handle = crate::kernel::sched::spawn_process("user_spin_forever")
+        .expect("process spawn should succeed");
+    for _ in 0..4 {
+        crate::kernel::sched::spawn_user(
+            &handle,
+            UserEntry::from_fn(crate::user::user_spin_forever),
+        )
+        .expect("spinner should join the process");
+    }
+    crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_fault_now))
+        .expect("faulter should join as the sixth, cap-reaching thread");
+    assert!(
+        crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_test))
+            .is_none(),
+        "a seventh thread joined a process at the thread cap"
+    );
+    let mut killed = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(killed, "cap-full process was never killed by its faulter");
+}
+
+// Two threads in a BLOB process: the second thread enters at the window
+// base — the only address the kernel knows for a blob image, which is
+// ulib's `_start` — so both threads run main on separate stacks and exit
+// independently. slow-exit's main busy-delays long enough for the second
+// spawn to land before the first exit. The process must tear down only
+// once BOTH threads have exited (thread-count accounting for blobs),
+// observed as the PCB slot going stale.
+#[test_case]
+fn blob_process_second_thread_at_start_then_teardown() {
+    unsafe extern "C" {
+        static __user_text_start: u8;
+    }
+    let handle = crate::kernel::sched::spawn_process("slow-exit")
+        .expect("blob process spawn should succeed");
+    let start = UserEntry::from_addr(&raw const __user_text_start as usize);
+    crate::kernel::sched::spawn_user(&handle, start)
+        .expect("second thread should join the blob process at _start");
+    let mut torn_down = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            torn_down = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        torn_down,
+        "blob process never tore down after both threads exited"
+    );
+}
+
 // The teardown thread must actually empty the fd table, not just abandon it
 // with the PCB. Every process starts with three descriptors (keyboard,
 // console, debug console), so a slot is never trivially clean: if the fault
