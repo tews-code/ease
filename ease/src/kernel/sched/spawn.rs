@@ -1,6 +1,6 @@
 //! Spawn processes and threads
 
-use crate::arch::context::{self, Context};
+use crate::arch::context;
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::percpu;
 use crate::kernel::sync::IrqSpinLockGuard;
@@ -95,18 +95,23 @@ impl Scheduler {
         // Now lock the scheduler
         let mut sched = self.sched.lock();
         // We should have a process control block already set up
-        if sched.process_blocks.0[process.idx]
+        let Some(pcb) = sched.process_blocks.0[process.idx]
             .as_ref()
-            .is_none_or(|pcb| pcb.pid != process.pid)
-        {
+            .filter(|pcb| pcb.pid == process.pid)
+        else {
             drop(sched);
             return None;
-        }
+        };
         let user_stack_top = user_stack.top();
-        let user_exit = crate::user::user_exit as *const () as usize;
+        let user_exit = pcb.entry_ra;
         let thread_handle = sched.thread_blocks.acquire(
             |kernel_stack_region| unsafe {
-                Context::init_user_stack(kernel_stack_region, entry, user_stack_top, user_exit)
+                context::Frame::init_stack_for_user_thread(
+                    kernel_stack_region,
+                    entry,
+                    user_stack_top,
+                    user_exit,
+                )
             },
             ThreadControlBlockSpec {
                 kernel_stack,
@@ -154,8 +159,9 @@ impl Scheduler {
         let userloader::LoadedImage {
             user_mem_map,
             entry,
+            entry_ra,
         } = loaded_image;
-        let mut pcb = process::ControlBlock::new(name, user_mem_map);
+        let mut pcb = process::ControlBlock::new(name, user_mem_map, entry_ra);
         // Allocate stacks before locking
         let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
@@ -171,16 +177,15 @@ impl Scheduler {
             .find_process_slot()
             .ok_or(process::SpawnError::TooManyProcesses)?;
         let user_stack_top = user_stack.top();
-        let user_exit = crate::user::user_exit as *const () as usize;
         let thread_handle = sched
             .thread_blocks
             .acquire(
                 |kernel_stack_region| unsafe {
-                    Context::init_user_stack(
+                    context::Frame::init_stack_for_user_thread(
                         kernel_stack_region,
-                        loaded_image.entry,
+                        entry,
                         user_stack_top,
-                        user_exit,
+                        entry_ra,
                     )
                 },
                 ThreadControlBlockSpec {

@@ -43,6 +43,7 @@ impl UserEntry {
 pub(crate) struct LoadedImage {
     pub(super) user_mem_map: usermem::Map,
     pub(super) entry: UserEntry,
+    pub(super) entry_ra: usize, // The value stored into the `ra` slot in the forged trap frame.
 }
 
 // Segment address / size pairs
@@ -195,5 +196,9 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
     Ok(LoadedImage {
         user_mem_map,
         entry,
+        entry_ra: match image {
+            user::Image::Flash(_) => user::user_exit as *const () as usize,
+            user::Image::Blob(_) => 0, // Any attempt to return via `ra` will fault on accessing address zero which is PMP protected
+        },
     })
 }

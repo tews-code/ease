@@ -1,11 +1,114 @@
-//! User mode
+//! U-Mode threads
+//!
+//! U-Mode threads are spawned with a forged kernel stack that allows for the scheduler
+//! to pick up the thread as if it had been a running thread suspended, and a forged trap
+//! frame to allow an mret into U-Mode, as if it had been an existing U-Mode thread that
+//! had trapped.
 
-use core::arch::naked_asm;
-
+use super::{context, umode};
+use crate::arch::trap;
 use crate::drivers::keyboard;
+use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::ExitReason;
-use crate::kernel::sched::{self, post_switch_cleanup};
+use crate::kernel::sched::{self, post_switch_cleanup, userloader::UserEntry};
+use crate::kernel::stack;
+use core::arch::naked_asm;
+use core::ptr::NonNull;
 use ease_abi::syscall;
+
+impl trap::Frame {
+    /// Forge a trap frame in the thread's kernel stack'
+    ///
+    /// The trap return will accept the forged frame
+    /// and "recover" this to the registers.
+    ///
+    /// Ahead of mret we set:
+    /// - mepc to the user process entry address
+    /// - mstatus.MPIE to 0 and mstatus.MPP to 00 (U)
+    ///
+    /// We also set the return address to `user_exit`;
+    pub(crate) fn forge_for_user_entry(
+        entry: UserEntry,
+        user_stack_top: NonNull<u8>,
+        user_exit: usize,
+    ) -> Self {
+        Self {
+            ra: user_exit,
+            mepc: entry.addr(),
+            mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
+            sp: user_stack_top.addr().into(),
+            ..Default::default()
+        }
+    }
+}
+
+impl context::Frame {
+    /// Forges a trap frame and context frame in the thread's kernel stack
+    /// Returns the stack pointer to base of the forged context frame, which is below
+    /// the forged trap frame.
+    ///
+    /// # Safety #
+    /// - stack_base must be class.size()-aligned and point to writeable memory of at least class.size() bytes.
+    /// - user stack top must be the top of a live, U-mode-accessible memory region
+    pub unsafe fn init_stack_for_user_thread(
+        kernel_stack: &mut MemRegion,
+        entry: UserEntry,
+        user_stack_top: NonNull<u8>,
+        user_exit: usize,
+    ) -> NonNull<u8> {
+        debug_assert!(
+            kernel_stack.size()
+                > core::mem::size_of::<context::Frame>() + core::mem::size_of::<trap::Frame>(),
+            "kernel stack memory region too small for context switch and trap return"
+        );
+        // Safety: kernel stack has aligned addresses and region is valid for writes
+        unsafe {
+            #[cfg(feature = "paint-stack")]
+            stack::paint(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+            stack::set_canary(kernel_stack.base_addr());
+        }
+        // First forge the trap return
+        // Safety: trap_frame_ptr is derived from stack_base and aligned
+        unsafe {
+            // Set up a trap frame so trap returns to U-mode
+            let trap_frame_ptr = kernel_stack
+                .base()
+                .as_ptr()
+                .add(kernel_stack.size() - core::mem::size_of::<trap::Frame>())
+                as *mut trap::Frame;
+            core::ptr::write(
+                trap_frame_ptr,
+                trap::Frame::forge_for_user_entry(entry, user_stack_top, user_exit),
+            );
+        }
+        // Now forge the context
+        // Safety: context_ptr is derived from stack_base, and
+        // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
+        let context_ptr = unsafe {
+            kernel_stack
+                .base()
+                .add(
+                    kernel_stack.size()
+                        - core::mem::size_of::<trap::Frame>()
+                        - core::mem::size_of::<context::Frame>(),
+                )
+                .cast()
+        };
+        unsafe {
+            context_ptr.write(context::Frame::forge_for_user_entry());
+        }
+        context_ptr.cast::<u8>()
+    }
+    /// Forge a stack frame (context) ready for the scheduler `switch_to` to restore
+    ///
+    /// For user threads we jump straight to [user_first_run]
+    pub fn forge_for_user_entry() -> Self {
+        Self {
+            ra: umode::user_first_run as *const () as usize, // switch_to's ret lands in user_first_run; the trap frame above it holds the U-mode state"
+            ..Self::default()
+        }
+    }
+}
 
 /// User threads that exit via this function are faulting or voluntary exit.
 /// Threads that are exited in `post_switch_cleanup` do not pass through this function.

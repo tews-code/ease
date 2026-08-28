@@ -114,6 +114,21 @@ pub extern "C" fn user_fault_now() {
     }
 }
 
+/// Executes an illegal instruction immediately: `unimp` is a guaranteed
+/// invalid encoding, so this traps as ILLEGAL_INSTRUCTION rather than a
+/// PMP access fault. Used by the illegal-instruction-kills-process test
+/// to prove U-mode illegal instructions fault-kill the process instead
+/// of panicking the kernel.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_illegal_now() {
+    unsafe {
+        core::arch::asm!("unimp");
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// Spins forever and never exits — only dies if the kernel kills it.
 /// Used to prove fault-kill reaches sibling threads.
 #[allow(dead_code)]

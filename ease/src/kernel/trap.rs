@@ -7,7 +7,7 @@ use crate::arch::csr::mcause::interrupt::*;
 use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::{mepc, mtval};
 use crate::arch::hart_id;
-use crate::arch::trap::TrapFrame;
+use crate::arch::trap;
 use crate::arch::umode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
@@ -30,17 +30,17 @@ unsafe extern "C" {
 // We create two versions of the trap handler to be placed in the relevant .text for HART0 and HART1
 #[unsafe(link_section = ".sram8_text")]
 #[cfg_attr(feature = "profile", profile)]
-pub(crate) extern "C" fn trap_handler_h0(frame: &mut TrapFrame) {
+pub(crate) extern "C" fn trap_handler_h0(frame: &mut trap::Frame) {
     trap_handler_impl(frame);
 }
 #[unsafe(link_section = ".sram9_text")]
 #[cfg_attr(feature = "profile", profile)]
-pub(crate) extern "C" fn trap_handler_h1(frame: &mut TrapFrame) {
+pub(crate) extern "C" fn trap_handler_h1(frame: &mut trap::Frame) {
     trap_handler_impl(frame);
 }
 
 #[inline(always)]
-fn trap_handler_impl(frame: &mut TrapFrame) {
+fn trap_handler_impl(frame: &mut trap::Frame) {
     // Check if other hart has triggered a panic
     if panic::STOP.load(Ordering::Relaxed) {
         panic::PARKED.store(true, Ordering::Release);
@@ -85,9 +85,6 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
             frame.mepc += 4;
             crate::dprint!("ecall from M");
         }
-        Trap::Exception(
-            code @ (INSTRUCTION_ACCESS_FAULT | LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT),
-        ) => handle_access_fault(frame, code),
         Trap::Exception(code) => handle_exception(frame, code),
     }
     if percpu::needs_reschedule() {
@@ -104,7 +101,7 @@ fn trap_handler_impl(frame: &mut TrapFrame) {
 #[inline(never)]
 #[cold]
 #[cfg_attr(feature = "profile", profile)]
-fn handle_ecall(frame: &mut TrapFrame) {
+fn handle_ecall(frame: &mut trap::Frame) {
     match frame.syscall() {
         syscall::EXIT => {
             frame.a0 = ExitReason::Exit as usize;
@@ -133,15 +130,69 @@ fn handle_ecall(frame: &mut TrapFrame) {
         }
     }
 }
-
+/// Handle remaining exceptions
+///
+/// User processes are exited immediately.
+/// Kernel threads panic with some detail printed.
 #[inline(never)]
 #[cold]
-fn handle_access_fault(frame: &mut TrapFrame, code: usize) {
+#[cfg_attr(feature = "profile", profile)]
+fn handle_exception(frame: &mut trap::Frame, code: usize) {
     if frame.is_from_user() {
+        match code {
+            INSTRUCTION_ACCESS_FAULT | LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => dprintln!(
+                "User process fault-kill: {} access fault {} (=mcause) at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
+                match code {
+                    INSTRUCTION_ACCESS_FAULT => "Instruction",
+                    LOAD_ACCESS_FAULT => "Load",
+                    _ => "Store",
+                },
+                code,
+                mtval::read(),
+                mepc::read(),
+                frame.ra,
+            ),
+            ILLEGAL_INSTRUCTION => dprintln!(
+                "User process fault-kill: illegal instruction at {:x} (=mepc), encoding {:x} (=mtval, 0 if not captured), return address {:x} (=ra)",
+                mepc::read(),
+                mtval::read(),
+                frame.ra,
+            ),
+            _ => dprintln!(
+                "User process fault-kill: exception {} (=mcause) at {:x} (=mepc), mtval {:x}, return address {:x} (=ra)",
+                code,
+                mepc::read(),
+                mtval::read(),
+                frame.ra,
+            ),
+        }
+        // User threads are immediately exited with ExitReason::Fault
         frame.a0 = ExitReason::Fault as usize;
         frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
     } else {
-        handle_exception(frame, code);
+        match code {
+            ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
+            LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => panic!(
+                "{} access fault {} (=mcause) attempted at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
+                match code {
+                    LOAD_ACCESS_FAULT => "Load",
+                    STORE_ACCESS_FAULT => "Store",
+                    _ => {
+                        ""
+                    }
+                },
+                code,
+                mtval::read(),
+                mepc::read(),
+                frame.ra,
+            ),
+            _ => panic!(
+                "Unknown exception code {:x} mepc {:x} mtval {:x}",
+                code,
+                mepc::read(),
+                mtval::read()
+            ),
+        }
     }
 }
 
@@ -191,33 +242,4 @@ fn handle_external_irq() {
 #[cfg_attr(feature = "profile", profile)]
 fn handle_unknown_interrupt(code: usize) {
     panic!("Unknown interrupt code {:x} mepc {:x}", code, mepc::read());
-}
-
-#[inline(never)]
-#[cold]
-#[cfg_attr(feature = "profile", profile)]
-fn handle_exception(frame: &TrapFrame, code: usize) {
-    match code {
-        ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
-        LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => panic!(
-            "{} access fault {} (=mcause) attempted at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
-            match code {
-                LOAD_ACCESS_FAULT => "Load",
-                STORE_ACCESS_FAULT => "Store",
-                _ => {
-                    ""
-                }
-            },
-            code,
-            mtval::read(),
-            mepc::read(),
-            frame.ra,
-        ),
-        _ => panic!(
-            "Unknown exception code {:x} mepc {:x} mtval {:x}",
-            code,
-            mepc::read(),
-            mtval::read()
-        ),
-    }
 }

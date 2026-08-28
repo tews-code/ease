@@ -91,53 +91,52 @@
 
 
 */
-use core::ptr::NonNull;
 
 use crate::arch::{csr, per_hart};
 use crate::kernel::percpu;
 use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
-use crate::sched::{self, userloader};
+use crate::sched;
 
 #[repr(C, align(16))]
 #[derive(Default)]
-pub(crate) struct TrapFrame {
+pub(crate) struct Frame {
     pub(crate) ra: usize,
-    gp: usize,
-    tp: usize,
-    t0: usize,
-    t1: usize,
-    t2: usize,
-    t3: usize,
-    t4: usize,
-    t5: usize,
-    t6: usize,
+    pub(crate) gp: usize,
+    pub(crate) tp: usize,
+    pub(crate) t0: usize,
+    pub(crate) t1: usize,
+    pub(crate) t2: usize,
+    pub(crate) t3: usize,
+    pub(crate) t4: usize,
+    pub(crate) t5: usize,
+    pub(crate) t6: usize,
     pub(crate) a0: usize,
     pub(crate) a1: usize,
     pub(crate) a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
-    a7: usize,
-    s0: usize,
-    s1: usize,
-    s2: usize,
-    s3: usize,
-    s4: usize,
-    s5: usize,
-    s6: usize,
-    s7: usize,
-    s8: usize,
-    s9: usize,
-    s10: usize,
-    s11: usize,
+    pub(crate) a3: usize,
+    pub(crate) a4: usize,
+    pub(crate) a5: usize,
+    pub(crate) a6: usize,
+    pub(crate) a7: usize,
+    pub(crate) s0: usize,
+    pub(crate) s1: usize,
+    pub(crate) s2: usize,
+    pub(crate) s3: usize,
+    pub(crate) s4: usize,
+    pub(crate) s5: usize,
+    pub(crate) s6: usize,
+    pub(crate) s7: usize,
+    pub(crate) s8: usize,
+    pub(crate) s9: usize,
+    pub(crate) s10: usize,
+    pub(crate) s11: usize,
     pub(crate) mepc: usize,
     pub(crate) mstatus: usize,
     pub(crate) sp: usize,
-    _pad: [usize; 3],
+    pub(crate) _pad: [usize; 3],
 }
 
-impl TrapFrame {
+impl Frame {
     pub(crate) fn syscall(&self) -> usize {
         self.a7
     }
@@ -154,30 +153,16 @@ impl TrapFrame {
     pub(crate) fn is_from_user(&self) -> bool {
         (self.mstatus & csr::mstatus::MPP) == 0
     }
-    /// Initialise a frame for the user entry trampoline
-    pub(crate) fn init_for_user_entry(
-        entry: userloader::UserEntry,
-        user_stack_top: NonNull<u8>,
-        user_exit: usize,
-    ) -> Self {
-        Self {
-            ra: user_exit,
-            mepc: entry.addr(),
-            mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
-            sp: user_stack_top.addr().into(),
-            ..Default::default()
-        }
-    }
 }
 
 pub(crate) const NUM_SLOTS: usize = 36;
-const _: () = assert!(core::mem::size_of::<TrapFrame>() == NUM_SLOTS * 4);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, ra) == 0);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, mepc) == (NUM_SLOTS - 6) * 4);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, mstatus) == (NUM_SLOTS - 5) * 4);
-const _: () = assert!(core::mem::offset_of!(TrapFrame, sp) == (NUM_SLOTS - 4) * 4);
+const _: () = assert!(core::mem::size_of::<Frame>() == NUM_SLOTS * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, ra) == 0);
+const _: () = assert!(core::mem::offset_of!(Frame, mepc) == (NUM_SLOTS - 6) * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, mstatus) == (NUM_SLOTS - 5) * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, sp) == (NUM_SLOTS - 4) * 4);
 const _: () = assert!(
-    core::mem::size_of::<TrapFrame>().is_multiple_of(core::mem::align_of::<TrapFrame>()),
+    core::mem::size_of::<Frame>().is_multiple_of(core::mem::align_of::<Frame>()),
     "trap frame size must be a multiple of its alignment so it lands aligned at top of a stack"
 );
 

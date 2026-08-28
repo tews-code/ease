@@ -47,17 +47,19 @@ pub(crate) struct ControlBlock {
     pub(super) mem_map: usermem::Map,
     pub(crate) fds: fd::Table,
     thread_count: u8,
+    pub(super) entry_ra: usize, // Inserted into the 'ra' register slot in the forged trap return
     teardown_thread: Option<usize>, // Index of the thread that performs the resource release for the entire process
 }
 
 impl ControlBlock {
-    pub(super) fn new(_name: &'static str, mem_map: usermem::Map) -> Self {
+    pub(super) fn new(_name: &'static str, mem_map: usermem::Map, entry_ra: usize) -> Self {
         Self {
             pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
             _name,
             mem_map,
             fds: fd::Table::new(),
             thread_count: 0,
+            entry_ra,
             teardown_thread: None,
         }
     }

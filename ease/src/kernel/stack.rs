@@ -47,7 +47,7 @@ const STEP: usize = core::mem::size_of::<usize>();
 /// Safety: Caller must ensure base and top addresses are aligned and region is safe for writing
 #[unsafe(naked)]
 #[cfg(feature = "paint-stack")]
-pub(crate) unsafe extern "C" fn paint_stack(base_addr: usize, top_addr: usize) {
+pub(crate) unsafe extern "C" fn paint(base_addr: usize, top_addr: usize) {
     naked_asm!(
         "li t0, {pattern}",
         "1:",

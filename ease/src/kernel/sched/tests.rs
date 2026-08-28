@@ -2129,6 +2129,35 @@ fn fault_kills_whole_process() {
     );
 }
 
+// The illegal-instruction twin of fault_kills_whole_process: `unimp` in a
+// user thread must fault-kill the process (origin-first exception routing),
+// not panic the kernel — before that routing existed, any invalid encoding
+// executed in U-mode halted the whole appliance. The spinner sibling and
+// stale-handle probe work exactly as in the PMP-fault test; the kernel
+// surviving to run the probe loop at all is half the assertion.
+#[test_case]
+fn illegal_instruction_fault_kills_whole_process() {
+    let handle = crate::kernel::sched::spawn_process("user_spin_forever")
+        .expect("process spawn should succeed");
+    crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_illegal_now))
+        .expect("illegal-instruction thread should join the process");
+
+    let mut killed = false;
+    for _ in 0..200 {
+        if crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_test))
+            .is_none()
+        {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        killed,
+        "process with spinning sibling was never killed after illegal instruction"
+    );
+}
+
 // The deterministic variant of fault_kills_whole_process: the spinner is
 // given time to be genuinely Running on the other hart before the fault
 // arrives, so eviction must take the doom+IPI path and the faulting
