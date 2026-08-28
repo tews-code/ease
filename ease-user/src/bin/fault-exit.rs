@@ -3,9 +3,10 @@
 #![no_std]
 #![no_main]
 
-use ease_ulib as lib;
+use ease_ulib as _; // linked for its lang items and entry point, not its names, hence "as _"
 
-/// Fault exit
+/// All user programs _must_ export "main"
+#[unsafe(no_mangle)]
 pub extern "C" fn main() {
     unsafe {
         core::ptr::read_volatile(4 as *const u32);  // Triggers PMP protection near address 0
@@ -13,10 +14,4 @@ pub extern "C" fn main() {
     loop {
         core::hint::spin_loop();    // Keep spinning to allow test case to detect failure
     }
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn _start() {
-    main();
-    lib::exit();
 }

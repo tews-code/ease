@@ -3,14 +3,10 @@
 #![no_std]
 #![no_main]
 
-use ease_ulib as lib;
+use ease_ulib as _; // linked for its lang items and entry point, not its names, hence "as _"
 
-/// Immediate clean exit
-pub extern "C" fn main() {
-}
-
+/// All user programs _must_ export "main"
 #[unsafe(no_mangle)]
-extern "C" fn _start() {
-    main();
-    lib::exit();
+pub extern "C" fn main() {
+    // I don't need a black box, since the extern "C" will stop the compiler from removing the function
 }

@@ -9,6 +9,7 @@ use lib::ascii;
 /// Proto shell
 ///
 /// Fills a buffer with characters from the keyboard and reprints on Enter
+#[unsafe(no_mangle)]
 pub extern "C" fn main() {
     const LINE_LEN: usize = 64;
     let mut buf = [0u8; LINE_LEN];
@@ -31,10 +32,4 @@ pub extern "C" fn main() {
             }
         }
     }
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn _start() {
-    main();
-    lib::exit();
 }
