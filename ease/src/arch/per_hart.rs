@@ -20,7 +20,7 @@ macro_rules! naked_asm_function {
 }
 
 #[rustfmt::skip]
-macro_rules! per_hart_trap_vector {
+macro_rules! trap_vector {
     ($section0:literal, $name0:ident, $handler0:path, $section1:literal, $name1:ident, $handler1:path, $NUM_SLOTS:ident, $mstatus_MPP:path, $body:literal) => {
         core::arch::global_asm!(
             concat!(
@@ -51,4 +51,4 @@ macro_rules! per_hart_trap_vector {
 }
 
 pub(crate) use naked_asm_function;
-pub(crate) use per_hart_trap_vector;
+pub(crate) use trap_vector;

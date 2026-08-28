@@ -75,7 +75,13 @@ impl Builder {
     }
 
     pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<ThreadHandle> {
-        SCHEDULER.spawn(entry, self.priority, self.stack, self.qos, self.affinity)
+        SCHEDULER.spawn_kernel_thread_with(
+            entry,
+            self.priority,
+            self.stack,
+            self.qos,
+            self.affinity,
+        )
     }
 }
 
@@ -96,7 +102,7 @@ pub fn idle_thread() -> ! {
     }
 }
 
-/// Spawn a new thread
+/// Spawn a new kernel thread with the provided closure
 #[allow(dead_code)]
 pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
     Builder::new().spawn(entry)
@@ -111,6 +117,17 @@ pub fn bootstrap(hartid: usize) {
 pub fn yield_now() {
     SCHEDULER.yield_now();
 }
+/// Get cycles of running thread
+#[allow(dead_code)]
+pub fn get_current_cycles(tcb_idx: usize) -> u64 {
+    SCHEDULER.get_current_cycles(tcb_idx)
+}
+/// Clean up switched status threads
+pub fn post_switch_cleanup() {
+    SCHEDULER.post_switch_cleanup();
+}
+
+// SLEEP
 
 /// Blocks until the timer has passed the deadline
 /// Time is measured in milliseconds
@@ -131,25 +148,13 @@ pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
     SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
 }
 
-/// Get cycles of running thread
-#[allow(dead_code)]
-pub fn get_current_cycles(tcb_idx: usize) -> u64 {
-    SCHEDULER.get_current_cycles(tcb_idx)
-}
-
 // THREAD EXIT
 
-/// Clean up switched status threads
-pub fn post_switch_cleanup() {
-    SCHEDULER.post_switch_cleanup();
-}
-
-/// Voluntarily terminate the current thread. Doesn't return.
-#[allow(dead_code)] // currently only used from test helpers
-pub fn exit(reason: ExitReason) -> ! {
+/// Voluntarily terminate the current kernel thread. Doesn't return.
+pub(crate) fn exit_kernel_thread(reason: ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
-
+/// Voluntarily terminate the current user thread. Doesn't return
 pub(crate) fn exit_user_thread(reason: ExitReason) -> ! {
     SCHEDULER.exit_user_thread(reason);
 }

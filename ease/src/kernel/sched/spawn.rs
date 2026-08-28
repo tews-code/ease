@@ -1,18 +1,16 @@
 //! Spawn processes and threads
 
-use alloc::boxed::Box;
-
-use crate::arch::context::Context;
+use crate::arch::context::{self, Context};
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::percpu;
 use crate::kernel::sync::IrqSpinLockGuard;
 use crate::kernel::timer;
 
+use super::Qos;
 use super::process;
 use super::stride::{SLICE, SchedInner, Scheduler};
 use super::threads::{ThreadControlBlockSpec, ThreadHandle, UserContext};
 use super::userloader;
-use super::{ExitReason, Qos, SCHEDULER};
 
 impl Scheduler {
     // Helper function to complete the spawn
@@ -34,10 +32,19 @@ impl Scheduler {
             percpu::set_needs_reschedule();
         }
     }
-
-    // Set up kernel thread initial thread block and stack for a new thread
+    /// Spawn a new kernel (M-mode) thread to run the closure provided in entry.
+    /// The closure is run exactly once and then exit is automatically called.
+    ///
+    /// Each spawn acquires a new thread control block with a forged context
+    /// to allow for the existing scheduler `switch_to` to switch into the spawned
+    /// thread seamlessly.
+    ///
+    /// The closure is stored on the heap by the spawner, so that it can be picked
+    /// up by the newly spawned thread and run.
+    ///
+    /// On success a new ThreadHandle is given, on failure returns None.
     #[cfg_attr(feature = "trace", ease_macros::trace)]
-    pub(super) fn spawn<F: FnOnce() + Send + 'static>(
+    pub(super) fn spawn_kernel_thread_with<F: FnOnce() + Send + 'static>(
         &self,
         entry: F,
         priority: u8,
@@ -48,14 +55,12 @@ impl Scheduler {
         // Thread stack is taken from the kernel heap
         let stack_region =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
-        // Now take the schedler lock
+        // Now take the scheduler lock
         let mut sched = self.sched.lock();
-        // Acquire a thread control block slot
+        // Acquire a valid initialised thread control block slot with sp
+        // pointing to a forged stack.
         let handle = sched.thread_blocks.acquire(
-            |region| {
-                let closure_ptr = Box::into_raw(Box::new(entry)) as *mut u8;
-                unsafe { Context::init_kernel_stack(region, run_closure_thread::<F>, closure_ptr) }
-            },
+            |region| context::forge_kernel_thread_stack(region, entry),
             ThreadControlBlockSpec {
                 kernel_stack: stack_region,
                 qos,
@@ -203,11 +208,4 @@ impl Scheduler {
         self.finish_spawn(sched, affinity);
         Ok(process_handle)
     }
-}
-
-/// Call exit at the end of a spawned closure
-extern "C" fn run_closure_thread<F: FnOnce() + Send + 'static>(entry_ptr: *mut u8) -> ! {
-    let e = unsafe { Box::from_raw(entry_ptr as *mut F) };
-    e(); // runs the closure exactly once and consumes both the closure and the Box.
-    SCHEDULER.exit(ExitReason::Exit)
 }

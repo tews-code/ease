@@ -58,7 +58,7 @@ fn exit_runs_and_recycles_slot() {
     static DONE: AtomicUsize = AtomicUsize::new(0);
     fn marker_then_exit() {
         DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
     ensure_partner_spawned();
     let id = crate::kernel::sched::Builder::new()
@@ -103,7 +103,7 @@ fn yield_makes_progress() {
             PEER_RAN.store(1, Ordering::Relaxed);
             crate::kernel::sched::yield_now();
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     // Pinned to the same hart: clears the flag, then yields until the peer is
@@ -125,7 +125,7 @@ fn yield_makes_progress() {
         }
         PEER_SAW_HANDOFF.store(handed_off, Ordering::Relaxed);
         DONE.store(1, Ordering::Release);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     crate::kernel::sched::Builder::new()
@@ -212,7 +212,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
         crate::kernel::sched::sleep_with_leeway(5, 1000);
         // Exit cleanly so the slot is recycled and we don't leave a
         // ghost thread disturbing later tests' scheduling.
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
     ensure_partner_spawned();
     if BG_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -255,7 +255,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
         // u64::MAX in both args — exercises every saturating site on the
         // path from public API to the Deadline struct.
         crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
     ensure_partner_spawned();
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -323,7 +323,7 @@ fn fair_stride_resists_wake_spammer() {
             }
             crate::kernel::sched::sleep(1);
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     fn t3_hog() {
@@ -332,7 +332,7 @@ fn fair_stride_resists_wake_spammer() {
                 T3_HOG_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     if T3_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -390,7 +390,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
     fn t4_low_neighbor() {
         // Qos::Low + long sleep gives a wide leeway window.
         crate::kernel::sched::sleep(200);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     fn t4_high_measurer() {
@@ -409,7 +409,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
         }
         MEASURER_ELAPSED.store(elapsed as usize, Ordering::Relaxed);
         MEASURER_DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     ensure_partner_spawned();
@@ -479,7 +479,7 @@ fn minimal_wake_latency_under_two_busy_harts() {
             }
             crate::kernel::sched::yield_now();
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     fn measurer() {
@@ -509,7 +509,7 @@ fn minimal_wake_latency_under_two_busy_harts() {
             }
         }
         DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     // Three unpinned busy runners: more runnable threads than harts, all
@@ -1845,7 +1845,7 @@ fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
                 HOG_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     if SPAWNED.swap(1, Ordering::Relaxed) == 0 {
@@ -1915,7 +1915,7 @@ fn forced_preempt_preserves_computation() {
         }
         RESULT.store(acc as usize, Ordering::Relaxed);
         DONE.store(1, Ordering::Relaxed);
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     fn peer() {
@@ -1926,7 +1926,7 @@ fn forced_preempt_preserves_computation() {
                 PEER_ITERS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        crate::kernel::sched::exit(ExitReason::Exit)
+        crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
 
     // Pin both contenders to hart 0 so they're FORCED to share one CPU via

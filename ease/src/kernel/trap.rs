@@ -8,7 +8,7 @@ use crate::arch::csr::mcause::{self, Trap};
 use crate::arch::csr::{mepc, mtval};
 use crate::arch::hart_id;
 use crate::arch::trap::TrapFrame;
-use crate::arch::usermode;
+use crate::arch::umode;
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::panic;
@@ -108,7 +108,7 @@ fn handle_ecall(frame: &mut TrapFrame) {
     match frame.syscall() {
         syscall::EXIT => {
             frame.a0 = ExitReason::Exit as usize;
-            frame.set_up_for_divert_to_kernel(usermode::user_thread_exit as *const () as usize);
+            frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
         }
         syscall::PUT_CHAR => {
             // Advance mepc
@@ -124,7 +124,7 @@ fn handle_ecall(frame: &mut TrapFrame) {
             frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
             frame.a1 = frame.sp;
             frame.a2 = syscall::GET_CHAR;
-            frame.set_up_for_divert_to_kernel(usermode::user_thread_block as *const () as usize);
+            frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
         }
         _ => {
             // Advance mepc
@@ -139,7 +139,7 @@ fn handle_ecall(frame: &mut TrapFrame) {
 fn handle_access_fault(frame: &mut TrapFrame, code: usize) {
     if frame.is_from_user() {
         frame.a0 = ExitReason::Fault as usize;
-        frame.set_up_for_divert_to_kernel(usermode::user_thread_exit as *const () as usize);
+        frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
     } else {
         handle_exception(frame, code);
     }

@@ -6,11 +6,11 @@ pub mod context;
 pub mod csr;
 pub mod interrupts;
 pub mod mmio;
-pub mod percore_text;
+pub mod per_hart;
 #[allow(dead_code)]
 pub mod pmp;
 pub mod trap;
-pub mod usermode;
+pub mod umode;
 
 /// Main registers
 pub mod regs {

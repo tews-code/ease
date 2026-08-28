@@ -58,10 +58,10 @@ pub extern "C" fn user_first_run() -> ! {
         "lw t0,  4 * 31(sp)",
         "csrw mstatus, t0",
         // Set up mscratch to the user sp
-        "lw t0,  4 * 32(sp)",
-        "csrw mscratch, t0",
+        // "lw t0,  4 * 32(sp)",
+        // "csrw mscratch, t0",
 
-        // Set up GP registers
+        // Load GP registers from forged trap frame in thread's kernel stack
         "lw ra,  4 *  0(sp)",
         "lw gp,  4 *  1(sp)",
         "lw tp,  4 *  2(sp)",
@@ -94,17 +94,20 @@ pub extern "C" fn user_first_run() -> ! {
         "lw s11, 4 * 29(sp)",
 
         // Set up stack pointer
-        "addi sp, sp, 4 * {num_slots}",
+        //"addi sp, sp, 4 * {num_slots}",
 
         // Swap kernel sp with mscratch (user sp)
-        "csrrw sp, mscratch, sp",
+        // "csrrw sp, mscratch, sp",
+
+        // Load sp from frame
+        "lw sp, 4 * 32(sp)",
 
         // Ensure .text is ready for execution
         "fence.i",
 
         "mret",
         post_switch_cleanup = sym post_switch_cleanup,
-        num_slots = const crate::arch::trap::NUM_SLOTS,
+        // num_slots = const crate::arch::trap::NUM_SLOTS,
     );
 }
 /// Return to user thread from M mode

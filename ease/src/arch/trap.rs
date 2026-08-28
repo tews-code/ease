@@ -9,12 +9,12 @@
 //! call, allowing for further function calls, e.g. taking the scheduler lock and rescheduling.
 
 /*
-                    KERNEL THREAD PREEMPT TRAP PATH
+                    THREAD PREEMPT TRAP PATH
 
-                          Kernel Thread
-                              M-Mode
+                              Thread
+                          M-Mode or U-Mode (target design)
                         (Interrupts enabled)
-
+        User Stack or
        Kernel Stack             o
      (for this thread)          |
         +--top--+               |
@@ -24,7 +24,7 @@
         |-------|               |    /                            - mcause <- high bit = 1 (interrupt), low bits = 7 (timer)
         |-------|               |   /      Timer                  - mstatus.MPIE <- mstatus.MIE (current interrupt status = enabled)
         |-------|         pc -> | -/       Interrupt              - mstatus.MIE <- 0 (interrupts disabled)
-        |-------|               | <-\      runs                   - mstatus.MPP <- 11 (came from M-mode)
+        |-------|               |   \      runs                   - mstatus.MPP <- 11 (came from M-mode) or 00 (came from U-mode)
         +-base--+               |    \     here
                                 |     \
                                 |      \--------------
@@ -93,7 +93,7 @@
 */
 use core::ptr::NonNull;
 
-use crate::arch::{csr::mstatus, percore_text};
+use crate::arch::{csr, per_hart};
 use crate::kernel::percpu;
 use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
 use crate::sched::{self, userloader};
@@ -147,12 +147,12 @@ impl TrapFrame {
     pub(crate) fn set_up_for_divert_to_kernel(&mut self, mepc: usize) {
         // Set up frame for trampoline
         self.mepc = mepc;
-        self.mstatus &= !mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
-        self.mstatus |= mstatus::MPP; // Run the trampoline in M-mode
+        self.mstatus &= !csr::mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
+        self.mstatus |= csr::mstatus::MPP; // Run the trampoline in M-mode
     }
     /// Check if a user thread had the trap
     pub(crate) fn is_from_user(&self) -> bool {
-        (self.mstatus & crate::arch::csr::mstatus::MPP) == 0
+        (self.mstatus & csr::mstatus::MPP) == 0
     }
     /// Initialise a frame for the user entry trampoline
     pub(crate) fn init_for_user_entry(
@@ -219,7 +219,7 @@ const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
 const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
 const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
 
-percore_text::per_hart_trap_vector!(
+per_hart::trap_vector!(
     ".sram8_text",
     _trap_vector_h0,
     trap_handler_h0,
@@ -227,7 +227,7 @@ percore_text::per_hart_trap_vector!(
     _trap_vector_h1,
     trap_handler_h1,
     NUM_SLOTS,
-    mstatus::MPP,
+    csr::mstatus::MPP,
     r#"
     # Swap sp with IRQ stack top in mscratch
     csrrw sp, mscratch, sp
@@ -328,7 +328,7 @@ percore_text::per_hart_trap_vector!(
     "#
 );
 
-percore_text::naked_asm_function!(
+per_hart::naked_asm_function!(
     ".sram8_text",
     preempt_trampoline_h0,
     ".sram9_text",
