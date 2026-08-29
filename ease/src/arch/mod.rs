@@ -23,8 +23,13 @@ pub mod regs {
         sp
     }
 }
-
 /// Get HART id that this thread is running on
 pub(crate) fn hart_id() -> usize {
     crate::arch::csr::mhartid::read()
+}
+/// Instruction fence - all HARTs need this after writing instructions to memory
+pub(crate) fn fence_i() {
+    unsafe {
+        core::arch::asm!("fence.i");
+    }
 }

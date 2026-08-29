@@ -93,7 +93,6 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
 
     /// Create a new bitmap from backing storage words
     #[inline]
-    #[expect(dead_code)]
     pub const fn from_words(words: [u32; WORDS]) -> Self {
         Self { bits: words }
     }
@@ -101,8 +100,11 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
 
 // ATOMIC BITMAP
 
-// Bitmap storage based on u32 words
-// If atomic safety is not required use `bitmap` instead
+/// Bitmap storage based on u32 words
+/// If atomic safety is not required use `bitmap` instead
+///
+/// The number of words needed to cover the requested BITS can be
+/// found using [bitmap_words_for]
 pub struct AtomicBitmap<const BITS: usize, const WORDS: usize> {
     bits: [AtomicU32; WORDS],
 }
@@ -193,7 +195,6 @@ impl<const BITS: usize, const WORDS: usize> AtomicBitmap<BITS, WORDS> {
 
     /// Drain the bit array, returns a plain bitmap
     #[inline]
-    #[expect(dead_code)]
     pub fn drain(&self) -> Bitmap<BITS, WORDS> {
         let mut words = [0u32; WORDS];
         self.bits

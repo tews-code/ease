@@ -7,6 +7,7 @@ use crate::arch::{csr, hart_id};
 use crate::kernel::alloc::Order;
 use crate::kernel::collection::{AtomicBitmap, bitmap_words_for};
 use crate::kernel::fd;
+use crate::kernel::ipi;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::deadline::Deadline;
@@ -130,7 +131,7 @@ impl SchedInner {
     )> {
         // Find current index
         let curr_idx = percpu::current_thread_idx();
-        let this_hart = crate::arch::hart_id() as u8;
+        let this_hart = hart_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
         for (idx, slot) in self.thread_blocks.0.iter().enumerate() {
@@ -320,7 +321,7 @@ impl Scheduler {
                     && other_hart_tcb.pass >= pass
                     && affinity.is_none_or(|affinity| affinity != hart_id() as u8)
                 {
-                    crate::kernel::ipi::send(hart_id() ^ 1);
+                    ipi::send(ipi::RESCHEDULE);
                 }
             }
             if self.needs_wakeup.take(idx) {
@@ -423,7 +424,7 @@ impl Scheduler {
                     .as_ref()
                     .is_some_and(|tcb| tcb.pass < other_effective_pass)
                 {
-                    crate::kernel::ipi::send(hart_id() ^ 1);
+                    ipi::send(ipi::RESCHEDULE);
                 }
             }
         }
@@ -768,7 +769,7 @@ impl Scheduler {
             if let Some(h) = affinity
                 && h as usize != crate::arch::hart_id()
             {
-                crate::kernel::ipi::send(h as usize);
+                ipi::send(ipi::RESCHEDULE);
             } else {
                 // In order to avoid waiting a time slice, set the preempt flag
                 percpu::set_needs_reschedule();

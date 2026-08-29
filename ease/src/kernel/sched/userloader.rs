@@ -3,7 +3,12 @@
 //! Handles binary blobs and functions loaded from flash
 //! Only one user program can be loaded at a time.
 
+use core::sync::atomic::{AtomicBool, Ordering};
+
+use crate::arch;
 use crate::kernel::sched::usermem;
+use crate::kernel::sync::Mutex;
+use crate::kernel::{ipi, panic, percpu};
 use crate::user;
 
 // All programs are currently forced to have the same layout by linker script
@@ -19,6 +24,13 @@ unsafe extern "C" {
     static mut __user_bss_start: u8;
     static __user_bss_end: u8;
 }
+
+/// RISCV requires that a "fence.i" is called after code is loaded.
+/// This atomic allows the calling HART to spin until the fence is completed by the other HART
+/// Note that the IPI mailbox only sends the signal that a fence is needed, but not when the fence is completed.
+pub(crate) static FENCE_ACK: AtomicBool = AtomicBool::new(false);
+/// We serialise loading user programs using this mutex. The mutex is purely for serialisation and does not hold any data
+static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
 /// User program loader errors
 #[derive(Debug)]
@@ -175,8 +187,12 @@ impl Plan {
 }
 /// Loads a user program binary into memory
 ///
-/// Returns the loaded image with the user memory map and entry point
+/// Returns the loaded image with the user memory map and entry point.
+/// Loading is serialised with a mutex, so that one program is loaded at a time.
+/// The required fence call is also handled across the HARTs by this loader.
 pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> {
+    // To enforce serialisation on user load we use the mutex
+    let busy_loading = LOAD_LOCK.lock();
     // Create a load plan for this program
     let load_plan = Plan::from_image(image)?;
     // Create the user memory map for this program
@@ -199,6 +215,23 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
         ),
         user::Image::Flash(f) => UserEntry::from_fn(f),
     };
+    // Fence both HARTs so the new instructions are visible
+    arch::fence_i();
+    if percpu::other_online() {
+        // Clear the FENCE_ACK AtomicBool
+        FENCE_ACK.store(false, Ordering::Relaxed); // We are not ordering memory off this (which has been handled by the mailbox)
+        // Set the IPI reason
+        ipi::send(ipi::FENCEI);
+        // Now spin until the other HART has run the fence
+        while !FENCE_ACK.load(Ordering::Relaxed) {
+            // Make sure we aren't in a PANIC situation
+            if panic::STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+    }
+    drop(busy_loading);
     Ok(LoadedImage {
         user_mem_map,
         entry,

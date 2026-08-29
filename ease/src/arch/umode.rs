@@ -35,7 +35,7 @@ impl trap::Frame {
         Self {
             ra: user_exit,
             mepc: entry.addr(),
-            mstatus: 0, //  MPP=U, MPIE=0. later step will enable interrupts in U-mode
+            mstatus: 0, //  MPP=U, Note that MPIE is set to zero but interrupts are always enabled in u-mode
             sp: user_stack_top.addr().into(),
             ..Default::default()
         }
@@ -43,63 +43,7 @@ impl trap::Frame {
 }
 
 impl context::Frame {
-    /// Forges a trap frame and context frame in the thread's kernel stack
-    /// Returns the stack pointer to base of the forged context frame, which is below
-    /// the forged trap frame.
-    ///
-    /// # Safety #
-    /// - stack_base must be class.size()-aligned and point to writeable memory of at least class.size() bytes.
-    /// - user stack top must be the top of a live, U-mode-accessible memory region
-    pub unsafe fn init_stack_for_user_thread(
-        kernel_stack: &mut MemRegion,
-        entry: UserEntry,
-        user_stack_top: NonNull<u8>,
-        user_exit: usize,
-    ) -> NonNull<u8> {
-        debug_assert!(
-            kernel_stack.size()
-                > core::mem::size_of::<context::Frame>() + core::mem::size_of::<trap::Frame>(),
-            "kernel stack memory region too small for context switch and trap return"
-        );
-        // Safety: kernel stack has aligned addresses and region is valid for writes
-        unsafe {
-            #[cfg(feature = "paint-stack")]
-            stack::paint(kernel_stack.base_addr(), kernel_stack.top().addr().into());
-            stack::set_canary(kernel_stack.base_addr());
-        }
-        // First forge the trap return
-        // Safety: trap_frame_ptr is derived from stack_base and aligned
-        unsafe {
-            // Set up a trap frame so trap returns to U-mode
-            let trap_frame_ptr = kernel_stack
-                .base()
-                .as_ptr()
-                .add(kernel_stack.size() - core::mem::size_of::<trap::Frame>())
-                as *mut trap::Frame;
-            core::ptr::write(
-                trap_frame_ptr,
-                trap::Frame::forge_for_user_entry(entry, user_stack_top, user_exit),
-            );
-        }
-        // Now forge the context
-        // Safety: context_ptr is derived from stack_base, and
-        // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
-        let context_ptr = unsafe {
-            kernel_stack
-                .base()
-                .add(
-                    kernel_stack.size()
-                        - core::mem::size_of::<trap::Frame>()
-                        - core::mem::size_of::<context::Frame>(),
-                )
-                .cast()
-        };
-        unsafe {
-            context_ptr.write(context::Frame::forge_for_user_entry());
-        }
-        context_ptr.cast::<u8>()
-    }
-    /// Forge a stack frame (context) ready for the scheduler `switch_to` to restore
+    /// Forge a context frame ready for the scheduler `switch_to` to restore
     ///
     /// For user threads we jump straight to [user_first_run]
     pub fn forge_for_user_entry() -> Self {
@@ -109,7 +53,62 @@ impl context::Frame {
         }
     }
 }
-
+/// Forges a trap frame and context frame in the thread's kernel stack
+/// Returns the stack pointer to base of the forged context frame, which is below
+/// the forged trap frame.
+///
+/// # Safety #
+/// - stack_base must be class.size()-aligned and point to writeable memory of at least class.size() bytes.
+/// - user stack top must be the top of a live, U-mode-accessible memory region
+pub unsafe fn init_stack_for_user_thread(
+    kernel_stack: &mut MemRegion,
+    entry: UserEntry,
+    user_stack_top: NonNull<u8>,
+    user_exit: usize,
+) -> NonNull<u8> {
+    debug_assert!(
+        kernel_stack.size()
+            > core::mem::size_of::<context::Frame>() + core::mem::size_of::<trap::Frame>(),
+        "kernel stack memory region too small for context switch and trap return"
+    );
+    // Safety: kernel stack has aligned addresses and region is valid for writes
+    unsafe {
+        #[cfg(feature = "paint-stack")]
+        stack::paint(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+        stack::set_canary(kernel_stack.base_addr());
+    }
+    // First forge the trap return
+    // Safety: trap_frame_ptr is derived from stack_base and aligned
+    unsafe {
+        // Set up a trap frame so trap returns to U-mode
+        let trap_frame_ptr = kernel_stack
+            .base()
+            .as_ptr()
+            .add(kernel_stack.size() - core::mem::size_of::<trap::Frame>())
+            as *mut trap::Frame;
+        core::ptr::write(
+            trap_frame_ptr,
+            trap::Frame::forge_for_user_entry(entry, user_stack_top, user_exit),
+        );
+    }
+    // Now forge the context
+    // Safety: context_ptr is derived from stack_base, and
+    // aligned because sizeof(TrapFrame) + sizeof(Context) is a multiple of align(Context).
+    let context_ptr = unsafe {
+        kernel_stack
+            .base()
+            .add(
+                kernel_stack.size()
+                    - core::mem::size_of::<trap::Frame>()
+                    - core::mem::size_of::<context::Frame>(),
+            )
+            .cast()
+    };
+    unsafe {
+        context_ptr.write(context::Frame::forge_for_user_entry());
+    }
+    context_ptr.cast::<u8>()
+}
 /// User threads that exit via this function are faulting or voluntary exit.
 /// Threads that are exited in `post_switch_cleanup` do not pass through this function.
 /// It is possible for multiple threads in the same process running on different HARTs to
@@ -160,9 +159,6 @@ pub extern "C" fn user_first_run() -> ! {
         "csrw mepc, t0",
         "lw t0,  4 * 31(sp)",
         "csrw mstatus, t0",
-        // Set up mscratch to the user sp
-        // "lw t0,  4 * 32(sp)",
-        // "csrw mscratch, t0",
 
         // Load GP registers from forged trap frame in thread's kernel stack
         "lw ra,  4 *  0(sp)",
@@ -196,17 +192,8 @@ pub extern "C" fn user_first_run() -> ! {
         "lw s10, 4 * 28(sp)",
         "lw s11, 4 * 29(sp)",
 
-        // Set up stack pointer
-        //"addi sp, sp, 4 * {num_slots}",
-
-        // Swap kernel sp with mscratch (user sp)
-        // "csrrw sp, mscratch, sp",
-
         // Load sp from frame
         "lw sp, 4 * 32(sp)",
-
-        // Ensure .text is ready for execution
-        "fence.i",
 
         "mret",
         post_switch_cleanup = sym post_switch_cleanup,

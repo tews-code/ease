@@ -3,7 +3,7 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::hart_id;
+use crate::arch;
 use crate::kernel::sched::THREADS_MAX;
 
 enum DeferredWork {
@@ -49,53 +49,57 @@ static PERCPU_HART0: PerCpu = PerCpu::new();
 #[unsafe(link_section = ".sram9_percpu")]
 static PERCPU_HART1: PerCpu = PerCpu::new();
 
-fn this_cpu() -> &'static PerCpu {
-    match hart_id() {
+/// Get the PerCpu struct for the HART of the function
+fn this_hart() -> &'static PerCpu {
+    match arch::hart_id() {
         0 => &PERCPU_HART0,
         1 => &PERCPU_HART1,
         _ => unreachable!("only have two HARTs"),
     }
 }
-
-// Tracing thread behaviour requires reading cross-Hart PerCpu details
-fn that_cpu() -> &'static PerCpu {
-    match hart_id() {
-        1 => &PERCPU_HART0,
+/// Get the PerCpu struct for the other HART
+fn that_hart() -> &'static PerCpu {
+    match arch::hart_id() {
         0 => &PERCPU_HART1,
+        1 => &PERCPU_HART0,
         _ => unreachable!("only have two HARTs"),
     }
+}
+/// Get the other hart id
+pub(super) fn that_hart_id() -> usize {
+    arch::hart_id() ^ 1
 }
 
 /// Get this hart's online status
 #[allow(dead_code)]
 pub fn online() -> bool {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().online.get() }
+    unsafe { *this_hart().online.get() }
 }
 
 // Get the other hart's online status
 pub fn other_online() -> bool {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_cpu().online.get() }
+    unsafe { *that_hart().online.get() }
 }
 
 /// Set the online status
 pub fn set_online() {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().online.get() = true }
+    unsafe { *this_hart().online.get() = true }
 }
 
 /// Get the idle thread TCB index.
 pub fn idle_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().idle_thread_idx.get() as usize }
+    unsafe { *this_hart().idle_thread_idx.get() as usize }
 }
 
 // Tracing thread behaviour requires reading cross-Hart PerCpu details
 #[allow(dead_code)]
 pub fn other_idle_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_cpu().idle_thread_idx.get() as usize }
+    unsafe { *that_hart().idle_thread_idx.get() as usize }
 }
 
 /// Set the idle thread TCB index.
@@ -105,19 +109,19 @@ pub fn set_idle_thread_idx(thread_idx: usize) {
         "setting idle thread index outside of THREADS_MAX"
     );
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().idle_thread_idx.get() = thread_idx as u8 }
+    unsafe { *this_hart().idle_thread_idx.get() = thread_idx as u8 }
 }
 
 /// Get the current TCB index.
 pub fn current_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().current_thread_idx.get() as usize }
+    unsafe { *this_hart().current_thread_idx.get() as usize }
 }
 
 // Tracing thread behaviour requires reading cross-Hart PerCpu details
 pub fn other_current_thread_idx() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_cpu().current_thread_idx.get() as usize }
+    unsafe { *that_hart().current_thread_idx.get() as usize }
 }
 
 /// Set the current TCB index.
@@ -127,34 +131,34 @@ pub fn set_current_thread_idx(thread_idx: usize) {
         "setting current thread index outside of THREADS_MAX"
     );
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().current_thread_idx.get() = thread_idx as u8 }
+    unsafe { *this_hart().current_thread_idx.get() = thread_idx as u8 }
 }
 
 /// Get the current thread stack base
 #[allow(dead_code)]
 pub fn current_stack_base() -> *mut u8 {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().current_stack_base.get() }
+    unsafe { *this_hart().current_stack_base.get() }
 }
 
 /// Set the current thread stack base
 pub fn set_current_stack_base(stack_base: *mut u8) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().current_stack_base.get() = stack_base };
+    unsafe { *this_hart().current_stack_base.get() = stack_base };
 }
 
 /// Get the switching thread index
 #[allow(dead_code)]
 pub fn switching_from_thread_idx() -> Option<usize> {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().switching_from_thread_idx.get() }.map(|i| i as usize)
+    unsafe { *this_hart().switching_from_thread_idx.get() }.map(|i| i as usize)
 }
 
 // Tracing thread behaviour requires reading cross-Hart PerCpu details
 #[cfg(feature = "trace")]
 pub fn other_switching_from_thread_idx() -> Option<usize> {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_cpu().switching_from_thread_idx.get() }.map(|i| i as usize)
+    unsafe { *that_hart().switching_from_thread_idx.get() }.map(|i| i as usize)
 }
 
 /// Set the switching thread index
@@ -167,12 +171,12 @@ pub fn set_switching_from_thread_idx(thread_idx: Option<usize>) {
         i as u8
     });
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().switching_from_thread_idx.get() = idx };
+    unsafe { *this_hart().switching_from_thread_idx.get() = idx };
 }
 
 /// Take the switching thread index
 pub fn take_switching_from_thread_idx() -> Option<usize> {
-    let hart = this_cpu();
+    let hart = this_hart();
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     let thread_idx: Option<u8>;
     unsafe {
@@ -184,46 +188,46 @@ pub fn take_switching_from_thread_idx() -> Option<usize> {
 
 /// Check the needs_reschedule state of this thread
 pub fn needs_reschedule() -> bool {
-    this_cpu().needs_reschedule.load(Ordering::Acquire)
+    this_hart().needs_reschedule.load(Ordering::Acquire)
 }
 
 // Tracing thread behaviour requires reading cross-Hart PerCpu details
 #[cfg(feature = "trace")]
 pub fn other_needs_reschedule() -> bool {
-    that_cpu().needs_reschedule.load(Ordering::Acquire)
+    that_hart().needs_reschedule.load(Ordering::Acquire)
 }
 
 /// Check if this thread needs to be rescheduled
 /// Sets the reschedule flag to false on read
 pub fn take_needs_reschedule() -> bool {
-    this_cpu().needs_reschedule.swap(false, Ordering::Acquire)
+    this_hart().needs_reschedule.swap(false, Ordering::Acquire)
 }
 
 /// Set the reschedule request flag
 pub fn set_needs_reschedule() {
-    this_cpu().needs_reschedule.store(true, Ordering::Release);
+    this_hart().needs_reschedule.store(true, Ordering::Release);
 }
 
 /// Get the resume_mepc state of this thread
 pub fn resume_mepc() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().resume_mepc.get() }
+    unsafe { *this_hart().resume_mepc.get() }
 }
 
 /// Set the resume_mepc state of this thread
 pub fn set_resume_mepc(mepc: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().resume_mepc.get() = mepc }
+    unsafe { *this_hart().resume_mepc.get() = mepc }
 }
 
 /// Get the resume_mstatus state of this thread
 pub fn resume_mstatus() -> usize {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().resume_mstatus.get() }
+    unsafe { *this_hart().resume_mstatus.get() }
 }
 
 /// Set the resume_mstatus state of this thread
 pub fn set_resume_mstatus(mstatus: usize) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_cpu().resume_mstatus.get() = mstatus }
+    unsafe { *this_hart().resume_mstatus.get() = mstatus }
 }

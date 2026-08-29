@@ -1,7 +1,8 @@
 //! Spawn processes and threads
 
-use crate::arch::context;
+use crate::arch::{context, umode};
 use crate::kernel::alloc::{MemRegion, Order};
+use crate::kernel::ipi;
 use crate::kernel::percpu;
 use crate::kernel::sync::IrqSpinLockGuard;
 use crate::kernel::timer;
@@ -27,7 +28,7 @@ impl Scheduler {
         if let Some(h) = affinity
             && h as usize != crate::arch::hart_id()
         {
-            crate::kernel::ipi::send(h as usize);
+            ipi::send(ipi::RESCHEDULE);
         } else {
             percpu::set_needs_reschedule();
         }
@@ -53,16 +54,16 @@ impl Scheduler {
         affinity: Option<u8>,
     ) -> Option<ThreadHandle> {
         // Thread stack is taken from the kernel heap
-        let stack_region =
+        let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
         // Now take the scheduler lock
         let mut sched = self.sched.lock();
         // Acquire a valid initialised thread control block slot with sp
         // pointing to a forged stack.
         let handle = sched.thread_blocks.acquire(
-            |region| context::forge_kernel_thread_stack(region, entry),
+            |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
             ThreadControlBlockSpec {
-                kernel_stack: stack_region,
+                kernel_stack,
                 qos,
                 priority,
                 affinity,
@@ -77,7 +78,7 @@ impl Scheduler {
     // Add an additional user thread to a process
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
-    pub(super) fn spawn_user(
+    pub(super) fn spawn_user_thread(
         &self,
         process: &process::Handle,
         entry: userloader::UserEntry,
@@ -105,13 +106,8 @@ impl Scheduler {
         let user_stack_top = user_stack.top();
         let user_exit = pcb.entry_ra;
         let thread_handle = sched.thread_blocks.acquire(
-            |kernel_stack_region| unsafe {
-                context::Frame::init_stack_for_user_thread(
-                    kernel_stack_region,
-                    entry,
-                    user_stack_top,
-                    user_exit,
-                )
+            |kernel_stack| unsafe {
+                umode::init_stack_for_user_thread(kernel_stack, entry, user_stack_top, user_exit)
             },
             ThreadControlBlockSpec {
                 kernel_stack,
@@ -180,13 +176,8 @@ impl Scheduler {
         let thread_handle = sched
             .thread_blocks
             .acquire(
-                |kernel_stack_region| unsafe {
-                    context::Frame::init_stack_for_user_thread(
-                        kernel_stack_region,
-                        entry,
-                        user_stack_top,
-                        entry_ra,
-                    )
+                |kernel_stack| unsafe {
+                    umode::init_stack_for_user_thread(kernel_stack, entry, user_stack_top, entry_ra)
                 },
                 ThreadControlBlockSpec {
                     kernel_stack,

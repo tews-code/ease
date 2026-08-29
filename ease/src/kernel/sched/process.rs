@@ -9,7 +9,6 @@ use super::threads::PostSwitch;
 use super::userloader;
 use super::usermem;
 use super::{ExitReason, State, THREADS_MAX, clear_wakeup_signal, set_needs_wakeup};
-use crate::arch::hart_id;
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
@@ -255,7 +254,7 @@ impl Scheduler {
                             && hart as usize != crate::arch::hart_id()
                         {
                             // This is for the other HART
-                            ipi::send(hart as usize);
+                            ipi::send(ipi::RESCHEDULE);
                         } else {
                             // This is for us
                             percpu::set_needs_reschedule();
@@ -265,7 +264,7 @@ impl Scheduler {
                     State::Running => {
                         // If it is running, it must be on the other HART so send an IPI
                         tcb.marked_for_exit = true;
-                        ipi::send(hart_id() ^ 1);
+                        ipi::send(ipi::RESCHEDULE);
                     }
                     State::Switching(_) => {
                         tcb.state = State::Switching(PostSwitch::Dead(exit_reason))

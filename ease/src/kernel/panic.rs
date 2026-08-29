@@ -3,6 +3,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::interrupts::wait_for_interrupt;
+use crate::kernel::ipi;
 use crate::kernel::percpu;
 use crate::kernel::stack::check_canary;
 #[cfg(test)]
@@ -104,7 +105,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         crate::arch::interrupts::disable();
         // Tell other hart to stop
         STOP.store(true, Ordering::Relaxed);
-        crate::kernel::ipi::send(crate::arch::hart_id() ^ 1);
+        ipi::send(ipi::RESCHEDULE);
         // Wait until other hart has parked
         let mut counter = 0;
         while !PARKED.load(Ordering::Acquire) && counter < 1_000 {

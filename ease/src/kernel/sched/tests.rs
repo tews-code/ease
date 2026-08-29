@@ -2422,3 +2422,90 @@ fn process_slot_reused_after_fault_kill() {
     }
     assert!(drained, "replacement process never released");
 }
+
+// The load-time fence.i handshake must actually run: loading an image while
+// the other hart is online sets the FENCEI mailbox bit, and the other hart's
+// SOFTWARE trap arm fences and acks. QEMU can't surface a stale-icache bug
+// itself (TCG invalidates translated code on write), so this pins the
+// protocol instead: pre-clearing the ack proves the ack observed afterwards
+// came from THIS load's handshake, not a stale one — and fails loudly if the
+// handshake is silently skipped (e.g. the test ran before the partner hart
+// came online, making the coverage vacuous).
+#[test_case]
+fn image_load_fences_other_hart() {
+    assert!(
+        crate::kernel::percpu::other_online(),
+        "fence handshake test needs the partner hart online to mean anything"
+    );
+    super::userloader::FENCE_ACK.store(false, Ordering::Relaxed);
+    let handle =
+        crate::kernel::sched::spawn_process("user_test").expect("process spawn should succeed");
+    assert!(
+        super::userloader::FENCE_ACK.load(Ordering::Relaxed),
+        "loader returned without the other hart acking its fence.i"
+    );
+    // Let the process drain so later tests see a clean slot table.
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(drained, "fence handshake test process never released");
+}
+
+// Concurrent image loads must serialise on the loader mutex. Two spawner
+// threads pinned to opposite harts race spawn_process for the same flash
+// image; a start gate maximises the chance they contend for LOAD_LOCK.
+// This pins the liveness property that makes the single FENCE_ACK flag
+// sound: the loser parks on the mutex, and its hart must still ack the
+// holder's FENCEI IPI (acks come from the hart's trap arm, not from any
+// thread). A regression — e.g. a loader spinning for its ack with the
+// other hart unable to trap — shows up as this test timing out.
+#[test_case]
+fn concurrent_image_loads_serialise_without_deadlock() {
+    static GO: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    static COMPLETED: AtomicUsize = AtomicUsize::new(0);
+
+    fn racing_loader() {
+        while !GO.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        let handle = crate::kernel::sched::spawn_process("user_test")
+            .expect("racing process spawn should succeed");
+        for _ in 0..200 {
+            if !process_alive(&handle) {
+                COMPLETED.fetch_add(1, Ordering::Release);
+                return;
+            }
+            crate::kernel::sched::sleep(10);
+        }
+        // Spawned but never drained; don't count it and let the main
+        // thread's timeout report the failure.
+    }
+
+    crate::kernel::sched::Builder::new()
+        .with_affinity(0)
+        .spawn(racing_loader)
+        .expect("hart 0 loader thread should spawn");
+    crate::kernel::sched::Builder::new()
+        .with_affinity(1)
+        .spawn(racing_loader)
+        .expect("hart 1 loader thread should spawn");
+    GO.store(true, Ordering::Release);
+
+    let mut both_done = false;
+    for _ in 0..400 {
+        if COMPLETED.load(Ordering::Acquire) == 2 {
+            both_done = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        both_done,
+        "racing loaders never both completed: load serialisation deadlocked or a process never drained"
+    );
+}

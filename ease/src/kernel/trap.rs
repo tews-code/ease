@@ -2,17 +2,13 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::arch::csr::mcause::exception::*;
-use crate::arch::csr::mcause::interrupt::*;
-use crate::arch::csr::mcause::{self, Trap};
+use crate::arch::csr::mcause::{self, Trap, exception::*, interrupt::*};
 use crate::arch::csr::{mepc, mtval};
-use crate::arch::hart_id;
-use crate::arch::trap;
-use crate::arch::umode;
+use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::panic;
-use crate::kernel::sched::ExitReason;
+use crate::kernel::sched::{ExitReason, userloader};
 use crate::kernel::stack::check_canary;
 use crate::kernel::{ipi, percpu, sched};
 use ease_abi::syscall;
@@ -73,7 +69,16 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
             // preempt from a never-sent kick during a wake stall.
             #[cfg(feature = "trace")]
             crate::kernel::sched::trace::take_snapshot("ipi-recv");
-            sched::mark_for_preempt();
+            // Drain my IPI mailbox flags
+            let flags = ipi::drain();
+            if flags.get(ipi::FENCEI) {
+                arch::fence_i();
+                // Let the other HART know that the fence is complete
+                userloader::FENCE_ACK.store(true, Ordering::Relaxed);
+            }
+            if flags.get(ipi::RESCHEDULE) {
+                sched::mark_for_preempt();
+            }
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),

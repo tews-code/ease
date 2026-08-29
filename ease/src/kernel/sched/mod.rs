@@ -254,7 +254,7 @@ pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::Spa
 /// Spawn a user thread
 #[allow(dead_code)]
 pub fn spawn_user(process: &process::Handle, entry: userloader::UserEntry) -> Option<ThreadHandle> {
-    SCHEDULER.spawn_user(
+    SCHEDULER.spawn_user_thread(
         process,
         entry,
         PRIORITY_DEFAULT,
