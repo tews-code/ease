@@ -114,7 +114,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         }
         // Now go ahead with panic info dump
         // Check that the stack canary has been set up
-        let stack_base = percpu::current_stack_base();
+        let stack_base = percpu::current_kernel_stack_base();
         let stack_ok = if stack_base.is_null() {
             None
         } else {

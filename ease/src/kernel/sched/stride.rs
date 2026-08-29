@@ -3,7 +3,7 @@
 use core::ptr::NonNull;
 
 use super::Qos;
-use crate::arch::{csr, hart_id};
+use crate::arch::hart_id;
 use crate::kernel::alloc::Order;
 use crate::kernel::collection::{AtomicBitmap, bitmap_words_for};
 use crate::kernel::fd;
@@ -31,8 +31,6 @@ unsafe extern "C" {
     // by spawn's stack forging; calling with interrupts disabled is undefined;
     pub(crate) fn switch_to_h0(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
     pub(crate) fn switch_to_h1(prev_sp: *mut *mut u8, next_sp: *mut *mut u8);
-    static __hart0_irq_stack_top: u8;
-    static __hart1_irq_stack_top: u8;
     static __idle_stack_size: u8;
 }
 
@@ -186,9 +184,7 @@ impl SchedInner {
             )
         };
     }
-
-    // Set the PerCpu info for a running thread on this HART
-    // and set mscratch to top IRQ stack for M-mode or kernel stack for U-mode
+    /// Set the PerCpu info for a running thread on this HART
     fn activate_thread(
         &mut self,
         current_thread_idx: usize,
@@ -200,14 +196,10 @@ impl SchedInner {
             stack = &tcb.kernel_stack;
             percpu::set_current_thread_idx(current_thread_idx);
             percpu::set_switching_from_thread_idx(switching_from_thread_idx);
-            percpu::set_current_stack_base(stack.base().as_ptr());
+            percpu::set_current_kernel_stack_base(stack.base().as_ptr());
+            percpu::set_current_kernel_stack_top(stack.top().as_ptr());
 
             if let Some(user_context) = &tcb.user {
-                // User thread has kernel stack top in mscratch
-                unsafe {
-                    csr::mscratch::write(stack.top().addr().into());
-                }
-
                 // For user thread merge the thread's stack and set pmp
                 let pmp_config = self.process_blocks.0[user_context.process_idx as usize]
                     .as_ref()
@@ -215,17 +207,6 @@ impl SchedInner {
                     .mem_map
                     .to_pmp(&user_context.stack);
                 pmp_config.activate();
-            } else {
-                // Kernel thread has IRQ stack top in mscratch
-                if hart_id() == 0 {
-                    unsafe {
-                        csr::mscratch::write(&raw const __hart0_irq_stack_top as usize);
-                    }
-                } else {
-                    unsafe {
-                        csr::mscratch::write(&raw const __hart1_irq_stack_top as usize);
-                    }
-                }
             }
         }
     }

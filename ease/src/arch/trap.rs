@@ -140,10 +140,15 @@ impl Frame {
     pub(crate) fn syscall(&self) -> usize {
         self.a7
     }
-    /// Divert mret to a kernel function given in `mepc`
+    /// Overwrites frame details to divert mret to a kernel function given in `mepc`
     ///
     /// Disables interrupts and sets to run in M-mode after `mret`
+    /// The original values held in `mepc` and `mstatus` are lost
     pub(crate) fn set_up_for_divert_to_kernel(&mut self, mepc: usize) {
+        // If we are diverting from u-mode to m-mode, then we need to swap in the kernel stack top as the sp
+        if self.is_from_user() {
+            self.sp = percpu::current_kernel_stack_top() as usize
+        }
         // Set up frame for trampoline
         self.mepc = mepc;
         self.mstatus &= !csr::mstatus::MPIE; // Ensure trampoline executes with interrupts disabled
@@ -212,7 +217,6 @@ per_hart::trap_vector!(
     _trap_vector_h1,
     trap_handler_h1,
     NUM_SLOTS,
-    csr::mstatus::MPP,
     r#"
     # Swap sp with IRQ stack top in mscratch
     csrrw sp, mscratch, sp
@@ -264,14 +268,9 @@ per_hart::trap_vector!(
     lw t0,  4 * 31(sp)
     csrw mstatus, t0
 
-    # Set up user stack pointer if returning to U-mode
-    # Check for U-mode
-    li t1, {mstatus_MPP}
-    and t1, t0, t1
-    bnez t1, 2f
+    # Set up the return sp in mscratch. This frame sp has been set by the handler.
     lw t0, 4 * 32(sp)
     csrw mscratch, t0
-    2:
 
     lw ra,  4 *  0(sp)
     lw gp,  4 *  1(sp)
@@ -320,7 +319,7 @@ per_hart::naked_asm_function!(
     preempt_trampoline_h1,
 
     (
-    "addi sp, sp, -4 * 20",  // 20 x 4 = 80 to keep 16 byte aligned even though we only store caller-saved registers
+    "addi sp, sp, -4 * 24",  // 24 x 4 = 96 to keep 16 byte aligned even though we only store caller-saved registers + sp
     "sw ra,  4 *  0(sp)",
     "sw gp,  4 *  1(sp)",
     "sw tp,  4 *  2(sp)",
@@ -340,11 +339,13 @@ per_hart::naked_asm_function!(
     "sw a6,  4 * 16(sp)",
     "sw a7,  4 * 17(sp)",
 
-    // Get stored mepc and mstatus and stash
+    // Get stored mepc, mstatus and sp and stash
     "call {preempt_mepc}",
     "sw a0,  4 * 18(sp)",
     "call {preempt_mstatus}",
     "sw a0,  4 * 19(sp)",
+    "call {resume_sp}",
+     "sw a0, 4 * 20(sp)",
 
     // Call the scheduler
     "call {schedule}",
@@ -374,11 +375,12 @@ per_hart::naked_asm_function!(
     "lw a6,  4 * 16(sp)",
     "lw a7,  4 * 17(sp)",
 
-    "addi sp, sp, +4 * 20",
+    "lw sp, 4 * 20(sp)",
 
     "mret",
     preempt_mepc = sym percpu::resume_mepc,
     preempt_mstatus = sym percpu::resume_mstatus,
+    resume_sp = sym percpu::resume_sp,
     schedule = sym sched::schedule,
     )
 );

@@ -21,7 +21,7 @@ macro_rules! naked_asm_function {
 
 #[rustfmt::skip]
 macro_rules! trap_vector {
-    ($section0:literal, $name0:ident, $handler0:path, $section1:literal, $name1:ident, $handler1:path, $NUM_SLOTS:ident, $mstatus_MPP:path, $body:literal) => {
+    ($section0:literal, $name0:ident, $handler0:path, $section1:literal, $name1:ident, $handler1:path, $NUM_SLOTS:ident, $body:literal) => {
         core::arch::global_asm!(
             concat!(
                 ".section ", $section0, ", \"ax\"\n",
@@ -32,7 +32,6 @@ macro_rules! trap_vector {
             ),
             handler = sym $handler0,
             num_slots = const $NUM_SLOTS,
-            mstatus_MPP = const $mstatus_MPP,
         );
 
         core::arch::global_asm!(
@@ -45,7 +44,6 @@ macro_rules! trap_vector {
             ),
             handler = sym $handler1,
             num_slots = const $NUM_SLOTS,
-            mstatus_MPP = const $mstatus_MPP,
         );
     };
 }

@@ -2509,3 +2509,73 @@ fn concurrent_image_loads_serialise_without_deadlock() {
         "racing loaders never both completed: load serialisation deadlocked or a process never drained"
     );
 }
+
+// WHITE-BOX GUARD for the trap-stack migration's core invariant: a user
+// thread's diverted excursions run on its KERNEL stack, never on the
+// user-controlled sp. A thread blocking in GET_CHAR parks mid-excursion,
+// so its saved context pins where those frames actually live. History:
+// written red-first against the pre-migration kernel (sp 0x80000e80 in
+// the USER stack — kernel frames in user-writable memory, the trust
+// hole), held as a characterization of the hole through two inert fix
+// attempts, and flipped 2026-08-29 when the divert repoint went live
+// (sp 0x80060e90, kernel stack). If this ever fails again, the divert
+// path has regressed to trusting a user-supplied stack pointer.
+#[test_case]
+fn blocked_user_thread_frames_on_kernel_stack() {
+    let handle =
+        crate::kernel::sched::spawn_process("echo").expect("echo process spawn should succeed");
+    // Wait for its thread to park on the keyboard completion, then
+    // snapshot Copy values under the lock (no refs across the boundary).
+    let mut snapshot = None;
+    for _ in 0..200 {
+        {
+            let sched = super::SCHEDULER.sched.lock();
+            for slot in sched.thread_blocks.0.iter() {
+                if let Some(tcb) = slot
+                    && let Some(user) = &tcb.user
+                    && user.process_idx as usize == handle.idx
+                    && matches!(tcb.state, super::State::Blocked)
+                {
+                    snapshot = Some((
+                        tcb.sp.addr().get(),
+                        tcb.kernel_stack.base_addr(),
+                        tcb.kernel_stack.size(),
+                        user.stack.base_addr(),
+                        user.stack.size(),
+                    ));
+                }
+            }
+        }
+        if snapshot.is_some() {
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    let (sp, kernel_base, kernel_size, user_base, user_size) =
+        snapshot.expect("echo's thread never blocked on GET_CHAR");
+    let in_kernel_stack = sp >= kernel_base && sp < kernel_base + kernel_size;
+    let in_user_stack = sp >= user_base && sp < user_base + user_size;
+    // Demand exactly-one-place: "in kernel" alone would miss overlapping
+    // regions, and "not in user" alone would miss a garbage pointer.
+    assert!(
+        in_kernel_stack && !in_user_stack,
+        "blocked user thread's saved sp {:#x} not (solely) in its kernel stack: kernel stack {:#x}+{:#x}, user stack {:#x}+{:#x}",
+        sp,
+        kernel_base,
+        kernel_size,
+        user_base,
+        user_size
+    );
+    // Fault-kill the process so the parked thread doesn't leak.
+    crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_fault_now))
+        .expect("faulter should join the echo process");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(drained, "echo process never released after fault-kill");
+}

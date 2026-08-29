@@ -95,6 +95,7 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
     if percpu::needs_reschedule() {
         percpu::set_resume_mepc(frame.mepc);
         percpu::set_resume_mstatus(frame.mstatus);
+        percpu::set_resume_sp(frame.sp);
         frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
             preempt_trampoline_h0 as *const () as usize
         } else {
@@ -124,7 +125,7 @@ fn handle_ecall(frame: &mut trap::Frame) {
         syscall::GET_CHAR => {
             // Set up frame for user_thread_block
             frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
-            frame.a1 = frame.sp;
+            frame.a1 = frame.sp; // Must do this before divert, since divert clobbers frame.sp
             frame.a2 = syscall::GET_CHAR;
             frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
         }

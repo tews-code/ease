@@ -215,12 +215,11 @@ pub extern "C" fn resume_user(
         // Note that `error` is already in a0 and value is already in a1 as they are the first function arguments
         // Set up stack pointer
         "mv sp, a3",
-        //Ensure interrupts are enabled in user mode
-        "li t0, {mstatus_MIE}",
+        "li t0, {mstatus_MIE}", //Ensure interrupts are disabled so this asm doesn't get interrupted
         "csrc mstatus, t0",
-        "li t0, {mstatus_MPP}",
+        "li t0, {mstatus_MPP}", // Ensure mret retuns to U-mode
         "csrc mstatus, t0",
-        "li t0, {mstatus_MPIE}",
+        "li t0, {mstatus_MPIE}",// Not strictly required (as overwritten by next trap) but matches forged context
         "csrc mstatus, t0",
         // Set the return address to the user thread
         "csrw mepc, a2",
