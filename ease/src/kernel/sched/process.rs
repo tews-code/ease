@@ -245,6 +245,7 @@ impl Scheduler {
                     State::Blocked | State::BlockedUntil(_) => {
                         // Set marked for exit
                         tcb.marked_for_exit = true;
+                        self.needs_user_exit.set(idx);
                         // Now set to Ready
                         let (did_unpark, affinity) = sched.thread_blocks.make_blocked_ready(idx);
                         if !did_unpark {
@@ -264,6 +265,7 @@ impl Scheduler {
                     State::Running => {
                         // If it is running, it must be on the other HART so send an IPI
                         tcb.marked_for_exit = true;
+                        self.needs_user_exit.set(idx);
                         ipi::send(ipi::RESCHEDULE);
                     }
                     State::Switching(_) => {

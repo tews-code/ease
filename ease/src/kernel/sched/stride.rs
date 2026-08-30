@@ -200,8 +200,18 @@ unsafe impl Send for SchedInner {}
 
 pub(super) struct Scheduler {
     pub(super) sched: IrqSpinLock<SchedInner>,
-    // Outside of sched inner for lock-free access
+    // Outside of sched inner for lock-free read access
+    // Must be cleared at thread acquire
+    // Flag for each thread - if it must be woken at next reschedule
+    // Users should .take() the flag to atomically clear it
+    // Even so, users of the flag should ensure the thread state is valid before acting on the flag
     pub(super) needs_wakeup: AtomicBitmap<THREADS_MAX, { bitmap_words_for(THREADS_MAX) }>,
+    // Flag for each (user) thread - if it must be exited at next U mode trap
+    // Only set once one-way within a user thread's lifetime so lock-free reading is safe
+    // Note that the users of the flag should check that the indexed thread is indeed a user thread
+    // Currently mirrors `tcb.marked_for_exit`, which remains the authoritative copy until the
+    // switch-time kill conversions are deleted; then this bitmap becomes the sole truth.
+    pub(super) needs_user_exit: AtomicBitmap<THREADS_MAX, { bitmap_words_for(THREADS_MAX) }>,
     run_cycles: [CounterU64; THREADS_MAX],
 }
 
@@ -220,6 +230,7 @@ impl Scheduler {
                 wake_overshoot: [0; THREADS_MAX],
             }),
             needs_wakeup: AtomicBitmap::new(),
+            needs_user_exit: AtomicBitmap::new(),
             run_cycles: [const { CounterU64::new(0) }; THREADS_MAX],
         }
     }
@@ -254,15 +265,16 @@ impl Scheduler {
             )
             .expect("boot strap thread must succeed to start system");
         percpu::set_idle_thread_idx(thread_handle.idx);
-        self.needs_wakeup.clear(thread_handle.idx); // Best be certain that the idle thread isn't marked for wake ups
+        // Must clear the flags so that the new thread doesn't inherit prior thread's historic flags
+        self.needs_wakeup.clear(thread_handle.idx);
+        self.needs_user_exit.clear(thread_handle.idx);
         sched.activate_thread(thread_handle.idx, None);
     }
-
-    // Wakes any threads past their deadlines or which have a wake flag set
-    // Sets their pass to pass_baseline so they do not monopolise their Hart as their pass
-    // catches up with threads that were running
-    //
-    // Returns a count of the ready threads
+    /// Wakes any threads past their deadlines or which have a wake flag set
+    /// Sets their pass to pass_baseline so they do not monopolise their Hart as their pass
+    /// catches up with threads that were running
+    ///
+    /// Returns a count of the ready threads
     pub(super) fn wake_sleeping_threads(&self, sched: &mut IrqSpinLockGuard<SchedInner>) -> bool {
         let now = timer::elapsed();
         let other_curr_idx = percpu::other_current_thread_idx();

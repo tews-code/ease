@@ -70,7 +70,9 @@ impl Scheduler {
                 user: None,
             },
         )?;
-        self.needs_wakeup.clear(handle.idx); // Make sure threads don't launch with stale wakeup
+        // Make sure threads don't launch with stale flags
+        self.needs_wakeup.clear(handle.idx);
+        self.needs_user_exit.clear(handle.idx);
         self.finish_spawn(sched, affinity);
         Some(handle)
     }
@@ -139,7 +141,9 @@ impl Scheduler {
             drop(sched);
             return None;
         }
-        self.needs_wakeup.clear(thread_handle.idx); // Make sure threads don't launch with stale wakeup
+        // Make sure threads don't launch with stale flags
+        self.needs_wakeup.clear(thread_handle.idx);
+        self.needs_user_exit.clear(thread_handle.idx);
         self.finish_spawn(sched, affinity);
         Some(thread_handle)
     }

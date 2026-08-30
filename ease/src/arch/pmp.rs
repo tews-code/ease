@@ -140,11 +140,11 @@ impl Pmp {
         }
     }
     fn clear(&mut self) {
-        for i in 0..PMP_ADDR_COUNT {
-            self.addr[i].clear();
+        for pmp_addr in self.addr.iter_mut().take(PMP_ADDR_COUNT) {
+            pmp_addr.clear();
         }
-        for i in 0..PMP_ADDR_COUNT / 4 {
-            self.cfg[i].clear();
+        for pmp_cfg in self.cfg.iter_mut().take(PMP_ADDR_COUNT / 4) {
+            pmp_cfg.clear();
         }
     }
 
