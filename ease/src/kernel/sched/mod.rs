@@ -158,6 +158,38 @@ pub(crate) fn exit_kernel_thread(reason: ExitReason) -> ! {
 pub(crate) fn exit_user_thread(reason: ExitReason) -> ! {
     SCHEDULER.exit_user_thread(reason);
 }
+/// Lock-free check: has the current user thread been condemned by a
+/// process kill? (Reads the `needs_user_exit` bitmap.)
+///
+/// This is the query flavour of the interruptible-wait discipline: a
+/// blocking wait that HOLDS LOCKS must use this, convert a `true` into
+/// an interrupted-error, and propagate it up through normal returns —
+/// releasing everything it holds on the way — dying only once the
+/// stack has unwound to the syscall boundary.
+pub(crate) fn current_user_thread_needs_exit() -> bool {
+    SCHEDULER.needs_user_exit.get(percpu::current_thread_idx())
+}
+/// Exit the current user thread now if it has been condemned;
+/// otherwise return normally. Like `park_if_blocked`, the `if` in the
+/// name warns that this call sometimes never returns.
+///
+/// Every wakeup inside a blocking syscall's wait loop must make this
+/// check — a condemned thread that re-parks unaware stalls its
+/// process's teardown. This exit-on-the-spot flavour is legal ONLY
+/// for waits that hold nothing: `exit_user_thread` diverges, so Drop
+/// never runs and anything held (a MutexGuard, a claimed fd) would be
+/// orphaned. If your wait holds locks, use
+/// [`current_user_thread_needs_exit`] and propagate an error instead.
+///
+/// The reason is hardcoded to `Fault` because the sole producer of the
+/// condemned bit today is fault eviction. If a non-fault producer ever
+/// appears (e.g. a kill syscall), the reason belongs in the PCB —
+/// process-scoped, like the marking itself — not in this bitmap.
+pub(crate) fn exit_user_thread_if_needs_exit() {
+    if current_user_thread_needs_exit() {
+        SCHEDULER.exit_user_thread(ExitReason::Fault);
+    }
+}
 
 // PARK
 

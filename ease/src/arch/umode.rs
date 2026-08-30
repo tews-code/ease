@@ -131,7 +131,8 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     };
     sched::exit_user_thread(exit_reason);
 }
-/// Handles blocking system calls for user threads
+/// Handles blocking system calls for user threads.
+/// Checks if the user thread should be exited and performs exit call.
 ///
 /// # Panics #
 /// Panics if the system call number is unknown
@@ -142,6 +143,8 @@ pub(crate) extern "C" fn user_thread_block(
 ) -> ! {
     match syscall {
         syscall::GET_CHAR => {
+            // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
+            sched::exit_user_thread_if_needs_exit();
             loop {
                 if let Some(b) = keyboard::read_key() {
                     resume_user(0, b, return_address, user_sp);
@@ -149,6 +152,7 @@ pub(crate) extern "C" fn user_thread_block(
                     // Block using a completion on the key press
                     keyboard::KEY_PENDING.wait();
                 }
+                sched::exit_user_thread_if_needs_exit();
             }
         }
         _ => panic!("unexpected blocking syscall: {}", syscall),
