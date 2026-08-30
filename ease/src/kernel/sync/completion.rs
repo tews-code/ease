@@ -3,10 +3,7 @@
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
-use crate::kernel::percpu;
-use crate::kernel::sched::{
-    self, ThreadHandle, current_thread, park_if_blocked, set_needs_wakeup, set_self_blocked,
-};
+use crate::kernel::sched::{self, ThreadHandle, current_thread, park_if_blocked, set_self_blocked};
 use crate::kernel::sync::IrqSpinLock;
 use crate::kernel::timer;
 
@@ -32,18 +29,19 @@ impl Completion {
         }
     }
 
-    // Sets a flag on the scheduler that this thread needs to be woken
-    // and either requests a reschedule or rings doorbell on other hart to reschedule
-    // to pick up the woken thread
+    // Wakes the registered waiter via `unpark`, whose handle id check makes
+    // a stale registration a no-op: a waiter that was killed while parked
+    // here (its slot recycled or emptied) must not have its slot index
+    // woken blind. Sets `pending` first so a signal with no waiter is
+    // consumed by the next `wait`.
     #[cfg_attr(feature = "profile", profile)]
     pub fn signal(&self) {
         let mut inner = self.inner.lock();
         inner.pending = true;
-        if let Some(handle) = inner.waiter.take() {
-            drop(inner);
-            set_needs_wakeup(handle.idx);
-            // Notify the scheduler that work needs to be done
-            percpu::set_needs_reschedule();
+        let handle = inner.waiter.take();
+        drop(inner);
+        if let Some(handle) = handle {
+            sched::unpark(&handle); // Checks for staleness before waking the thread
         }
     }
 
