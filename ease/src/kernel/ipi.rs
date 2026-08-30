@@ -28,7 +28,7 @@ pub fn send(reason: usize) {
     assert!(reason < MAILBOX_SIZE, "Unknown IPI reason");
     let that_hart_id = percpu::that_hart_id();
     // If the other HART is offline these IPIs are ignored which is fine since no other threads are running
-    if percpu::other_online() {
+    if percpu::other_scheduler_online() {
         MAILBOX[that_hart_id].set(reason);
         clint::set_msip(that_hart_id);
     }

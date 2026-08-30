@@ -5,7 +5,7 @@
 //! return, the trap handler needs to use a trampoline to move off the IRQ stack and back onto the
 //! interrupted thread's stack (while it is suspended) in order to proceed outside of the trap
 //! handler itself.
-//! A preempt trampoline (per-HART) is available to save caller-saved registers to forge a Rust function
+//! A resume trampoline (per-HART) is available to save caller-saved registers to forge a Rust function
 //! call, allowing for further function calls, e.g. taking the scheduler lock and rescheduling.
 
 /*
@@ -55,7 +55,7 @@
                                                 |  - store trampoline address in frame's mepc
                                                 |  - set frame's mstatus to previous M-mode with interrupts disabled
                                         o <-----o
-                                        |  - Restore trap frame (with mepc altered to point to preempt trampoline, mstatus set to ret to M-mode interrupts disabled)
+                                        |  - Restore trap frame (with mepc altered to point to resume trampoline, mstatus set to ret to M-mode interrupts disabled)
                                         |  - Swap sp back with mscratch - sp now goes back to interrupted thread's stack
                                         o  - mret
                                                                                                                     mret automatically sets:
@@ -67,7 +67,7 @@
                  (Interrupts Disabled)     Then we forge a Rust function call by saving the caller-saved regs.
 
 
-             pc (from mepc) ->  o  arch::trap::preempt_trampoline_h0 - Needs to forge a caller frame so that we can make a Rust call (the thread didn't ask for it)
+             pc (from mepc) ->  o  arch::trap::resume_trampoline_h0 - Needs to forge a caller frame so that we can make a Rust call (the thread didn't ask for it)
                                 |  - store caller frame
                                 |  - fetch and store original thread's mepc and mstatus from percpu stash
          Kernel Stack           |
@@ -94,8 +94,7 @@
 
 use crate::arch::{csr, per_hart};
 use crate::kernel::percpu;
-use crate::kernel::trap::{trap_handler_h0, trap_handler_h1};
-use crate::sched;
+use crate::kernel::trap::{run_resume_work, trap_handler_h0, trap_handler_h1};
 
 #[repr(C, align(16))]
 #[derive(Default)]
@@ -197,9 +196,11 @@ pub(crate) struct CallerSavedFrame {
     a7: usize,
     mepc: usize,
     mstatus: usize,
+    sp: usize,
+    _pad: [usize; 3],
 }
 
-pub(crate) const CALLER_SAVED_SLOTS: usize = 20;
+pub(crate) const CALLER_SAVED_SLOTS: usize = 24; // Set to 24 even though we only need 21, as 24 * 4 = 96 which is a multiple of 16 for alignment.
 // Compile-time checks: if a field or a `sw` in the shim moves, the build fails
 // here instead of the dispatcher silently reading the wrong register.
 const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, ra) == 0);
@@ -207,6 +208,7 @@ const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a0) == 4 * 10);
 const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a1) == 4 * 11);
 const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
 const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, sp) == 4 * 20);
 const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
 
 per_hart::trap_vector!(
@@ -314,9 +316,9 @@ per_hart::trap_vector!(
 
 per_hart::naked_asm_function!(
     ".sram8_text",
-    preempt_trampoline_h0,
+    resume_trampoline_h0,
     ".sram9_text",
-    preempt_trampoline_h1,
+    resume_trampoline_h1,
 
     (
     "addi sp, sp, -4 * 24",  // 24 x 4 = 96 to keep 16 byte aligned even though we only store caller-saved registers + sp
@@ -340,15 +342,15 @@ per_hart::naked_asm_function!(
     "sw a7,  4 * 17(sp)",
 
     // Get stored mepc, mstatus and sp and stash
-    "call {preempt_mepc}",
+    "call {resume_mepc}",
     "sw a0,  4 * 18(sp)",
-    "call {preempt_mstatus}",
+    "call {resume_mstatus}",
     "sw a0,  4 * 19(sp)",
     "call {resume_sp}",
      "sw a0, 4 * 20(sp)",
 
     // Call the scheduler
-    "call {schedule}",
+    "call {run_resume_work}",
 
     // Return
     "lw a0,  4 * 19(sp)",
@@ -378,9 +380,9 @@ per_hart::naked_asm_function!(
     "lw sp, 4 * 20(sp)",
 
     "mret",
-    preempt_mepc = sym percpu::resume_mepc,
-    preempt_mstatus = sym percpu::resume_mstatus,
+    resume_mepc = sym percpu::resume_mepc,
+    resume_mstatus = sym percpu::resume_mstatus,
     resume_sp = sym percpu::resume_sp,
-    schedule = sym sched::schedule,
+    run_resume_work = sym run_resume_work,
     )
 );

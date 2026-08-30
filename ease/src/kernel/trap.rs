@@ -17,8 +17,8 @@ use ease_macros::profile;
 unsafe extern "C" {
     static __hart0_irq_stack_base: u8;
     static __hart1_irq_stack_base: u8;
-    fn preempt_trampoline_h0();
-    fn preempt_trampoline_h1();
+    fn resume_trampoline_h0();
+    fn resume_trampoline_h1();
 }
 
 // We create two versions of the trap handler to be placed in the relevant .text for HART0 and HART1
@@ -133,11 +133,31 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         percpu::set_resume_mepc(frame.mepc);
         percpu::set_resume_mstatus(frame.mstatus);
         percpu::set_resume_sp(frame.sp);
+        percpu::set_resume_work(Work::Preempt);
         frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
-            preempt_trampoline_h0 as *const () as usize
+            resume_trampoline_h0 as *const () as usize
         } else {
-            preempt_trampoline_h1 as *const () as usize
+            resume_trampoline_h1 as *const () as usize
         });
+    }
+}
+/// The kind of work that the thread should do on resume
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum Work {
+    // Preempt must remain the first variant — NOLOAD percpu zero-fill depends on it.
+    Preempt,
+    // Syscall(usize),
+    // Exit(ExitReason),
+}
+/// Examines the percpu resume work field and dispatches to resume that work
+/// This function is `extern "C"` so it can be called from asm!.
+///
+/// The caller *must* use [percpu::set_resume_work] before this is called, otherwise
+/// the stale value will be used.
+pub(crate) extern "C" fn run_resume_work() {
+    match percpu::resume_work() {
+        Work::Preempt => sched::schedule(),
     }
 }
 

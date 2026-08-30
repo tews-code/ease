@@ -90,7 +90,7 @@ impl SchedInner {
                 // other hart is online: during boot it isn't, and its (zeroed)
                 // current_thread_idx would otherwise wrongly exclude slot 0.
                 let not_stealing =
-                    !percpu::other_online() || idx != percpu::other_current_thread_idx();
+                    !percpu::other_scheduler_online() || idx != percpu::other_current_thread_idx();
                 let pri_ok = tcb.priority != PRIORITY_MIN;
                 if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                     best_pass = tcb.pass;
@@ -140,7 +140,7 @@ impl SchedInner {
                 // other hart is online: during boot it isn't, and its (zeroed)
                 // current_thread_idx would otherwise wrongly exclude slot 0.
                 let not_stealing =
-                    !percpu::other_online() || idx != percpu::other_current_thread_idx();
+                    !percpu::other_scheduler_online() || idx != percpu::other_current_thread_idx();
                 let pri_ok = tcb.priority != PRIORITY_MIN;
                 if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                     best_pass = tcb.pass;
@@ -390,7 +390,7 @@ impl Scheduler {
                     sched.snapshot_raw("ps-ready");
                 }
             }
-            if percpu::other_online() {
+            if percpu::other_scheduler_online() {
                 let other_idx = percpu::other_current_thread_idx();
                 let other = sched.thread_blocks.0[other_idx].as_ref().unwrap();
                 let now = timer::elapsed();

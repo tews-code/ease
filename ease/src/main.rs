@@ -81,7 +81,7 @@ fn kernel_init() {
     // The initialisation functions panic or succeed
     #[cfg(feature = "profile")]
     kernel::profile::init();
-    percpu::set_online();
+    percpu::set_scheduler_online();
     kernel::alloc::init_global_allocator();
     kernel::timer::init();
     drivers::plic::init();
@@ -160,7 +160,7 @@ extern "C" fn secondary_main() -> ! {
     kernel::timer::init();
     sched::bootstrap(1);
     kernel::ipi::init();
-    percpu::set_online();
+    percpu::set_scheduler_online();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
     interrupts_init_hart1();
     // Drop into idle

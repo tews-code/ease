@@ -5,27 +5,22 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch;
 use crate::kernel::sched::THREADS_MAX;
-
-enum DeferredWork {
-    Preempt,
-    // Syscall(usize),
-    // Exit(ExitReason),
-}
+use crate::kernel::trap::Work;
 
 #[repr(C)]
 struct PerCpu {
-    online: UnsafeCell<bool>,
+    scheduler_online: UnsafeCell<bool>,
     idle_thread_idx: UnsafeCell<u8>,
+    switching_from_thread_idx: UnsafeCell<Option<u8>>,
+    needs_reschedule: AtomicBool,
     current_thread_idx: UnsafeCell<u8>,
     current_kernel_stack_base: UnsafeCell<*mut u8>,
     current_kernel_stack_top: UnsafeCell<*mut u8>,
     current_user_stack_base: UnsafeCell<Option<*mut u8>>,
+    resume_work: UnsafeCell<Work>, // On trap return the thread's deferred work
     resume_sp: UnsafeCell<usize>,
-    switching_from_thread_idx: UnsafeCell<Option<u8>>,
-    needs_reschedule: AtomicBool,
-    resume_work: UnsafeCell<DeferredWork>, // On trap return the thread's deferred work
-    resume_mstatus: UnsafeCell<usize>,     // Deferred work resumes with this mstatus
-    resume_mepc: UnsafeCell<usize>,        // Deferred work resumes with this mepc
+    resume_mstatus: UnsafeCell<usize>, // Deferred work resumes with this mstatus
+    resume_mepc: UnsafeCell<usize>,    // Deferred work resumes with this mepc
 }
 
 // Safety: Each HART only accesses its own per-cpu data
@@ -34,16 +29,16 @@ unsafe impl Sync for PerCpu {}
 impl PerCpu {
     pub const fn new() -> Self {
         Self {
-            online: UnsafeCell::new(false),
+            scheduler_online: UnsafeCell::new(false),
             idle_thread_idx: UnsafeCell::new(0),
+            switching_from_thread_idx: UnsafeCell::new(None),
+            needs_reschedule: AtomicBool::new(false),
             current_thread_idx: UnsafeCell::new(0),
             current_kernel_stack_base: UnsafeCell::new(core::ptr::null_mut()),
             current_kernel_stack_top: UnsafeCell::new(core::ptr::null_mut()),
             current_user_stack_base: UnsafeCell::new(None),
+            resume_work: UnsafeCell::new(Work::Preempt), // This is option 0 in the NOLOAD percpu segment - which is what we want
             resume_sp: UnsafeCell::new(0),
-            switching_from_thread_idx: UnsafeCell::new(None),
-            needs_reschedule: AtomicBool::new(false),
-            resume_work: UnsafeCell::new(DeferredWork::Preempt), // On trap return the thread's deferred work
             resume_mstatus: UnsafeCell::new(0),
             resume_mepc: UnsafeCell::new(0),
         }
@@ -77,22 +72,22 @@ pub(super) fn that_hart_id() -> usize {
 }
 
 /// Get this hart's online status
-#[allow(dead_code)]
-pub fn online() -> bool {
+#[expect(dead_code)]
+pub fn scheduler_online() -> bool {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().online.get() }
+    unsafe { *this_hart().scheduler_online.get() }
 }
 
 // Get the other hart's online status
-pub fn other_online() -> bool {
+pub fn other_scheduler_online() -> bool {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_hart().online.get() }
+    unsafe { *that_hart().scheduler_online.get() }
 }
 
 /// Set the online status
-pub fn set_online() {
+pub fn set_scheduler_online() {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().online.get() = true }
+    unsafe { *this_hart().scheduler_online.get() = true }
 }
 
 /// Get the idle thread TCB index.
@@ -246,6 +241,18 @@ pub fn take_needs_reschedule() -> bool {
 /// Set the reschedule request flag
 pub fn set_needs_reschedule() {
     this_hart().needs_reschedule.store(true, Ordering::Release);
+}
+
+/// Get the resume_work state of this thread
+pub fn resume_work() -> Work {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().resume_work.get() }
+}
+
+/// Set the resume_work state of this thread
+pub fn set_resume_work(work: Work) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().resume_work.get() = work }
 }
 
 /// Get the resume_mepc state of this thread

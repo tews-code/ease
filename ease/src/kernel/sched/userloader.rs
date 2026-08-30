@@ -217,7 +217,7 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
     };
     // Fence both HARTs so the new instructions are visible
     arch::fence_i();
-    if percpu::other_online() {
+    if percpu::other_scheduler_online() {
         // Clear the FENCE_ACK AtomicBool
         FENCE_ACK.store(false, Ordering::Relaxed); // We are not ordering memory off this (which has been handled by the mailbox)
         // Set the IPI reason

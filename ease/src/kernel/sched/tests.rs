@@ -2434,7 +2434,7 @@ fn process_slot_reused_after_fault_kill() {
 #[test_case]
 fn image_load_fences_other_hart() {
     assert!(
-        crate::kernel::percpu::other_online(),
+        crate::kernel::percpu::other_scheduler_online(),
         "fence handshake test needs the partner hart online to mean anything"
     );
     super::userloader::FENCE_ACK.store(false, Ordering::Relaxed);
