@@ -114,24 +114,16 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         }
         // Now go ahead with panic info dump
         // Check that the stack canary has been set up
-        let stack_base = percpu::current_kernel_stack_base();
-        let stack_ok = if stack_base.is_null() {
-            None
-        } else {
-            // Safety: stack base is set in percpu from an aligned stack address either from the linker (for idle) or from buddy allocation
-            match unsafe { check_canary(stack_base.addr()) } {
-                Ok(()) => Some(true),
-                Err(_) => Some(false),
-            }
-        };
+        // Note that percpu::current_kernel_stack_base is set up immediately after boot and is safe to read
+        // Safety: stack base is set in percpu from an aligned stack address either from the linker (for idle) or from buddy allocation
+        let stack_ok = unsafe { check_canary(percpu::current_kernel_stack_base().addr()) };
 
         dprintln!("PANIC: {info}");
         dprintln!(
             "Stack canary: {}",
             match stack_ok {
-                None => "unavailable",
-                Some(true) => "intact",
-                Some(false) => "corrupted",
+                Ok(_) => "intact",
+                Err(_) => "corrupted",
             }
         );
 
@@ -144,11 +136,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         let _ = write!(console, "PANIC: {info}");
         let _ = writeln!(
             console,
-            "Stack canary in place: {}",
+            "Stack canary: {}",
             match stack_ok {
-                None => "unavailable",
-                Some(true) => "intact",
-                Some(false) => "corrupted",
+                Ok(_) => "intact",
+                Err(_) => "corrupted",
             }
         );
     }

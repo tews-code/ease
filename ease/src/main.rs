@@ -48,6 +48,11 @@ use crate::board::virtio;
 use crate::fs::VolumeType;
 use crate::kernel::sched;
 
+unsafe extern "C" {
+    static __hart0_idle_stack_base: u8;
+    static __hart1_idle_stack_base: u8;
+}
+
 pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 
 // =============================================================================
@@ -72,6 +77,7 @@ fn interrupts_init_hart1() {
 
 fn kernel_init() {
     // Initialise just the basics to keep stack use light
+    percpu::set_current_kernel_stack_base(&raw const __hart0_idle_stack_base as *mut u8);
     // The initialisation functions panic or succeed
     #[cfg(feature = "profile")]
     kernel::profile::init();
@@ -150,6 +156,7 @@ extern "C" fn secondary_main() -> ! {
         core::hint::spin_loop();
     }
     // Perform Hart-specific initialisation
+    percpu::set_current_kernel_stack_base(&raw const __hart1_idle_stack_base as *mut u8);
     kernel::timer::init();
     sched::bootstrap(1);
     kernel::ipi::init();

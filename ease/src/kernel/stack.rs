@@ -4,7 +4,7 @@ use core::arch::naked_asm;
 
 /// Sentinel placed at the bottom word of each stack.
 /// Checked by the scheduler / panic path to detect stack overflow.
-pub(crate) const STACK_CANARY: usize = 0xDEAD_BEEF;
+pub(crate) const CANARY: usize = 0xDEAD_BEEF;
 
 /// Add a canary at the bottom of a stack
 /// Using naked_asm as we may not yet have a stack pointer
@@ -16,7 +16,7 @@ pub(crate) unsafe extern "C" fn set_canary(base_addr: usize) {
         "li t0, {canary}",
         "sw t0, 0(a0)",
         "ret",
-        canary = const STACK_CANARY,
+        canary = const CANARY,
     );
 }
 
@@ -26,11 +26,7 @@ pub(crate) unsafe extern "C" fn set_canary(base_addr: usize) {
 pub(crate) unsafe fn check_canary(base_addr: usize) -> Result<(), usize> {
     // Safety: Caller has provided aligned address safe for reading
     let val = unsafe { core::ptr::read_volatile(base_addr as *const usize) };
-    if val == STACK_CANARY {
-        Ok(())
-    } else {
-        Err(val)
-    }
+    if val == CANARY { Ok(()) } else { Err(val) }
 }
 
 /// Stack paint pattern
@@ -87,13 +83,19 @@ pub(crate) unsafe fn stack_high_watermark(base_addr: usize, top_addr: usize) -> 
 ///
 /// Safety: Caller must ensure base and top addresses are aligned and valid for reading
 #[cfg(feature = "paint-stack")]
-pub(crate) unsafe fn print_stack_watermark(
+pub(crate) unsafe fn print_watermark(
     name: &'static str,
     id: usize,
+    stack_type: &'static str,
     base_addr: usize,
     top_addr: usize,
 ) {
-    dprintln!("==== {}{} Stack High Watermark Check ====", name, id);
+    dprintln!(
+        "==== {}{} {} Stack High Watermark Check ====",
+        name,
+        id,
+        stack_type
+    );
     // Safety: Caller has ensured base address and top address are aligned and valid for reading
     unsafe {
         if let Some(addr) = stack_high_watermark(base_addr, top_addr) {
@@ -128,29 +130,33 @@ pub(crate) fn print_irq_idle_stacks() {
             static __hart1_idle_stack_top: u8;
         }
 
-        use crate::kernel::stack::print_stack_watermark;
+        use crate::kernel::stack::print_watermark;
 
-        print_stack_watermark(
-            "IRQ Hart",
+        print_watermark(
+            "Hart",
             0,
+            "IRQ",
             &raw const __hart0_irq_stack_base as usize,
             &raw const __hart0_irq_stack_top as usize,
         );
-        print_stack_watermark(
-            "IRQ Hart",
+        print_watermark(
+            "Hart",
             1,
+            "IRQ",
             &raw const __hart1_irq_stack_base as usize,
             &raw const __hart1_irq_stack_top as usize,
         );
-        print_stack_watermark(
-            "Idle Hart",
+        print_watermark(
+            "Hart",
             0,
+            "Idle",
             &raw const __hart0_idle_stack_base as usize,
             &raw const __hart0_idle_stack_top as usize,
         );
-        print_stack_watermark(
-            "Idle Hart",
+        print_watermark(
+            "Hart",
             1,
+            "Idle",
             &raw const __hart1_idle_stack_base as usize,
             &raw const __hart1_idle_stack_top as usize,
         );

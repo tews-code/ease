@@ -62,8 +62,9 @@ impl context::Frame {
 /// - user stack top must be the top of a live, U-mode-accessible memory region
 pub unsafe fn init_stack_for_user_thread(
     kernel_stack: &mut MemRegion,
-    entry: UserEntry,
+    user_stack_base: NonNull<u8>,
     user_stack_top: NonNull<u8>,
+    entry: UserEntry,
     user_exit: usize,
 ) -> NonNull<u8> {
     debug_assert!(
@@ -74,8 +75,12 @@ pub unsafe fn init_stack_for_user_thread(
     // Safety: kernel stack has aligned addresses and region is valid for writes
     unsafe {
         #[cfg(feature = "paint-stack")]
-        stack::paint(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+        {
+            stack::paint(kernel_stack.base_addr(), kernel_stack.top().addr().into());
+            stack::paint(user_stack_base.addr().into(), user_stack_top.addr().into());
+        }
         stack::set_canary(kernel_stack.base_addr());
+        stack::set_canary(user_stack_base.addr().into());
     }
     // First forge the trap return
     // Safety: trap_frame_ptr is derived from stack_base and aligned

@@ -7,10 +7,8 @@ use crate::arch::csr::{mepc, mtval};
 use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
-use crate::kernel::panic;
 use crate::kernel::sched::{ExitReason, userloader};
-use crate::kernel::stack::check_canary;
-use crate::kernel::{ipi, percpu, sched};
+use crate::kernel::{ipi, panic, percpu, sched, stack};
 use ease_abi::syscall;
 
 #[cfg(feature = "profile")]
@@ -34,7 +32,15 @@ pub(crate) extern "C" fn trap_handler_h0(frame: &mut trap::Frame) {
 pub(crate) extern "C" fn trap_handler_h1(frame: &mut trap::Frame) {
     trap_handler_impl(frame);
 }
-
+/// Common trap handler that each HART runs independently in its own .text
+///
+/// If the other HART has called a panic then this trap handler spins forever
+/// It checks the IRQ and kernel stacks and panics immediately if corrupt. It
+/// also checks the user stack canary and diverts to exit if corrupt.
+///
+/// The handler runs with interrupts disabled, so all activity is kept to a bare
+/// minimum. Any blocking calls must be handled through [trap::Frame::set_up_for_divert_to_kernel]
+/// and an `mret`.
 #[inline(always)]
 fn trap_handler_impl(frame: &mut trap::Frame) {
     // Check if other hart has triggered a panic
@@ -53,9 +59,22 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         &raw const __hart1_irq_stack_base as *const usize
     };
     // Safety: IRQ stack base is a valid stack address from linker script
-    if unsafe { check_canary(irq_stack_base.addr()) }.is_err() {
+    if unsafe { stack::check_canary(irq_stack_base.addr()) }.is_err() {
         irq_panic();
     }
+    // Check if kernel stack canary is in place
+    // Note that percpu::current_kernel_stack_base is set up immediately after boot and is safe to read
+    if let Err(val) = unsafe { stack::check_canary(percpu::current_kernel_stack_base().addr()) } {
+        panic!(
+            "kernel stack canary corrupted in thread at index {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
+            percpu::current_thread_idx(),
+            frame.sp,
+            percpu::current_kernel_stack_base().addr(),
+            val,
+            stack::CANARY
+        );
+    }
+    let is_from_user = frame.is_from_user();
     match mcause::read() {
         Trap::Interrupt(TIMER) => sched::mark_for_preempt(), // Sets percpu::needs_reschedule
         Trap::Interrupt(SOFTWARE) => {
@@ -91,6 +110,24 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
             crate::dprint!("ecall from M");
         }
         Trap::Exception(code) => handle_exception(frame, code),
+    }
+    // Check if user stack canary is in place
+    if is_from_user {
+        // Check if the user stack canary is in place
+        // Safety: The user stack base is aligned and available for reads
+        if unsafe {
+            stack::check_canary(
+                percpu::current_user_stack_base()
+                    .expect("the frame is from user so there must be a user stack")
+                    .addr(),
+            )
+        }
+        .is_err()
+        {
+            frame.a0 = ExitReason::Fault as usize;
+            frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
+            return;
+        }
     }
     if percpu::needs_reschedule() {
         percpu::set_resume_mepc(frame.mepc);

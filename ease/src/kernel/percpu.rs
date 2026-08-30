@@ -19,6 +19,7 @@ struct PerCpu {
     current_thread_idx: UnsafeCell<u8>,
     current_kernel_stack_base: UnsafeCell<*mut u8>,
     current_kernel_stack_top: UnsafeCell<*mut u8>,
+    current_user_stack_base: UnsafeCell<Option<*mut u8>>,
     resume_sp: UnsafeCell<usize>,
     switching_from_thread_idx: UnsafeCell<Option<u8>>,
     needs_reschedule: AtomicBool,
@@ -38,6 +39,7 @@ impl PerCpu {
             current_thread_idx: UnsafeCell::new(0),
             current_kernel_stack_base: UnsafeCell::new(core::ptr::null_mut()),
             current_kernel_stack_top: UnsafeCell::new(core::ptr::null_mut()),
+            current_user_stack_base: UnsafeCell::new(None),
             resume_sp: UnsafeCell::new(0),
             switching_from_thread_idx: UnsafeCell::new(None),
             needs_reschedule: AtomicBool::new(false),
@@ -138,29 +140,39 @@ pub fn set_current_thread_idx(thread_idx: usize) {
     unsafe { *this_hart().current_thread_idx.get() = thread_idx as u8 }
 }
 
-/// Get the current thread stack base
-#[allow(dead_code)]
+/// Get the current thread kernel stack base
 pub fn current_kernel_stack_base() -> *mut u8 {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_hart().current_kernel_stack_base.get() }
 }
 
-/// Set the current thread stack base
+/// Set the current thread kernel stack base
 pub fn set_current_kernel_stack_base(stack_base: *mut u8) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_hart().current_kernel_stack_base.get() = stack_base };
 }
 
-/// Get the current thread stack top
+/// Get the current thread kernel stack top
 pub fn current_kernel_stack_top() -> *mut u8 {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_hart().current_kernel_stack_top.get() }
 }
 
-/// Set the current thread stack top
+/// Set the current thread kernel stack top
 pub fn set_current_kernel_stack_top(stack_top: *mut u8) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_hart().current_kernel_stack_top.get() = stack_top };
+}
+
+/// Get the current thread user stack base
+pub fn current_user_stack_base() -> Option<*mut u8> {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().current_user_stack_base.get() }
+}
+/// Set the current thread user stack base
+pub fn set_current_user_stack_base(stack_base: Option<*mut u8>) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().current_user_stack_base.get() = stack_base };
 }
 
 /// Get the resume stack pointer

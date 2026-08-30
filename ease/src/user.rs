@@ -26,6 +26,10 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         image: Image::Flash(echo),
     },
     Program {
+        name: "user_canary_stomp",
+        image: Image::Flash(user_canary_stomp),
+    },
+    Program {
         name: "user_fault_now",
         image: Image::Flash(user_fault_now),
     },
@@ -101,6 +105,25 @@ pub extern "C" fn user_test() {
             "ecall",
             in("a7") syscall::EXIT,
         );
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Overwrites the canary word at the base of its own user stack — legal
+/// under PMP, since the stack is the program's own memory — then spins
+/// until preempted. The scheduler's slice_ended canary check must catch
+/// the corruption and fault-kill the whole process. The stack base is
+/// found by rounding sp down to the stack's 4KB size class (valid
+/// because buddy regions are size-aligned); the `sp - 1` keeps the
+/// rounding inside the region even if sp still sits exactly at the top.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_canary_stomp() {
+    unsafe {
+        let sp: usize;
+        core::arch::asm!("mv {}, sp", out(reg) sp);
+        core::ptr::write_volatile(((sp - 1) & !0xFFF) as *mut usize, 0);
     }
     loop {
         core::hint::spin_loop();

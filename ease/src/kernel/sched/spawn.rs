@@ -104,10 +104,17 @@ impl Scheduler {
             return None;
         };
         let user_stack_top = user_stack.top();
+        let user_stack_base = user_stack.base();
         let user_exit = pcb.entry_ra;
         let thread_handle = sched.thread_blocks.acquire(
             |kernel_stack| unsafe {
-                umode::init_stack_for_user_thread(kernel_stack, entry, user_stack_top, user_exit)
+                umode::init_stack_for_user_thread(
+                    kernel_stack,
+                    user_stack_base,
+                    user_stack_top,
+                    entry,
+                    user_exit,
+                )
             },
             ThreadControlBlockSpec {
                 kernel_stack,
@@ -168,16 +175,23 @@ impl Scheduler {
         // Take the lock
         let mut sched = self.sched.lock();
         // Get a process slot
+        let user_stack_top = user_stack.top();
+        let user_stack_base = user_stack.base();
         let pcb_idx = sched
             .process_blocks
             .find_process_slot()
             .ok_or(process::SpawnError::TooManyProcesses)?;
-        let user_stack_top = user_stack.top();
         let thread_handle = sched
             .thread_blocks
             .acquire(
                 |kernel_stack| unsafe {
-                    umode::init_stack_for_user_thread(kernel_stack, entry, user_stack_top, entry_ra)
+                    umode::init_stack_for_user_thread(
+                        kernel_stack,
+                        user_stack_base,
+                        user_stack_top,
+                        entry,
+                        entry_ra,
+                    )
                 },
                 ThreadControlBlockSpec {
                     kernel_stack,

@@ -294,7 +294,7 @@ extern "C" fn _start() -> ! {
 
         park_loop = sym _park_loop,
         #[cfg(feature = "paint-stack")]
-        paint_stack = sym crate::kernel::stack::paint_stack,
+        paint_stack = sym crate::kernel::stack::paint,
         set_canary = sym crate::kernel::stack::set_canary,
         copy_region = sym copy_region,
         zero_region = sym zero_region,

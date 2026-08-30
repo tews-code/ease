@@ -17,8 +17,7 @@ use crate::kernel::sched::threads::{
     Threads,
 };
 #[cfg(feature = "paint-stack")]
-use crate::kernel::stack::print_stack_watermark;
-use crate::kernel::stack::{STACK_CANARY, check_canary};
+use crate::kernel::stack::print_watermark;
 use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard, with_interrupts_disabled};
 use crate::kernel::{percpu, timer};
 
@@ -166,24 +165,6 @@ impl SchedInner {
             ))
         }
     }
-
-    #[inline(never)]
-    fn check_curr_canary(&self) {
-        let curr = &self.thread_blocks.0[percpu::current_thread_idx()]
-            .as_ref()
-            .expect("current thread should be a valid TCB");
-        // Safety: base address is aligned and valid for reads either from linker script or buddy allocation
-        if let Err(val) = unsafe { check_canary(curr.kernel_stack.base_addr()) } {
-            panic!(
-                "kernel stack canary corrupted in thread {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
-                curr.id,
-                curr.sp,
-                curr.kernel_stack.base_addr(),
-                val,
-                STACK_CANARY
-            )
-        };
-    }
     /// Set the PerCpu info for a running thread on this HART
     fn activate_thread(
         &mut self,
@@ -198,8 +179,8 @@ impl SchedInner {
             percpu::set_switching_from_thread_idx(switching_from_thread_idx);
             percpu::set_current_kernel_stack_base(stack.base().as_ptr());
             percpu::set_current_kernel_stack_top(stack.top().as_ptr());
-
             if let Some(user_context) = &tcb.user {
+                percpu::set_current_user_stack_base(Some(user_context.stack.base().as_ptr()));
                 // For user thread merge the thread's stack and set pmp
                 let pmp_config = self.process_blocks.0[user_context.process_idx as usize]
                     .as_ref()
@@ -207,6 +188,8 @@ impl SchedInner {
                     .mem_map
                     .to_pmp(&user_context.stack);
                 pmp_config.activate();
+            } else {
+                percpu::set_current_user_stack_base(None);
             }
         }
     }
@@ -336,12 +319,26 @@ impl Scheduler {
                     let id = tcb.id;
                     // Safety: kernel stack is aligned and valid for reads
                     unsafe {
-                        print_stack_watermark(
+                        print_watermark(
                             "Thread",
                             id as usize,
+                            "Kernel",
                             kernel_stack.base_addr(),
                             kernel_stack.top().addr().into(),
                         );
+                    }
+                    // Print the user stack if this is a user thread
+                    if let Some(uc) = &tcb.user {
+                        // Safety: user stack is aligned and valid for reads
+                        unsafe {
+                            print_watermark(
+                                "Thread",
+                                id as usize,
+                                "User",
+                                uc.stack.base_addr(),
+                                uc.stack.top().addr().into(),
+                            );
+                        }
                     }
                 }
             }
@@ -419,7 +416,6 @@ impl Scheduler {
         curr_idx: usize,
         now_cycles: u64,
     ) {
-        sched.check_curr_canary();
         let curr = &mut sched.thread_blocks.0[curr_idx]
             .as_mut()
             .expect("current thread should be running with valid TCB");

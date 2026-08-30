@@ -10,7 +10,7 @@ use crate::kernel::sched::Qos;
 use crate::kernel::sched::process;
 use crate::kernel::sched::stride::PRIORITY_MIN;
 #[cfg(feature = "paint-stack")]
-use crate::kernel::stack::print_stack_watermark;
+use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
 use crate::sched::userloader;
 
@@ -337,13 +337,27 @@ impl Threads {
     #[cfg(feature = "paint-stack")]
     pub(super) fn stacks(&self) {
         for tcb in self.0.iter().flatten() {
+            // Print kernel stack
             unsafe {
-                print_stack_watermark(
+                print_watermark(
                     "thread",
                     tcb.id as usize,
+                    "kernel",
                     tcb.kernel_stack.base_addr(),
                     tcb.kernel_stack.top().as_ptr().addr(),
                 )
+            }
+            if let Some(uc) = &tcb.user {
+                // Print user stack
+                unsafe {
+                    print_watermark(
+                        "thread",
+                        tcb.id as usize,
+                        "user",
+                        uc.stack.base_addr(),
+                        uc.stack.top().as_ptr().addr(),
+                    )
+                }
             }
         }
     }

@@ -2579,3 +2579,27 @@ fn blocked_user_thread_frames_on_kernel_stack() {
     }
     assert!(drained, "echo process never released after fault-kill");
 }
+
+// Exercises the user-stack canary response: user_canary_stomp overwrites
+// the canary word at the base of its own stack (its own memory — PMP
+// permits it) and spins. The trap handler's post-match canary check must
+// see the corruption on the next trap from U-mode and divert the frame
+// to user_thread_exit with Fault — the full process-kill machinery, so
+// the teardown claimant exists and the fd table is closed (the earlier
+// marked_for_exit design skipped both and tripped the fd assert). A
+// missing check leaves the process spinning forever (assert fires); a
+// response that skips teardown resurfaces the fd panic.
+#[test_case]
+fn user_stack_canary_stomp_fault_kills_process() {
+    let handle = crate::kernel::sched::spawn_process("user_canary_stomp")
+        .expect("canary-stomp process spawn should succeed");
+    let mut killed = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(killed, "canary-stomping process was never fault-killed");
+}
