@@ -361,6 +361,7 @@ impl Scheduler {
                 self.release_process_thread(&mut sched, process_idx, switched_from_idx);
             }
             sched.thread_blocks.0[switched_from_idx] = None;
+            self.clear_thread_flags(switched_from_idx); // Make sure we also clear the flags of the TCB that has been removed
             return;
         }
         // All other post switch cleanup for living thread
@@ -420,28 +421,10 @@ impl Scheduler {
             }
         }
     }
-
-    // Helper function shared by `schedule` (preempt called from trap handler) and `reschedule` (voluntary) scheduler calls
-    // Performs common bookkeeping
-    fn slice_ended(
-        &self,
-        sched: &mut IrqSpinLockGuard<SchedInner>,
-        curr_idx: usize,
-        now_cycles: u64,
-    ) {
-        let curr = &mut sched.thread_blocks.0[curr_idx]
-            .as_mut()
-            .expect("current thread should be running with valid TCB");
-        let ran = now_cycles - curr.last_started_cycles;
-        curr.last_started_cycles = now_cycles;
-        unsafe { self.run_cycles[curr_idx].add(ran) };
-        curr.stride_forward(ran);
-    }
-
-    // Set current thread state to `new_state` and next thread to `Ready` in round robin
-    // If `currrent_state` is Some(State), reschedule only takes place if the
-    // current thread state matches; if `current_state` is None then reschedule
-    // unconditionally
+    /// Set current thread state to `new_state` and next thread to `Ready` in round robin
+    /// If `currrent_state` is Some(State), reschedule only takes place if the
+    /// current thread state matches; if `current_state` is None then reschedule
+    /// unconditionally
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn reschedule(&self, current_state: Option<State>, new_state: PostSwitch) {
         // Note - the closure body will contain switch_to, which is unusual
@@ -457,11 +440,23 @@ impl Scheduler {
             let mut sched = self.sched.lock();
             let now_cycles = timer::elapsed();
             let curr_idx = percpu::current_thread_idx();
-            self.slice_ended(&mut sched, curr_idx, now_cycles);
+            {
+                let curr_tcb = sched.thread_blocks.0[curr_idx]
+                    .as_mut()
+                    .expect("the current thread must have a valid TCB");
+                let ran = curr_tcb.slice_ended(now_cycles);
+                unsafe { self.run_cycles[curr_idx].add(ran) };
+            }
+            // Check if any threads have reached or passed their deadline
+            // Note: we do this after the cycle bookkeeping above to avoid favouring waking threads
+            self.wake_sleeping_threads(&mut sched);
+            // Now reborrow the current thread tcb
+            let curr_tcb = sched.thread_blocks.0[curr_idx]
+                .as_mut()
+                .expect("the current thread must have a valid TCB");
             // First check if current state matches pre-condition
             if let Some(state) = current_state
-                && let Some(tcb) = sched.thread_blocks.0[percpu::current_thread_idx()].as_mut()
-                && tcb.state != state
+                && curr_tcb.state != state
             {
                 // If a racing unpark flips the thread to Ready just before the lock,
                 // the precondition fails and you bail — but the thread is left marked Ready
@@ -469,23 +464,27 @@ impl Scheduler {
                 // The other hart could then pick_next it and switch to it → the same thread running on two harts →
                 // stack corruption.
                 // Forcing it back to Running on the abort path is correct (the current thread always continues running here).
-                tcb.state = State::Running;
+                curr_tcb.state = State::Running;
                 return;
             }
-            // Check if any threads have reached or passed their deadline
-            self.wake_sleeping_threads(&mut sched);
+            // If the current thread is marked for exit then it can't be allowed to change state if it's trying to block or sleep.
+            // It needs to keep running until it hits a U-mode trap or its wait loop's interruption check
+            // which will cleanly exit it
+            if self.needs_user_exit.get(curr_idx)
+                && curr_tcb.user.is_some()
+                && matches!(
+                    new_state,
+                    PostSwitch::Blocked | PostSwitch::BlockedUntil(_) | PostSwitch::Sleeping(_)
+                )
+            {
+                curr_tcb.state = State::Running;
+                return;
+            }
             // A yield hands off to a Ready peer but never idles: if the pick
             // fell back to idle (no ready peer), keep running curr instead.
-            //
-            // However, for Sleep/Block/Exit curr is leaving, so the idle fallback is correct;
-            //
-            // Also, a condemned (needs_user_exit) thread must NOT take the
-            // yield-keeps-running shortcut: is_yield goes false so the thread
-            // really switches out, letting the switch-time conversion below
-            // kill it. This special case disappears with stage 4, when the
-            // conversion is deleted and death moves to the trap boundary.
+            // However, for Sleep/Block/Exit, curr is leaving, so the idle fallback is correct;
             let idle_idx = percpu::idle_thread_idx();
-            let is_yield = new_state == PostSwitch::Ready && !self.needs_user_exit.get(curr_idx);
+            let is_yield = new_state == PostSwitch::Ready;
             let mut disjoint_threads = sched.pick_next_ready_mut();
             // If we are due to yield but the next thread is the idle thread, stop and return early
             if is_yield && matches!(&disjoint_threads, Some((.., n)) if *n == idle_idx) {
@@ -565,7 +564,11 @@ impl Scheduler {
                 let mut sched = self.sched.lock();
                 let now_cycles = timer::elapsed();
                 let curr_idx = percpu::current_thread_idx();
-                self.slice_ended(&mut sched, curr_idx, now_cycles);
+                let curr_tcb = sched.thread_blocks.0[curr_idx]
+                    .as_mut()
+                    .expect("the current thread must have a valid TCB");
+                let ran = curr_tcb.slice_ended(now_cycles);
+                unsafe { self.run_cycles[curr_idx].add(ran) };
 
                 // Check if thread is marked for exit
                 let marked_for_exit = sched.thread_blocks.0[percpu::current_thread_idx()]

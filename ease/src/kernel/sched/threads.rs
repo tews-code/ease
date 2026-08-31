@@ -125,6 +125,14 @@ impl ThreadControlBlock {
     fn process_idx(&self) -> Option<u8> {
         self.user.as_ref().map(|uc| uc.process_idx)
     }
+    /// Helper function shared by `schedule` (preempt called from trap handler) and `reschedule` (voluntary) scheduler calls
+    /// Performs common cycle count bookkeeping and updates stride for the current thread.
+    pub(super) fn slice_ended(&mut self, now_cycles: u64) -> u64 {
+        let ran = now_cycles - self.last_started_cycles;
+        self.last_started_cycles = now_cycles;
+        self.stride_forward(ran);
+        ran
+    }
 }
 
 impl Debug for ThreadControlBlock {
@@ -185,7 +193,10 @@ impl Threads {
         });
         Some(ThreadHandle { idx, id })
     }
-
+    /// Release a TCB slot based on the given thread handle
+    ///
+    /// # Panics #
+    /// Panics if the slot is already released.
     pub(super) fn release(&mut self, thread: &ThreadHandle) {
         if self.0[thread.idx]
             .as_ref()
@@ -209,9 +220,10 @@ impl Threads {
     /// - the given index does not index a valid TCB
     pub(super) fn make_blocked_ready(&mut self, idx: usize) -> (bool, Option<u8>) {
         assert!(idx < THREADS_MAX);
-        let tcb = self.0[idx]
-            .as_mut()
-            .expect("the thread index must be for a valid TCB");
+        let tcb = self.0[idx].as_mut().unwrap_or_else(|| {
+            dprintln!("the thread index must be for a valid TCB at index {}", idx);
+            panic!("invalid TCB");
+        });
         match tcb.state {
             State::Blocked | State::BlockedUntil(_) => {
                 tcb.state = State::Ready;
@@ -233,14 +245,13 @@ impl Threads {
             _ => (false, None),
         }
     }
-
-    // Find the minimum current pass value among active, non-idle threads.
-    //
-    // PRI_MIN threads (the idle bootstrap on non-main harts) accumulate
-    // very little stride — they mostly WFI and never switch out — so
-    // including them in the baseline calculation would give every newly
-    // spawned thread a pass of 0, letting it dominate pick_next until its
-    // pass naturally catches up to the rest of the system.
+    /// Find the minimum current pass value among active, non-idle threads.
+    ///
+    /// PRI_MIN threads (the idle bootstrap on non-main harts) accumulate
+    /// very little stride — they mostly WFI and never switch out — so
+    /// including them in the baseline calculation would give every newly
+    /// spawned thread a pass of 0, letting it dominate pick_next until its
+    /// pass naturally catches up to the rest of the system.
     pub(super) fn pass_baseline(&self) -> u64 {
         self.0
             .iter()
@@ -251,9 +262,8 @@ impl Threads {
             .min()
             .unwrap_or(0)
     }
-
-    // Gets the soonest wake deadline (including leeway) including threads busy switching
-    // Returns None if no threads are sleeping
+    /// Gets the soonest wake deadline (including leeway) including threads busy switching
+    /// Returns None if no threads are sleeping
     pub(super) fn next_wake_due(&self) -> Option<u64> {
         self.0
             .iter()
@@ -261,8 +271,7 @@ impl Threads {
             .filter_map(|tcb| tcb.must_wake_by())
             .min()
     }
-
-    // Wakes a sleeping TCB and catches up its pass
+    /// Wakes a sleeping TCB and catches up its pass
     pub(super) fn wake_if_due(
         &mut self,
         idx: usize,
@@ -300,8 +309,7 @@ impl Threads {
             None
         }
     }
-
-    // Returns whether there are contending threads (that will need a slice switch)
+    /// Returns whether there are contending threads (that will need a slice switch)
     pub(super) fn is_under_contention(&self) -> bool {
         self.0.iter().flatten().any(|tcb| tcb.state == State::Ready)
     }
