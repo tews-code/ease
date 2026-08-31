@@ -263,6 +263,10 @@ pub fn current_wake_overshoot() -> u64 {
     SCHEDULER.current_wake_overshoot()
 }
 
+//
+// SPAWN USER
+//
+
 /// Spawn a user process
 pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::SpawnError> {
     // Look up this program in the table
@@ -297,13 +301,16 @@ pub fn spawn_user(process: &process::Handle, entry: userloader::UserEntry) -> Op
     )
 }
 
+//
+// PER-THREAD FLAGS
+//
+
 /// Set the wake up flag for a thread by index
 pub fn set_needs_wakeup(idx: usize) {
     if idx < THREADS_MAX {
         SCHEDULER.set_wakeup_flag(idx);
     }
 }
-
 /// Clear the wake up flag for a thread by index
 pub fn clear_wakeup_signal(idx: usize) {
     if idx < THREADS_MAX {

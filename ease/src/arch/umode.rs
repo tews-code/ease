@@ -4,6 +4,66 @@
 //! to pick up the thread as if it had been a running thread suspended, and a forged trap
 //! frame to allow an mret into U-Mode, as if it had been an existing U-Mode thread that
 //! had trapped.
+//!
+//! User Thread Spawn
+//!
+//! User threads must be spawned by an existing thread running in M-mode. User mode threads
+//! are always part of a user process, which is a user program (of unknown provenance) running
+//! in U-mode with PMP enabled. A process has common memory map for .text, .data and .bss but
+//! an individual user stack for each thread that is part of that process. At each switch the
+//! PMP is updated to support the needed changes.
+//!
+//! In order to spawn a user thread, the user program must first be loaded from its initial
+//! storage location to the active memory locations. EASE currently supports
+//! - "flash" programs - compiled within EASE and loaded from LMA to VMA. See [crate::user].
+//! - "blob" programs - written and compiled against the EASE user library and stored within EASE as a series of bytes.
+//!
+//! See [crate::user::PROGRAMS] for the list of available programs.
+//!
+//! A user thread spawn is handled by [sched::spawn_process] which takes the program by name.
+//! If the program is found in the PROGRAMS table it is loaded into the right memory regions
+//! in [sched::userloader]. The user program loader hence takes responsibility for getting the
+//! required memory allocations, creating the user memory map (see [sched::usermem]), and
+//! call the required `fence.i` for both HARTs, and returns the user entry point - for flash
+//! programs this is the function address as a symbol, while for blob programs this is the very
+//! first address in the .text segment.
+//!
+//! On successful load, the work is taken over by [sched::spawn::spawn_process] which takes
+//! responsibility for selecting a process slot [sched::process::Procs], allocating the
+//! user and kernel stacks, and acquiring a thread control block with a suitably forged stack.
+//!
+//! The forged stack is set up in the thread's kernel stack as two frames one above the other
+//! (See [init_stack_for_user_thread]):
+//!
+//!         +-> +--kernel stack top-+
+//!         |   |       mepc        |
+//!         |   +-------------------+
+//!     Forged  |      mstatus      |
+//!     trap    +-------------------+
+//!     frame   |       ...         |
+//!         |   +-------------------+
+//!         |   |       gp          |
+//!         |   +-------------------+
+//!         |   |       ra          |
+//!         +-> +-------------------+
+//!         |   |       s0          |
+//!         |   +-------------------+
+//!     Forged  |       s1          |
+//!     context +-------------------+
+//!     switch  |       ...         |
+//!     frame   +-------------------+
+//!         |   |       sp          |
+//!         |   +-------------------+
+//!         |   |       ra          |
+//!    sp   +-> +-------------------+
+//!             |      ...          |
+//!             +-kernel stack base-+
+//!
+//! The context switch frame is forged [context::Frame::forge_for_user_entry] to point to [user_first_run].
+//! In turn, [user_first_run] restores the forged trap frame [trap::Frame::forge_for_user_entry] to:
+//! - Set `mepc` to the user entry address, as provided by the user loader.
+//! - Set `mstatus` to make the `mret` command "return" to U-mode.
+//! - Set the stack pointer to the *user* stack top.
 
 use super::{context, umode};
 use crate::arch::trap;

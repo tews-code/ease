@@ -266,8 +266,7 @@ impl Scheduler {
             .expect("boot strap thread must succeed to start system");
         percpu::set_idle_thread_idx(thread_handle.idx);
         // Must clear the flags so that the new thread doesn't inherit prior thread's historic flags
-        self.needs_wakeup.clear(thread_handle.idx);
-        self.needs_user_exit.clear(thread_handle.idx);
+        self.clear_thread_flags(thread_handle.idx);
         sched.activate_thread(thread_handle.idx, None);
     }
     /// Wakes any threads past their deadlines or which have a wake flag set
@@ -738,16 +737,24 @@ impl Scheduler {
         );
     }
 
-    // Set a wakeup flag for a particular thread
+    // FLAGS
+
+    /// Set a wakeup flag for a particular thread
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn set_wakeup_flag(&self, idx: usize) {
         self.needs_wakeup.set(idx);
     }
-
-    // Clear the wakeup flag for a particular thread
+    /// Clear the wakeup flag for a particular thread
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn clear_wakeup_flag(&self, idx: usize) {
         self.needs_wakeup.clear(idx);
+    }
+    /// Clear all flags for a thread
+    pub(crate) fn clear_thread_flags(&self, idx: usize) {
+        if idx < THREADS_MAX {
+            self.needs_wakeup.clear(idx);
+            self.needs_user_exit.clear(idx);
+        }
     }
 
     // Helper function used by unpark and wake_sleeping_threads

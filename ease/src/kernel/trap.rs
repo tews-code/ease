@@ -128,6 +128,20 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             return;
         }
+        // Check if this user thread should be exited
+        if sched::current_user_thread_needs_exit() {
+            percpu::set_resume_mepc(frame.mepc);
+            percpu::set_resume_mstatus(frame.mstatus);
+            percpu::set_resume_sp(frame.sp);
+            percpu::set_resume_work(Work::Exit(ExitReason::Fault));
+            frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
+                resume_trampoline_h0 as *const () as usize
+            } else {
+                resume_trampoline_h1 as *const () as usize
+            });
+            // Early return to avoid needs_reschedule below
+            return;
+        }
     }
     if percpu::needs_reschedule() {
         percpu::set_resume_mepc(frame.mepc);
@@ -148,7 +162,7 @@ pub(crate) enum Work {
     // Preempt must remain the first variant — NOLOAD percpu zero-fill depends on it.
     Preempt,
     // Syscall(usize),
-    // Exit(ExitReason),
+    Exit(ExitReason),
 }
 /// Examines the percpu resume work field and dispatches to resume that work
 /// This function is `extern "C"` so it can be called from asm!.
@@ -158,6 +172,7 @@ pub(crate) enum Work {
 pub(crate) extern "C" fn run_resume_work() {
     match percpu::resume_work() {
         Work::Preempt => sched::schedule(),
+        Work::Exit(reason) => sched::exit_user_thread(reason),
     }
 }
 

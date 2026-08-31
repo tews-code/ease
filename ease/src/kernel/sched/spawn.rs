@@ -71,8 +71,7 @@ impl Scheduler {
             },
         )?;
         // Make sure threads don't launch with stale flags
-        self.needs_wakeup.clear(handle.idx);
-        self.needs_user_exit.clear(handle.idx);
+        self.clear_thread_flags(handle.idx);
         self.finish_spawn(sched, affinity);
         Some(handle)
     }
@@ -142,8 +141,7 @@ impl Scheduler {
             return None;
         }
         // Make sure threads don't launch with stale flags
-        self.needs_wakeup.clear(thread_handle.idx);
-        self.needs_user_exit.clear(thread_handle.idx);
+        self.clear_thread_flags(thread_handle.idx);
         self.finish_spawn(sched, affinity);
         Some(thread_handle)
     }
@@ -210,7 +208,8 @@ impl Scheduler {
                 },
             )
             .ok_or(process::SpawnError::NotEnoughThreads)?;
-        self.needs_wakeup.clear(thread_handle.idx); // Make sure threads don't launch with stale wakeup
+        // Clear all stale flags
+        self.clear_thread_flags(thread_handle.idx);
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
