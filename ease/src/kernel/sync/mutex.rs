@@ -42,6 +42,29 @@ impl<T> Mutex<T> {
         }
     }
 
+    /// Attempt to take the lock without blocking.
+    ///
+    /// Returns `None` if the mutex is currently held (or has waiters).
+    /// Never parks, so it is also safe as a liveness probe in tests:
+    /// an orphaned mutex answers `None` forever instead of hanging the
+    /// caller.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        if self
+            .state
+            .compare_exchange(
+                MutexState::Free as u8,
+                MutexState::Locked as u8,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            Some(MutexGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
     pub fn lock(&self) -> MutexGuard<'_, T> {
         const SPIN_MAX: usize = 100;
         // CAS, spin a bit, then block

@@ -30,6 +30,10 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         image: Image::Flash(user_canary_stomp),
     },
     Program {
+        name: "user_mutex_block",
+        image: Image::Flash(user_mutex_block),
+    },
+    Program {
         name: "user_fault_now",
         image: Image::Flash(user_fault_now),
     },
@@ -104,6 +108,25 @@ pub extern "C" fn user_test() {
         core::arch::asm!(
             "ecall",
             in("a7") syscall::EXIT,
+        );
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Issues the test-only TEST_MUTEX_BLOCK syscall: the kernel side takes
+/// a static mutex and parks holding it on a never-signalled completion.
+/// Used by the boundary-kill test to prove that fault-killing the
+/// holder frees the mutex (guard dropped via Err propagation) instead
+/// of orphaning it. In non-test builds the syscall number is unknown
+/// to the kernel, so this program is never spawned outside tests.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_mutex_block() {
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            in("a7") syscall::TEST_MUTEX_BLOCK,
         );
     }
     loop {

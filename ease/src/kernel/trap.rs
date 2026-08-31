@@ -201,6 +201,14 @@ fn handle_ecall(frame: &mut trap::Frame) {
             frame.a2 = syscall::GET_CHAR;
             frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
         }
+        // Test-only: park holding a kernel mutex, for the boundary-kill test.
+        #[cfg(all(test, feature = "test-sched"))]
+        syscall::TEST_MUTEX_BLOCK => {
+            frame.a0 = frame.mepc + 4;
+            frame.a1 = frame.sp; // Must do this before divert, since divert clobbers frame.sp
+            frame.a2 = syscall::TEST_MUTEX_BLOCK;
+            frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
+        }
         _ => {
             // Advance mepc
             frame.mepc += 4;

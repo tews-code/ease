@@ -210,10 +210,28 @@ pub(crate) extern "C" fn user_thread_block(
                     resume_user(0, b, return_address, user_sp);
                 } else {
                     // Block using a completion on the key press
-                    keyboard::KEY_PENDING.wait();
+                    if keyboard::KEY_PENDING.wait_interruptible().is_err() {
+                        sched::exit_user_thread(ExitReason::Fault);
+                    };
                 }
-                sched::exit_user_thread_if_needs_exit();
             }
+        }
+        // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
+        // discipline. The guard lives in an inner scope: on Err(Interrupted)
+        // we leave the scope by normal control flow, the guard drops (mutex
+        // freed), and only THEN does the thread exit. Calling exit inside
+        // the scope would leak the guard — exit diverges, Drop never runs.
+        #[cfg(all(test, feature = "test-sched"))]
+        syscall::TEST_MUTEX_BLOCK => {
+            use crate::kernel::sched::test_support;
+            {
+                let _guard = test_support::TEST_MUTEX.lock();
+                while test_support::TEST_MUTEX_SIGNAL.wait_interruptible().is_ok() {
+                    // Spurious signal: keep holding and keep waiting.
+                }
+                // Err(Interrupted): fall out of the scope, dropping _guard.
+            }
+            sched::exit_user_thread(ExitReason::Fault);
         }
         _ => panic!("unexpected blocking syscall: {}", syscall),
     }

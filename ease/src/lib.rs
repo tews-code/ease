@@ -264,6 +264,11 @@ mod kernel {
         pub fn set_needs_wakeup(_idx: usize) {
             panic!("sched stub: must not be called from the lib crate");
         }
+
+        /// Checks if the current thread has the flag indicating the user thread must exit
+        pub(crate) fn current_user_thread_needs_exit() -> bool {
+            panic!("sched stub: must not be called from the lib crate");
+        }
     }
 }
 

@@ -7,7 +7,7 @@ mod process;
 mod spawn;
 mod stride;
 #[cfg(all(test, any(feature = "test-sched", feature = "bench")))]
-mod test_support;
+pub(crate) mod test_support;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
 mod threads;

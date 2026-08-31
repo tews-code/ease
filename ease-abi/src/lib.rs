@@ -17,6 +17,11 @@ pub mod syscall {
     pub const EXIT: usize = 0;
     pub const PUT_CHAR: usize = 1;
     pub const GET_CHAR: usize = 2;
+
+    // Test-only syscalls live at 100+ so real syscall growth never
+    // collides. The kernel only wires them up in test builds; a
+    // production program issuing one gets the unknown-syscall panic.
+    pub const TEST_MUTEX_BLOCK: usize = 100;
 }
 
 /// Syscall error codes

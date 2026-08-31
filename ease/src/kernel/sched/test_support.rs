@@ -42,3 +42,18 @@ pub(super) fn ensure_partner_spawned() {
             .spawn(partner_thread);
     }
 }
+
+// ============================================================
+// Boundary-kill test scaffolding (TEST_MUTEX_BLOCK syscall)
+// ============================================================
+
+/// Kernel mutex held by a user thread across an interruptible wait —
+/// the lock-holding exemplar of the interruptible-wait discipline.
+/// The fault-kill-frees-mutex test asserts that killing the holder
+/// leaves this FREE (guard dropped by Err propagation), not orphaned.
+pub(crate) static TEST_MUTEX: crate::kernel::sync::Mutex<()> = crate::kernel::sync::Mutex::new(());
+
+/// Never signalled by the test — the holder parks here until eviction
+/// wakes it and `wait_interruptible` returns `Err(Interrupted)`.
+pub(crate) static TEST_MUTEX_SIGNAL: crate::kernel::sync::Completion =
+    crate::kernel::sync::Completion::new();

@@ -2603,3 +2603,67 @@ fn user_stack_canary_stomp_fault_kills_process() {
     }
     assert!(killed, "canary-stomping process was never fault-killed");
 }
+
+// THE GATE for stage 4 of the boundary-kill migration (deleting the
+// switch-time marked_for_exit conversions). A user thread parks holding
+// TEST_MUTEX (via the test-only TEST_MUTEX_BLOCK syscall) on a
+// never-signalled completion; a sibling fault condemns the process.
+// Eviction wakes the parked holder, wait_interruptible returns
+// Err(Interrupted), the guard drops by leaving its scope, and only then
+// does the thread exit — so the mutex must end up FREE.
+//
+// Red-first verified 2026-08-31 by swapping the syscall arm to the
+// non-interruptible wait: the holder then died mid-critical-section via
+// the switch-time conversion and the mutex stayed orphaned (try_lock
+// None). This is the exact fs-deadlock the two-hats model forbids.
+// If stage 4's deletion ever breaks wake delivery, the holder re-parks
+// forever, the process never drains, and this test times out.
+#[test_case]
+fn fault_kill_frees_mutex_held_across_interruptible_wait() {
+    let handle = crate::kernel::sched::spawn_process("user_mutex_block")
+        .expect("mutex-block process spawn should succeed");
+    // Wait until the holder is actually parked (Blocked = inside the
+    // interruptible wait = mutex held). Load-bearing: fault too early
+    // and the thread could die before ever locking, making the final
+    // assertion vacuous.
+    let mut parked = false;
+    for _ in 0..200 {
+        {
+            let sched = super::SCHEDULER.sched.lock();
+            for slot in sched.thread_blocks.0.iter() {
+                if let Some(tcb) = slot
+                    && let Some(user) = &tcb.user
+                    && user.process_idx as usize == handle.idx
+                    && matches!(tcb.state, super::State::Blocked)
+                {
+                    parked = true;
+                }
+            }
+        }
+        if parked {
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(parked, "mutex holder never parked on the completion");
+    // Condemn the process via a faulting sibling.
+    crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_fault_now))
+        .expect("faulter should join the mutex-block process");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        drained,
+        "mutex-block process never released after fault-kill"
+    );
+    // The property under test: the kill freed the mutex.
+    assert!(
+        super::test_support::TEST_MUTEX.try_lock().is_some(),
+        "fault-killed holder orphaned TEST_MUTEX: guard was not dropped before exit"
+    );
+}

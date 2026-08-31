@@ -9,6 +9,8 @@ use crate::kernel::timer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimedOut;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interrupted;
 
 struct CompletionInner {
     pending: bool,                // Flag that gets set if signal() fires before any wait().
@@ -44,16 +46,22 @@ impl Completion {
             sched::unpark(&handle); // Checks for staleness before waking the thread
         }
     }
-
-    #[allow(dead_code)]
+    /// Set a thread to block until the completion is signalled
     pub fn wait(&self) {
         loop {
+            // Wrong-variant tripwire: a condemned user thread parked here would
+            // re-park forever once the switch-time kill conversions are deleted.
+            // Condemned threads must be on wait_interruptible.
+            assert!(
+                !sched::current_user_thread_needs_exit(),
+                "condemned user thread must use wait_interruptible, not wait"
+            );
             let mut inner = self.inner.lock();
             if inner.pending {
                 // Signal already fired
                 inner.pending = false;
                 drop(inner);
-                return;
+                return; // Early
             } else {
                 inner.waiter = Some(current_thread());
                 set_self_blocked();
@@ -65,7 +73,7 @@ impl Completion {
             }
         }
     }
-
+    /// Set a thread to wait until the completion is signalled, but with a timeout
     pub fn wait_with_deadline(&self, deadline_ms: u64) -> Result<(), TimedOut> {
         let abs_deadline_ms = deadline_ms.saturating_add(timer::elapsed_ms());
         loop {
@@ -86,6 +94,35 @@ impl Completion {
                     let mut inner = self.inner.lock();
                     inner.waiter = None;
                 }
+            }
+        }
+    }
+    /// Set a thread to wait until the completion is signalled.
+    /// The thread can be interrupted, in which case it will return
+    /// Err(Interrupted)
+    pub(crate) fn wait_interruptible(&self) -> Result<(), Interrupted> {
+        loop {
+            let mut inner = self.inner.lock();
+            // Check for signal at the start of the loop in case we have a quick return
+            // Otherwise we check after each wake
+            if inner.pending {
+                // Signal has been passed to this completion
+                // Clear the flag and return immediately
+                inner.pending = false;
+                drop(inner);
+                return Ok(());
+            }
+            // We are (re)setting up the completion - it needs to know which thread is waiting
+            inner.waiter = Some(current_thread());
+            sched::set_self_blocked(); // Set the thread status to blocked (takes sched lock while holding the completion lock)
+            drop(inner);
+            sched::park_if_blocked(); // Reschedule the current thread to reach it's Blocked state. Takes sched lock, hence dropping inner first.
+            // If we reach this point we've been unblocked - but this could be spurious, so clear state and re-loop
+            let mut inner = self.inner.lock();
+            inner.waiter = None;
+            // Check if we have been interrupted, in which case exit with error
+            if sched::current_user_thread_needs_exit() {
+                return Err(Interrupted);
             }
         }
     }
