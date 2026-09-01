@@ -22,6 +22,7 @@ use crate::kernel::fd;
 use crate::kernel::percpu;
 use crate::kernel::sync::with_interrupts_disabled;
 use crate::user;
+pub(crate) use deadline::{Deadline, Leeway};
 use stride::SCHEDULER;
 #[expect(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
@@ -129,23 +130,27 @@ pub fn post_switch_cleanup() {
 
 // SLEEP
 
-/// Blocks until the timer has passed the deadline
+/// Blocks until the timer has passed the absolute deadline.
 /// Time is measured in milliseconds
-#[allow(dead_code)]
+/// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep_until(deadline_ms: u64) {
-    SCHEDULER.sleep_until(deadline_ms, None);
+    let deadline = Deadline::from_ms(deadline_ms, Leeway::System);
+    SCHEDULER.sleep_until(deadline);
 }
-
-/// Blocks for `deadline` millseconds
-#[allow(dead_code)]
-pub fn sleep(deadline_ms: u64) {
-    SCHEDULER.sleep(deadline_ms);
+/// Blocks for `duration`
+/// Time is measured in milliseconds
+/// Uses the system default leeway (which is based on the thread's QoS)
+pub fn sleep(duration_ms: u64) {
+    let deadline = Deadline::after_ms(duration_ms, Leeway::System);
+    SCHEDULER.sleep_until(deadline);
 }
-
-/// Blocks for `deadline` millseconds
-#[allow(dead_code)]
-pub fn sleep_with_leeway(deadline_ms: u64, fixed_leeway_ms: u64) {
-    SCHEDULER.sleep_with_leeway(deadline_ms, fixed_leeway_ms);
+/// Blocks for `duration` in milliseconds given a `Leeway`
+///
+/// Use `Leeway::fixed_ms(leeway_in_ms)` if needed.
+#[cfg(test)]
+pub fn sleep_with_leeway_ms(duration_ms: u64, leeway: Leeway) {
+    let deadline = Deadline::after_ms(duration_ms, leeway);
+    SCHEDULER.sleep_until(deadline);
 }
 
 // THREAD EXIT
@@ -237,13 +242,13 @@ pub fn set_self_blocked() {
     SCHEDULER.set_self_blocked()
 }
 
-/// Set this thread to blocked state, with a wakeup deadline
-pub fn set_self_blocked_until(deadline_ms: u64) {
-    SCHEDULER.set_self_blocked_until(deadline_ms);
+/// Set this thread to blocked state, with a wakeup `Deadline`
+pub fn set_self_blocked_until(deadline: Deadline) {
+    SCHEDULER.set_self_blocked_until(deadline);
 }
-/// Park this thread in blocked state with wakeup deadline
-pub fn park_if_blocked_until(deadline_ms: u64) {
-    SCHEDULER.park_if_blocked_until(deadline_ms);
+/// Park this thread in blocked state with wake up `Deadline`
+pub fn park_if_blocked_until(deadline: Deadline) {
+    SCHEDULER.park_if_blocked_until(deadline);
 }
 
 /// Flat this thread as ready to be preemptively rescheduled

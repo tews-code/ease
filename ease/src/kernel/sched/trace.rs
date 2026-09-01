@@ -18,12 +18,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::ExitReason;
 use super::deadline::Deadline;
-use super::stride::PRIORITY_MIN;
+use super::stride::{PRIORITY_MIN, SchedInner};
 use super::threads::{PostSwitch, ThreadControlBlock};
 use crate::arch::hart_id;
 use crate::board::HARTS_MAX;
 use crate::kernel::percpu;
-use crate::kernel::sched::stride::SchedInner;
 use crate::kernel::sched::{Qos, SCHEDULER, State, THREADS_MAX};
 use crate::kernel::timer;
 
@@ -64,7 +63,7 @@ struct ThreadControlBlockTracePoint {
     next_waiter: Option<usize>,
     affinity: Option<u8>,
     user_thread: bool,
-    marked_for_exit: bool,
+    needs_user_exit: bool,
     ready_since: u64,
 }
 
@@ -140,7 +139,7 @@ unsafe fn stash_percpu(tp: *mut TracePoint) {
 // Safety: Caller must provide a valid pointer to a TracePoint
 unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[Option<ThreadControlBlock>]) {
     unsafe {
-        for (i, tcb_array) in tcbs.iter().enumerate().take(THREADS_MAX) {
+        for (idx, tcb_array) in tcbs.iter().enumerate().take(THREADS_MAX) {
             if let Some(tcb) = tcb_array {
                 let tcbtp = ThreadControlBlockTracePoint {
                     state: tcb.state,
@@ -152,10 +151,10 @@ unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[Option<ThreadControlBlock>]) {
                     next_waiter: tcb.next_waiter.map(|handle| handle.idx),
                     affinity: tcb.affinity,
                     user_thread: tcb.user.is_some(),
-                    marked_for_exit: tcb.marked_for_exit,
+                    needs_user_exit: SCHEDULER.needs_user_exit.get(idx),
                     ready_since: tcb.ready_since,
                 };
-                (*tp).threads[i] = Some(tcbtp); // copy
+                (*tp).threads[idx] = Some(tcbtp); // copy
             }
         }
     };
@@ -174,9 +173,7 @@ impl SchedInner {
             (*tp).time_stamp = timer::elapsed();
             stash_percpu(tp);
             stash_tcbs(tp, &self.thread_blocks.0);
-            for i in 0..THREADS_MAX {
-                (*tp).wake_overshoot[i] = self.wake_overshoot[i];
-            }
+            (*tp).wake_overshoot = self.wake_overshoot;
             (*tp).pick_miss = None;
         }
     }

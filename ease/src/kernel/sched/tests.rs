@@ -39,7 +39,7 @@
 // rebuilt. Real RP2350 hardware will have prompt interrupt delivery
 // and the bounds can be tightened then.
 
-use crate::kernel::sched::{ExitReason, Order, Qos};
+use crate::kernel::sched::{ExitReason, Leeway, Order, Qos};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // The partner thread and its progress counter (PARTNER_COUNT) live in
@@ -179,7 +179,7 @@ fn sleep_blocks_for_duration() {
 fn sleep_below_quantum_wakes_at_deadline() {
     ensure_partner_spawned();
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway(5, 0);
+    crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::None);
     let post_sleep = crate::kernel::timer::elapsed_ms();
     let elapsed = post_sleep - start;
     assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
@@ -209,7 +209,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
     fn long_leeway_sleeper() {
         // Short min, huge leeway: window [now+5ms, now+1005ms].
-        crate::kernel::sched::sleep_with_leeway(5, 1000);
+        crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::fixed_ms(1000));
         // Exit cleanly so the slot is recycled and we don't leave a
         // ghost thread disturbing later tests' scheduling.
         crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
@@ -221,10 +221,10 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
             .with_qos(Qos::Low)
             .spawn(long_leeway_sleeper);
     }
-    // Give the background sleeper a moment to reach its sleep_with_leeway.
+    // Give the background sleeper a moment to reach its sleep_with_leeway_ms.
     crate::kernel::sched::sleep(2);
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway(20, 0);
+    crate::kernel::sched::sleep_with_leeway_ms(20, Leeway::None);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     // Bound is generous: this test is a contract guard for future
     // regressions in the earliest_deadline / coalescing path, not a tight
@@ -254,7 +254,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     fn huge_leeway_sleeper() {
         // u64::MAX in both args — exercises every saturating site on the
         // path from public API to the Deadline struct.
-        crate::kernel::sched::sleep_with_leeway(5, u64::MAX);
+        crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::fixed_ms(u64::MAX));
         crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
     ensure_partner_spawned();
@@ -267,7 +267,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     // Give the background sleeper a moment to reach its sleep call.
     crate::kernel::sched::sleep(2);
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway(20, 0);
+    crate::kernel::sched::sleep_with_leeway_ms(20, Leeway::None);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     // Lower bound catches "bogus wrapped wakeup pulled main forward"
     // (the original arithmetic-overflow failure mode).

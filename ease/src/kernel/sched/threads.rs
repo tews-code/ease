@@ -14,7 +14,7 @@ use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
 use crate::sched::userloader;
 
-use super::deadline::Deadline;
+use super::deadline::{self, Deadline};
 
 pub(crate) const THREADS_MAX: usize = 16;
 
@@ -72,7 +72,6 @@ pub(super) struct ThreadControlBlock {
     pub(super) pass: u64,                 // The next ready thread with lowest pass wins
     pub(super) last_started_cycles: u64,  // Cycle stamp from last switch
     pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
-    pub(super) marked_for_exit: bool, // If set then thread will be forced to exit on next schedule
     pub(super) resources_released: bool, // If set then thread no longer uses any resources (e.g. file descriptors) except for cleanup
     #[cfg(feature = "trace")]
     pub(super) ready_since: u64, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
@@ -113,8 +112,7 @@ impl ThreadControlBlock {
             | State::Switching(PostSwitch::Sleeping(deadline))
             | State::BlockedUntil(deadline)
             | State::Switching(PostSwitch::BlockedUntil(deadline)) => {
-                let leeway = deadline.leeway(&self.qos);
-                Some(deadline.at_cycles.saturating_add(leeway))
+                Some(deadline.latest(&self.qos))
             }
             _ => None,
         }
@@ -148,7 +146,7 @@ impl Debug for ThreadControlBlock {
         writeln!(f, "user thread? {}", self.user.is_some())?;
         #[cfg(feature = "trace")]
         writeln!(f, "ready_since: {}", self.ready_since)?;
-        writeln!(f, "marked_for_exit: {}", self.marked_for_exit)
+        Ok(())
     }
 }
 
@@ -187,7 +185,6 @@ impl Threads {
             last_started_cycles: now,
             next_waiter: None,
             resources_released: false,
-            marked_for_exit: false,
             #[cfg(feature = "trace")]
             ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
         });
@@ -262,16 +259,10 @@ impl Threads {
             .min()
             .unwrap_or(0)
     }
-    /// Gets the soonest wake deadline (including leeway) including threads busy switching
-    /// Returns None if no threads are sleeping
-    pub(super) fn next_wake_due(&self) -> Option<u64> {
-        self.0
-            .iter()
-            .flatten()
-            .filter_map(|tcb| tcb.must_wake_by())
-            .min()
-    }
     /// Wakes a sleeping TCB and catches up its pass
+    ///
+    /// Returns a tuple containing the TCB's
+    /// (pass, deadline, affinity)
     pub(super) fn wake_if_due(
         &mut self,
         idx: usize,
@@ -279,17 +270,13 @@ impl Threads {
         pass_baseline: &mut Option<u64>,
         bonus: u64,
     ) -> Option<(u64, u64, Option<u8>)> {
-        // First take a immutable borrow to see whether we need to do any work here
+        // Borrows are sequenced, never overlapping: (1) shared borrow of the
+        // slot to see whether any work is due, (2) shared borrow of the whole
+        // array for the lazy pass baseline, (3) mutable borrow of the slot to
+        // apply the wake.
         let at_cycles = if let Some(tcb) = &self.0[idx] {
             match tcb.state {
-                State::Sleeping(Deadline {
-                    at_cycles,
-                    fixed_leeway: _,
-                })
-                | State::BlockedUntil(Deadline {
-                    at_cycles,
-                    fixed_leeway: _,
-                }) => Some(at_cycles),
+                State::Sleeping(deadline) | State::BlockedUntil(deadline) => Some(deadline.at()),
                 _ => None,
             }
         } else {
@@ -309,6 +296,15 @@ impl Threads {
             None
         }
     }
+    /// Gets the soonest wake deadline (including leeway) including threads busy switching
+    /// Returns None if no threads are sleeping
+    pub(super) fn next_wake_due(&self) -> Option<u64> {
+        self.0
+            .iter()
+            .flatten()
+            .filter_map(|tcb| tcb.must_wake_by())
+            .min()
+    }
     /// Returns whether there are contending threads (that will need a slice switch)
     pub(super) fn is_under_contention(&self) -> bool {
         self.0.iter().flatten().any(|tcb| tcb.state == State::Ready)
@@ -322,18 +318,21 @@ impl Threads {
             u64::MAX
         };
         let next_wake = self.next_wake_due();
-        let wake = next_wake.inspect(|&b| {
+        let wake = next_wake.inspect(|&coalesce_deadline_cycles| {
             for slot in &mut self.0 {
                 if let Some(tcb) = slot
                     && let State::Sleeping(deadline)
                     | State::Switching(PostSwitch::Sleeping(deadline)) = &mut tcb.state
                 {
-                    let leeway = deadline.leeway(&tcb.qos);
-                    if b >= deadline.at_cycles && b <= deadline.at_cycles.saturating_add(leeway) {
-                        deadline.at_cycles = b;
-                        deadline.fixed_leeway = Some(0);
-                    } else if deadline.fixed_leeway.is_none() {
-                        deadline.fixed_leeway = Some(leeway);
+                    if deadline.contains(coalesce_deadline_cycles, &tcb.qos) {
+                        deadline.set(coalesce_deadline_cycles, deadline::Leeway::None);
+                    } else {
+                        if let deadline::Leeway::Fixed(leeway_cycles) = deadline.leeway() {
+                            deadline.set(
+                                coalesce_deadline_cycles,
+                                deadline::Leeway::Fixed(leeway_cycles),
+                            );
+                        }
                     }
                 }
             }

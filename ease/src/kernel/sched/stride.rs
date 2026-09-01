@@ -8,9 +8,9 @@ use crate::kernel::alloc::Order;
 use crate::kernel::collection::{AtomicBitmap, bitmap_words_for};
 use crate::kernel::fd;
 use crate::kernel::ipi;
+use crate::kernel::sched::Deadline;
 use crate::kernel::sched::MemRegion;
 use crate::kernel::sched::THREADS_MAX;
-use crate::kernel::sched::deadline::Deadline;
 use crate::kernel::sched::process;
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
@@ -211,8 +211,6 @@ pub(super) struct Scheduler {
     // Flag for each (user) thread - if it must be exited at next U mode trap
     // Only set once one-way within a user thread's lifetime so lock-free reading is safe
     // Note that the users of the flag should check that the indexed thread is indeed a user thread
-    // Currently mirrors `tcb.marked_for_exit`, which remains the authoritative copy until the
-    // switch-time kill conversions are deleted; then this bitmap becomes the sole truth.
     pub(super) needs_user_exit: AtomicBitmap<THREADS_MAX, { bitmap_words_for(THREADS_MAX) }>,
     run_cycles: [CounterU64; THREADS_MAX],
 }
@@ -500,13 +498,7 @@ impl Scheduler {
                 return;
             };
             // Ready to switch
-            // Set current thread to the new state, unless it is marked for exit
-            curr.state = if curr.marked_for_exit {
-                State::Switching(PostSwitch::Dead(ExitReason::Fault))
-            } else {
-                State::Switching(new_state)
-            };
-
+            curr.state = State::Switching(new_state);
             next.state = State::Running;
             next.last_started_cycles = now_cycles;
 
@@ -557,7 +549,12 @@ impl Scheduler {
             self.sched.lock().snapshot_raw("post-resume");
         });
     }
-
+    /// Preemptive involuntary reschedule
+    ///
+    /// The current thread is compared to [pick_next_if_fairer_mut] and
+    /// can be switched out at that point.
+    ///
+    /// Note: we don't force needs_user_exit threads to exit here - they must complete preempt
     pub(super) fn schedule(&self) {
         if percpu::take_needs_reschedule() {
             with_interrupts_disabled(|_cs| {
@@ -569,16 +566,6 @@ impl Scheduler {
                     .expect("the current thread must have a valid TCB");
                 let ran = curr_tcb.slice_ended(now_cycles);
                 unsafe { self.run_cycles[curr_idx].add(ran) };
-
-                // Check if thread is marked for exit
-                let marked_for_exit = sched.thread_blocks.0[percpu::current_thread_idx()]
-                    .as_ref()
-                    .is_some_and(|tcb| tcb.marked_for_exit);
-                if marked_for_exit {
-                    drop(sched);
-                    self.exit(ExitReason::Fault);
-                }
-
                 // Wake any sleeping threads before we pick the next (if fairer)
                 self.wake_sleeping_threads(&mut sched);
                 // Pick the next thread to run (or keep running if has lowest pass)
@@ -656,34 +643,10 @@ impl Scheduler {
     pub(super) fn yield_now(&self) {
         self.reschedule(None, PostSwitch::Ready);
     }
-
-    /// Blocks until the timer has passed the deadline
-    ///
-    /// Time is measured in milliseconds
-    pub(super) fn sleep_until(&self, deadline_ms: u64, fixed_leeway_ms: Option<u64>) {
-        let deadline = Deadline {
-            at_cycles: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
-            fixed_leeway: fixed_leeway_ms.map(|l| l.saturating_mul(timer::CYCLES_PER_MS)),
-        };
+    /// Blocks until the timer has passed the `Deadline`
+    pub(super) fn sleep_until(&self, deadline: Deadline) {
         self.reschedule(None, PostSwitch::Sleeping(deadline));
     }
-
-    /// Blocks for `deadline` milliseconds
-    #[allow(dead_code)]
-    pub(super) fn sleep(&self, deadline_ms: u64) {
-        self.sleep_until(
-            crate::kernel::timer::elapsed_ms().saturating_add(deadline_ms),
-            None,
-        );
-    }
-
-    /// Blocks for `deadline` milliseconds
-    #[allow(dead_code)]
-    pub(super) fn sleep_with_leeway(&self, deadline_ms: u64, leeway_ms: u64) {
-        let now_ms = crate::kernel::timer::elapsed_ms();
-        self.sleep_until(now_ms.saturating_add(deadline_ms), Some(leeway_ms));
-    }
-
     /// Get currently running thread total cpu cycles
     pub fn get_current_cycles(&self, tcb_idx: usize) -> u64 {
         self.run_cycles[tcb_idx].get()
@@ -731,13 +694,9 @@ impl Scheduler {
     pub(super) fn park_if_blocked(&self) {
         self.reschedule(Some(State::Blocked), PostSwitch::Blocked);
     }
-
-    // Park the current thread if it is in blocked until deadline state
-    pub(super) fn park_if_blocked_until(&self, deadline_ms: u64) {
-        let deadline = Deadline {
-            at_cycles: deadline_ms * timer::CYCLES_PER_MS,
-            fixed_leeway: None,
-        };
+    /// Park the current thread if it is in Blocked statue until the given `Deadline`
+    /// at which point it will be woken.
+    pub(super) fn park_if_blocked_until(&self, deadline: Deadline) {
         self.reschedule(
             Some(State::BlockedUntil(deadline)),
             PostSwitch::BlockedUntil(deadline),
@@ -858,11 +817,7 @@ impl Scheduler {
     }
 
     /// Set this thread to blocked state without rescheduling with a wake up deadline
-    pub fn set_self_blocked_until(&self, deadline_ms: u64) {
-        let deadline = Deadline {
-            at_cycles: deadline_ms * timer::CYCLES_PER_MS,
-            fixed_leeway: None,
-        };
+    pub fn set_self_blocked_until(&self, deadline: Deadline) {
         let current = self.current_thread();
         let mut sched = self.sched.lock();
         if let Some(tcb) = sched.thread_blocks.0[current.idx].as_mut() {

@@ -12,6 +12,7 @@ use super::{ExitReason, State, THREADS_MAX, clear_wakeup_signal, set_needs_wakeu
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
+use crate::kernel::sched::{Deadline, Leeway};
 use crate::kernel::sync::IrqSpinLockGuard;
 
 pub(crate) const MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
@@ -244,7 +245,6 @@ impl Scheduler {
                 match tcb.state {
                     State::Blocked | State::BlockedUntil(_) => {
                         // Set marked for exit
-                        tcb.marked_for_exit = true;
                         self.needs_user_exit.set(idx);
                         // Now set to Ready
                         let (did_unpark, affinity) = sched.thread_blocks.make_blocked_ready(idx);
@@ -264,7 +264,6 @@ impl Scheduler {
                     State::Ready | State::Sleeping(_) => release = true,
                     State::Running => {
                         // If it is running, it must be on the other HART so send an IPI
-                        tcb.marked_for_exit = true;
                         self.needs_user_exit.set(idx);
                         ipi::send(ipi::RESCHEDULE);
                     }
@@ -287,6 +286,10 @@ impl Scheduler {
     /// Panics if
     /// - called on a kernel thread
     pub(super) fn exit_user_thread(&self, reason: ExitReason) -> ! {
+        // Set multiple 100's of milliseconds as some tests show a long tail (over 200ms) of threads waiting to be scheduled under heavy load
+        // Also set to < 2_000 which is the individual test timeout
+        const CLAIM_ROLE_TIMEOUT_MS: u64 = 1_500;
+
         let current_thread_idx = percpu::current_thread_idx();
         let mut sched = self.sched.lock();
         let process_idx = sched
@@ -302,17 +305,33 @@ impl Scheduler {
         drop(sched);
         // If I am the teardown thread, firstly loop waiting for other threads to finish their exits
         if claimed_role {
+            // Set a wait timeout in case the user thread hangs; No leeway on this wakeup
+            let deadline = Deadline::after_ms(CLAIM_ROLE_TIMEOUT_MS, Leeway::None);
             loop {
                 let mut sched = self.sched.lock();
                 if sched.thread_count(process_idx) == 1 {
                     break;
                 }
+                if deadline.has_passed() {
+                    dprintln!(
+                        "User thread {} timed out waiting for siblings to exit for process {}",
+                        current_thread_idx,
+                        process_idx
+                    );
+                    dprintln!("TCB Table:");
+                    for tcb in sched.thread_blocks.0.iter() {
+                        dprintln!("--------------");
+                        dprintln!("{:?}", tcb);
+                    }
+                    drop(sched);
+                    panic!("Unable to exit faulting user process");
+                }
                 sched.thread_blocks.0[current_thread_idx]
                     .as_mut()
                     .expect("current thread must have a valid TCB")
-                    .state = State::Blocked;
+                    .state = State::BlockedUntil(deadline);
                 drop(sched);
-                self.park_if_blocked();
+                self.park_if_blocked_until(deadline);
             }
         }
         // Mark this thread as no longer using resources

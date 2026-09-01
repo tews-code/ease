@@ -209,6 +209,15 @@ mod kernel {
         pub const THREADS_MAX: usize = 16;
 
         #[derive(Clone, Copy)]
+        pub(crate) struct Deadline;
+
+        impl Deadline {
+            pub(crate) fn has_passed(&self) -> bool {
+                panic!("sched stub: must not be called from the lib crate");
+            }
+        }
+
+        #[derive(Clone, Copy)]
         pub struct ThreadHandle {
             pub id: u32,
             pub idx: usize,
@@ -252,11 +261,11 @@ mod kernel {
             panic!("sched stub: must not be called from the lib crate");
         }
 
-        pub fn set_self_blocked_until(_deadline_ms: u64) {
+        pub fn set_self_blocked_until(_deadline: Deadline) {
             panic!("sched stub: must not be called from the lib crate");
         }
         /// Park this thread in blocked state with wakeup deadline
-        pub fn park_if_blocked_until(_deadline_ms: u64) {
+        pub fn park_if_blocked_until(_deadline: Deadline) {
             panic!("sched stub: must not be called from the lib crate");
         }
 

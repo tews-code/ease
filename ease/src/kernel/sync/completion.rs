@@ -3,9 +3,10 @@
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
-use crate::kernel::sched::{self, ThreadHandle, current_thread, park_if_blocked, set_self_blocked};
+use crate::kernel::sched::{
+    self, Deadline, ThreadHandle, current_thread, park_if_blocked, set_self_blocked,
+};
 use crate::kernel::sync::IrqSpinLock;
-use crate::kernel::timer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimedOut;
@@ -73,9 +74,8 @@ impl Completion {
             }
         }
     }
-    /// Set a thread to wait until the completion is signalled, but with a timeout
-    pub fn wait_with_deadline(&self, deadline_ms: u64) -> Result<(), TimedOut> {
-        let abs_deadline_ms = deadline_ms.saturating_add(timer::elapsed_ms());
+    /// Set a thread to wait until the completion is signalled, but with a timeout.
+    pub fn wait_with_deadline(&self, deadline: Deadline) -> Result<(), TimedOut> {
         loop {
             let mut inner = self.inner.lock();
             if inner.pending {
@@ -83,14 +83,14 @@ impl Completion {
                 inner.waiter = None;
                 return Ok(());
             } else {
-                let now = timer::elapsed_ms();
-                if now >= abs_deadline_ms {
+                // Check if we have passed the deadline - ignoring any leeway
+                if deadline.has_passed() {
                     return Err(TimedOut);
                 } else {
                     inner.waiter = Some(current_thread());
-                    sched::set_self_blocked_until(abs_deadline_ms);
+                    sched::set_self_blocked_until(deadline);
                     drop(inner);
-                    sched::park_if_blocked_until(abs_deadline_ms);
+                    sched::park_if_blocked_until(deadline);
                     let mut inner = self.inner.lock();
                     inner.waiter = None;
                 }
