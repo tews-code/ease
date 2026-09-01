@@ -358,10 +358,10 @@ impl Write for ColBuf {
 /// Render a deadline as `tag@<wake-ms>`, matching the timestamp column, or
 /// `tag@MAX` for the park-forever sentinel (`u64::MAX`).
 fn write_deadline(w: &mut impl Write, tag: &str, d: &Deadline) {
-    if d.at_cycles == u64::MAX {
+    if d.at() == u64::MAX {
         let _ = write!(w, "{tag}@MAX");
     } else {
-        let _ = write!(w, "{tag}@{}", d.at_cycles / timer::CYCLES_PER_MS);
+        let _ = write!(w, "{tag}@{}", d.at() / timer::CYCLES_PER_MS);
     }
 }
 

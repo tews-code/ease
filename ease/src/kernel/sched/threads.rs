@@ -324,15 +324,10 @@ impl Threads {
                     && let State::Sleeping(deadline)
                     | State::Switching(PostSwitch::Sleeping(deadline)) = &mut tcb.state
                 {
+                    // For threads with system-derived leeway, this will recalculate the leeway
+                    // which will become smaller as the deadline nears.
                     if deadline.contains(coalesce_deadline_cycles, &tcb.qos) {
                         deadline.set(coalesce_deadline_cycles, deadline::Leeway::None);
-                    } else {
-                        if let deadline::Leeway::Fixed(leeway_cycles) = deadline.leeway() {
-                            deadline.set(
-                                coalesce_deadline_cycles,
-                                deadline::Leeway::Fixed(leeway_cycles),
-                            );
-                        }
                     }
                 }
             }

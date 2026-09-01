@@ -2667,3 +2667,42 @@ fn fault_kill_frees_mutex_held_across_interruptible_wait() {
         "fault-killed holder orphaned TEST_MUTEX: guard was not dropped before exit"
     );
 }
+
+// The contract this pins: leeway NEVER means early. A fixed-leeway
+// sleeper permits waking up to `leeway` AFTER its deadline; no leeway
+// setting permits waking before it. Red-first against the Deadline
+// refactor's coalescing port: next_timer_deadline's else-branch dragged
+// a Fixed-leeway sleeper's deadline back to the group wake time, so a
+// long Fixed sleeper sharing the kernel with short sleepers (the
+// partner thread sleeps constantly) became wakeable at the group's
+// early wake — sleep_with_leeway_ms(100, ..) returning in single-digit
+// milliseconds. Fix: sleepers outside the coalescing window are left
+// untouched. The wide upper bound reflects that Fixed(1000) makes
+// wakes up to ~1.1s legal; the LOWER bound is the property under test.
+#[test_case]
+fn fixed_leeway_sleeper_never_wakes_early() {
+    // The neighbor must hold a FUTURE-dated deadline while the Fixed
+    // sleeper parks: an already-due sleeper (like the 1ms partner) is
+    // evicted by the wake sweep before next_timer_deadline computes the
+    // group wake, leaving the Fixed sleeper to self-coalesce legally to
+    // its own latest. A 30ms neighbor keeps a sub-window group wake
+    // alive across the Fixed sleeper's park.
+    crate::kernel::sched::Builder::new()
+        .with_stack_class(Order::KB2)
+        .spawn(|| crate::kernel::sched::sleep(30))
+        .expect("neighbor sleeper should spawn");
+    crate::kernel::sched::sleep(2); // let the neighbor reach its sleep
+    let start = crate::kernel::timer::elapsed_ms();
+    crate::kernel::sched::sleep_with_leeway_ms(100, Leeway::fixed_ms(1000));
+    let elapsed = crate::kernel::timer::elapsed_ms() - start;
+    assert!(
+        elapsed >= 95,
+        "fixed-leeway sleeper woke BEFORE its deadline: {} ms (leeway must never mean early)",
+        elapsed
+    );
+    assert!(
+        elapsed <= 1300,
+        "sleeper overshot even its leeway: {} ms",
+        elapsed
+    );
+}

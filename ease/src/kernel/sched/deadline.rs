@@ -56,7 +56,7 @@ pub(crate) struct Deadline {
 }
 
 impl Deadline {
-    /// New deadline from millisecond values.
+    /// New deadline from millisecond values and given `Leeway`.
     pub(crate) fn from_ms(deadline_ms: u64, leeway: Leeway) -> Self {
         Self {
             at: deadline_ms.saturating_mul(timer::CYCLES_PER_MS),
