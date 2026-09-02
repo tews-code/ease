@@ -85,6 +85,7 @@ fn kernel_init() {
     kernel::alloc::init_global_allocator();
     kernel::timer::init();
     drivers::plic::init();
+    drivers::uart::init();
     drivers::plic::enable(uart::IRQ);
     sched::bootstrap(0);
     kernel::ipi::init();
