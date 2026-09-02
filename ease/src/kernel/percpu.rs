@@ -4,7 +4,7 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch;
-use crate::kernel::sched::THREADS_MAX;
+use crate::kernel::sched::{Qos, THREADS_MAX};
 use crate::kernel::trap::Work;
 
 #[repr(C)]
@@ -17,6 +17,7 @@ struct PerCpu {
     current_kernel_stack_base: UnsafeCell<*mut u8>,
     current_kernel_stack_top: UnsafeCell<*mut u8>,
     current_user_stack_base: UnsafeCell<Option<*mut u8>>,
+    current_qos: UnsafeCell<Qos>, // Current thread's Qos affects deadlines
     resume_work: UnsafeCell<Work>, // On trap return the thread's deferred work
     resume_sp: UnsafeCell<usize>,
     resume_mstatus: UnsafeCell<usize>, // Deferred work resumes with this mstatus
@@ -37,6 +38,7 @@ impl PerCpu {
             current_kernel_stack_base: UnsafeCell::new(core::ptr::null_mut()),
             current_kernel_stack_top: UnsafeCell::new(core::ptr::null_mut()),
             current_user_stack_base: UnsafeCell::new(None),
+            current_qos: UnsafeCell::new(Qos::High),
             resume_work: UnsafeCell::new(Work::Preempt), // This is option 0 in the NOLOAD percpu segment - which is what we want
             resume_sp: UnsafeCell::new(0),
             resume_mstatus: UnsafeCell::new(0),
@@ -168,6 +170,17 @@ pub fn current_user_stack_base() -> Option<*mut u8> {
 pub fn set_current_user_stack_base(stack_base: Option<*mut u8>) {
     // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
     unsafe { *this_hart().current_user_stack_base.get() = stack_base };
+}
+
+/// Get the current thread QoS
+pub fn current_qos() -> Qos {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().current_qos.get() }
+}
+/// Set the current thread QoS
+pub fn set_current_qos(qos: Qos) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
+    unsafe { *this_hart().current_qos.get() = qos };
 }
 
 /// Get the resume stack pointer

@@ -39,7 +39,7 @@
 // rebuilt. Real RP2350 hardware will have prompt interrupt delivery
 // and the bounds can be tightened then.
 
-use crate::kernel::sched::{ExitReason, Leeway, Order, Qos};
+use crate::kernel::sched::{ExitReason, Order, Qos};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // The partner thread and its progress counter (PARTNER_COUNT) live in
@@ -179,7 +179,7 @@ fn sleep_blocks_for_duration() {
 fn sleep_below_quantum_wakes_at_deadline() {
     ensure_partner_spawned();
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::None);
+    crate::kernel::sched::sleep_with_leeway_ms(5, 0);
     let post_sleep = crate::kernel::timer::elapsed_ms();
     let elapsed = post_sleep - start;
     assert!(elapsed >= 5, "sleep too short: {} ms", elapsed);
@@ -209,7 +209,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     static BG_SPAWNED: AtomicUsize = AtomicUsize::new(0);
     fn long_leeway_sleeper() {
         // Short min, huge leeway: window [now+5ms, now+1005ms].
-        crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::fixed_ms(1000));
+        crate::kernel::sched::sleep_with_leeway_ms(5, 1000);
         // Exit cleanly so the slot is recycled and we don't leave a
         // ghost thread disturbing later tests' scheduling.
         crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
@@ -224,7 +224,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     // Give the background sleeper a moment to reach its sleep_with_leeway_ms.
     crate::kernel::sched::sleep(2);
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway_ms(20, Leeway::None);
+    crate::kernel::sched::sleep_with_leeway_ms(20, 0);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     // Bound is generous: this test is a contract guard for future
     // regressions in the earliest_deadline / coalescing path, not a tight
@@ -254,7 +254,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     fn huge_leeway_sleeper() {
         // u64::MAX in both args — exercises every saturating site on the
         // path from public API to the Deadline struct.
-        crate::kernel::sched::sleep_with_leeway_ms(5, Leeway::fixed_ms(u64::MAX));
+        crate::kernel::sched::sleep_with_leeway_ms(5, u64::MAX);
         crate::kernel::sched::exit_kernel_thread(ExitReason::Exit)
     }
     ensure_partner_spawned();
@@ -267,7 +267,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     // Give the background sleeper a moment to reach its sleep call.
     crate::kernel::sched::sleep(2);
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway_ms(20, Leeway::None);
+    crate::kernel::sched::sleep_with_leeway_ms(20, 0);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     // Lower bound catches "bogus wrapped wakeup pulled main forward"
     // (the original arithmetic-overflow failure mode).
@@ -2693,7 +2693,7 @@ fn fixed_leeway_sleeper_never_wakes_early() {
         .expect("neighbor sleeper should spawn");
     crate::kernel::sched::sleep(2); // let the neighbor reach its sleep
     let start = crate::kernel::timer::elapsed_ms();
-    crate::kernel::sched::sleep_with_leeway_ms(100, Leeway::fixed_ms(1000));
+    crate::kernel::sched::sleep_with_leeway_ms(100, 1000);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     assert!(
         elapsed >= 95,
@@ -2705,4 +2705,49 @@ fn fixed_leeway_sleeper_never_wakes_early() {
         "sleeper overshot even its leeway: {} ms",
         elapsed
     );
+}
+
+// Institutionalizes the console-backpressure discovery (2026-09-02): the
+// old UART writer deadlocked when the TX ring filled — it spun waiting
+// for the drain interrupt while holding the IrqSpinLock that masked it.
+// This test makes the overflow deterministic: a single print!() larger
+// than TX_BUF runs entirely under the writer lock (interrupts off), so
+// no drain interrupt can empty the ring mid-write — the ring MUST fill
+// and every further byte MUST go through the writer's self-drain valve.
+// A helper floods from (usually) the other hart at the same time, so the
+// valve also contends with the real interrupt consumer for the drain
+// lock. Success is simply completion: under the old driver this test
+// hangs mid-print, exactly like ghost (d)'s truncated console lines.
+#[test_case]
+fn console_flood_survives_tx_backpressure() {
+    static FLOOD_DONE: AtomicUsize = AtomicUsize::new(0);
+    FLOOD_DONE.store(0, Ordering::Relaxed);
+
+    fn flooder() {
+        // Width padding makes fmt emit kilobytes through one locked writer
+        // session without us allocating anything.
+        print!("{:>3000}", "#");
+        FLOOD_DONE.store(1, Ordering::Release);
+    }
+    crate::kernel::sched::Builder::new()
+        .with_stack_class(Order::KB2)
+        .spawn(flooder)
+        .expect("flooder should spawn");
+
+    // Main thread floods concurrently: four oversized prints, each larger
+    // than the whole TX ring.
+    for _ in 0..4 {
+        print!("{:>2000}", "#");
+    }
+    println!();
+
+    let mut done = false;
+    for _ in 0..200 {
+        if FLOOD_DONE.load(Ordering::Acquire) == 1 {
+            done = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(done, "flooder thread never completed its oversized print");
 }

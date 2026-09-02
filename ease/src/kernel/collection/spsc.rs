@@ -1,4 +1,5 @@
 //! Single producer single consumer ring buffer
+//! Lock free
 
 use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;

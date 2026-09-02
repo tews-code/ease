@@ -5,16 +5,11 @@ use alloc::fmt::Debug;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU16, Ordering};
 
+use super::{Qos, deadline::Deadline, process, stride::PRIORITY_MIN, userloader};
 use crate::kernel::alloc::MemRegion;
-use crate::kernel::sched::Qos;
-use crate::kernel::sched::process;
-use crate::kernel::sched::stride::PRIORITY_MIN;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
-use crate::sched::userloader;
-
-use super::deadline::{self, Deadline};
 
 pub(crate) const THREADS_MAX: usize = 16;
 
@@ -111,9 +106,7 @@ impl ThreadControlBlock {
             State::Sleeping(deadline)
             | State::Switching(PostSwitch::Sleeping(deadline))
             | State::BlockedUntil(deadline)
-            | State::Switching(PostSwitch::BlockedUntil(deadline)) => {
-                Some(deadline.latest(&self.qos))
-            }
+            | State::Switching(PostSwitch::BlockedUntil(deadline)) => Some(deadline.latest()),
             _ => None,
         }
     }
@@ -326,8 +319,8 @@ impl Threads {
                 {
                     // For threads with system-derived leeway, this will recalculate the leeway
                     // which will become smaller as the deadline nears.
-                    if deadline.contains(coalesce_deadline_cycles, &tcb.qos) {
-                        deadline.set(coalesce_deadline_cycles, deadline::Leeway::None);
+                    if deadline.contains(coalesce_deadline_cycles) {
+                        deadline.coalesce_to(coalesce_deadline_cycles);
                     }
                 }
             }

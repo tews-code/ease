@@ -22,6 +22,7 @@ trace = []
 # and runs only the benchmarks, no functional tests. Not part of test-all.
 bench = []
 paint-stack = []
+uart-throttle = []
 test-alloc = []
 test-boot-data = []
 test-clint = []

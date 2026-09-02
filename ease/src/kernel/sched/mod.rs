@@ -22,15 +22,16 @@ use crate::kernel::fd;
 use crate::kernel::percpu;
 use crate::kernel::sync::with_interrupts_disabled;
 use crate::user;
-pub(crate) use deadline::{Deadline, Leeway};
+pub(crate) use deadline::Deadline;
 use stride::SCHEDULER;
 #[expect(unused_imports)]
 pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
 pub(crate) use threads::{ExitReason, State, THREADS_MAX, ThreadHandle};
 
 #[derive(Debug, Copy, Clone)]
+#[repr(u8)]
 pub enum Qos {
-    High,
+    High, // Default (0 option) - needed as percpu initiated with this value
     Low,
 }
 
@@ -134,22 +135,20 @@ pub fn post_switch_cleanup() {
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep_until(deadline_ms: u64) {
-    let deadline = Deadline::from_ms(deadline_ms, Leeway::System);
+    let deadline = Deadline::from_ms_with_system_leeway(deadline_ms);
     SCHEDULER.sleep_until(deadline);
 }
 /// Blocks for `duration`
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep(duration_ms: u64) {
-    let deadline = Deadline::after_ms(duration_ms, Leeway::System);
+    let deadline = Deadline::after_ms_with_system_leeway(duration_ms);
     SCHEDULER.sleep_until(deadline);
 }
-/// Blocks for `duration` in milliseconds given a `Leeway`
-///
-/// Use `Leeway::fixed_ms(leeway_in_ms)` if needed.
+/// Blocks for `duration` in milliseconds given a leeway in milliseconds
 #[cfg(test)]
-pub fn sleep_with_leeway_ms(duration_ms: u64, leeway: Leeway) {
-    let deadline = Deadline::after_ms(duration_ms, leeway);
+pub fn sleep_with_leeway_ms(duration_ms: u64, leeway_ms: u64) {
+    let deadline = Deadline::after_ms(duration_ms, leeway_ms);
     SCHEDULER.sleep_until(deadline);
 }
 

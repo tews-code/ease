@@ -4,6 +4,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::threads::PostSwitch;
 use super::userloader;
@@ -12,7 +13,6 @@ use super::{ExitReason, State, THREADS_MAX, clear_wakeup_signal, set_needs_wakeu
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
-use crate::kernel::sched::{Deadline, Leeway};
 use crate::kernel::sync::IrqSpinLockGuard;
 
 pub(crate) const MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
@@ -306,7 +306,7 @@ impl Scheduler {
         // If I am the teardown thread, firstly loop waiting for other threads to finish their exits
         if claimed_role {
             // Set a wait timeout in case the user thread hangs; No leeway on this wakeup
-            let deadline = Deadline::after_ms(CLAIM_ROLE_TIMEOUT_MS, Leeway::None);
+            let deadline = Deadline::after_ms(CLAIM_ROLE_TIMEOUT_MS, 0);
             loop {
                 let mut sched = self.sched.lock();
                 if sched.thread_count(process_idx) == 1 {

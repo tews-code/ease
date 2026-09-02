@@ -181,6 +181,7 @@ impl SchedInner {
             percpu::set_switching_from_thread_idx(switching_from_thread_idx);
             percpu::set_current_kernel_stack_base(stack.base().as_ptr());
             percpu::set_current_kernel_stack_top(stack.top().as_ptr());
+            percpu::set_current_qos(tcb.qos);
             if let Some(user_context) = &tcb.user {
                 percpu::set_current_user_stack_base(Some(user_context.stack.base().as_ptr()));
                 // For user thread merge the thread's stack and set pmp
