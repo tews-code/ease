@@ -165,7 +165,7 @@ fn sleep_blocks_for_duration() {
     crate::kernel::sched::sleep(100);
     let elapsed = crate::kernel::timer::elapsed_ms() - start;
     assert!(elapsed >= 95, "sleep too short: {} ms", elapsed);
-    assert!(elapsed <= 150, "sleep too long: {} ms", elapsed);
+    assert!(elapsed <= 115, "sleep too long: {} ms", elapsed);
 }
 
 /// Step 3 verification: a sub-slice-quantum sleep wakes at its actual
@@ -188,7 +188,7 @@ fn sleep_below_quantum_wakes_at_deadline() {
     // here is the lower bound (>= 5): a sub-quantum sleep must not be rounded
     // up to a slice. Tighten toward ~25 ms once the tail is fixed.
     assert!(
-        elapsed <= 120,
+        elapsed <= 25,
         "sub-quantum sleep rounded to slice boundary: {} ms",
         elapsed
     );
@@ -233,7 +233,7 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     // RESIDUAL-TAIL: 110 ms also absorbs the residual wake-latency tail (a
     // Ready thread briefly passed over; tracked for follow-up).
     assert!(
-        elapsed <= 120,
+        elapsed <= 30,
         "tight sleeper dragged by long-leeway neighbor: {} ms",
         elapsed
     );
@@ -281,7 +281,7 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
     // thread briefly passed over; tracked for follow-up). A real coalescing
     // regression would be far larger. Tighten toward ~50 ms once fixed.
     assert!(
-        elapsed <= 120,
+        elapsed <= 40,
         "tight sleeper delayed by huge-leeway neighbor: {} ms",
         elapsed
     );
@@ -363,7 +363,7 @@ fn fair_stride_resists_wake_spammer() {
     // Original wake-spam bug produced ~2:1 spammer:hog. The 3:2 bound
     // catches it with margin while tolerating per-run scheduler jitter.
     assert!(
-        s_delta * 2 <= h_delta * 3,
+        s_delta * 2 <= h_delta,
         "spammer dominated (wake-spam regression?): spammer={}, hog={}",
         s_delta,
         h_delta
@@ -442,7 +442,7 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
     // over for a few slices (distinct from the fixed threads-lock starvation;
     // tracked for follow-up). Tighten toward ~40 ms once that tail is fixed.
     assert!(
-        elapsed <= 120,
+        elapsed <= 40,
         "Qos::High wake delayed (likely pulled by Low neighbor): {} ms",
         elapsed
     );
@@ -553,7 +553,7 @@ fn minimal_wake_latency_under_two_busy_harts() {
     // bound keeps a regression guard (a real stall would be >>200 ms) without
     // penalising the IPI's win on the common case.
     assert!(
-        worst <= 200,
+        worst <= 100,
         "woken thread delayed despite busy load: worst sleep(20) = {worst} ms"
     );
 }
@@ -577,7 +577,7 @@ fn sleep_until_past_returns_quickly() {
     // 120 ms here; tracked for follow-up). Tighten toward ~15 ms once fixed. A
     // genuine wfi-block regression would be a whole sleep duration.
     assert!(
-        elapsed <= 160,
+        elapsed <= 20,
         "past deadline should return quickly, took {} ms",
         elapsed
     );
@@ -990,7 +990,7 @@ fn mutex_holder_sleep_parks_contender() {
     // a spinning (~1 ms) acquire, so it still catches spin-instead-of-park.
     // Tighten toward HOLD_MS-50 once the tail is fixed.
     assert!(
-        latency >= HOLD_MS as usize - 90,
+        latency >= HOLD_MS as usize - 40,
         "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking.\n  \
          T0={} ms (reference). All times below are ms-since-T0.\n  \
          holder_locked          @ +{} ms\n  \
@@ -1129,7 +1129,7 @@ fn spawn_to_first_instruction_latency() {
     // latency tail (a Ready thread briefly passed over; tracked for follow-up).
     // A much larger value would mean the spawner monopolized the CPU.
     assert!(
-        latency <= 120,
+        latency <= 30,
         "child took {} ms to start running after spawn (spawn @ {} ms, first instruction @ {} ms)",
         latency,
         spawn,
@@ -1283,7 +1283,7 @@ fn mutex_holder_parks_contender_with_completion() {
     // measured latency. Still ~15x above a spinning (~1 ms) acquire. Tighten
     // toward HOLD_MS-25 once the tail is fixed.
     assert!(
-        latency >= HOLD_MS as usize - 90,
+        latency >= HOLD_MS as usize - 40,
         "contender acquired too quickly ({} ms < {} ms) — likely spinning instead of parking.\n  \
          T0={} ms (reference). All times below are ms-since-T0.\n  \
          holder_locked          @ +{} ms\n  \
@@ -1384,7 +1384,7 @@ fn sleep10_wakes_promptly_under_partner_load() {
     // of wakes briefly spike to 40-80 ms; tracked for follow-up). Tighten
     // toward ~35 ms once fixed.
     assert!(
-        worst <= 120,
+        worst <= 40,
         "worst sleep(10) over {} samples was {} ms (avg {} ms) — wake-from-sleep is delayed beyond one slice quantum.\n  \
          samples (ms): [{}, {}, {}, {}, {}, {}, {}, {}, {}, {}]",
         N_SAMPLES,
@@ -1875,7 +1875,7 @@ fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
     // + margin). The sleeper's wake can be briefly passed over for a few slices
     // (tracked for follow-up). Tighten toward ~160 ms once fixed.
     assert!(
-        elapsed <= 220,
+        elapsed <= 130,
         "sleeper failed to reclaim the CPU from the hog within bound \
          (forced preemption not firing?): {} ms",
         elapsed
