@@ -1,4 +1,17 @@
 //! Spinlocks
+//!
+//! The IrqSpinLock disables interrupts for the duration that the lock is held.
+//! It is a fair (ordered) and pure ticket lock with two operations:
+//! - Acquire: `my_ticket = next_ticket.fetch_add(1)` draws the new ticket; spin until now_serving == my_ticket
+//! - Release (Drop): now_serving.fetch_add(1) — the single mutation of now_serving.
+//!
+//! The state of the lock is found by comparing the lock's ticket atomics. `now_serving` is the ticket
+//! being served (or waiting to be served), while `next_ticket` is the next ticket to be issued
+//! - Lock held: now_serving == my_ticket;
+//! - Lock free: now_serving == next_ticket
+//!
+//! SpinLock does not disable interrupts. It is also unfair in its selection of
+//! the next lock holder and uses a single atomic boolean for the lock.
 
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
@@ -14,9 +27,8 @@ use crate::arch::interrupts;
 
 /// SpinLock which disables interrupts and restores on exit
 pub struct IrqSpinLock<T> {
-    locked: AtomicBool,
     next_ticket: AtomicU8,
-    next_called: AtomicU8,
+    now_serving: AtomicU8,
     value: UnsafeCell<T>,
 }
 
@@ -26,65 +38,53 @@ unsafe impl<T: Send> Send for IrqSpinLock<T> {}
 impl<T> IrqSpinLock<T> {
     pub const fn new(value: T) -> Self {
         Self {
-            locked: AtomicBool::new(false),
-            next_ticket: AtomicU8::new(0),
-            next_called: AtomicU8::new(0),
+            next_ticket: AtomicU8::new(0), // The ticket the next caller will draw
+            now_serving: AtomicU8::new(0), // The current ticket that is being served
             value: UnsafeCell::new(value),
         }
     }
 
     pub fn lock(&self) -> IrqSpinLockGuard<'_, T> {
         // Disable interrupts before trying to take the lock
-        let prev_mstatus = interrupts::disable();
+        let prev_interrupt_status = interrupts::disable();
         // Take a ticket
         let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
-        loop {
-            // Spin with cheap relaxed loads while locked
-            while self.locked.load(Ordering::Relaxed) {
-                core::hint::spin_loop();
-            }
-
-            // Only attempt to take the lock if our ticket has come up
-            if my_ticket == self.next_called.load(Ordering::Relaxed) {
-                // Only attempt CAS now - with our ticket and interrupts disabled
-                if self
-                    .locked
-                    .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    // We got the lock
-                    break;
-                }
-            }
+        // Spin while the lock is held elsewhere
+        while my_ticket != self.now_serving.load(Ordering::Acquire) {
+            core::hint::spin_loop();
         }
         IrqSpinLockGuard {
             lock: self,
-            prev_interrupt_status: prev_mstatus,
+            prev_interrupt_status,
         }
     }
 
-    #[expect(dead_code)]
-    pub fn try_lock(&mut self) -> Option<IrqSpinLockGuard<'_, T>> {
-        // Disable interrupts before taking the lock
-        let prev_mstatus = interrupts::disable();
-        // Take a ticket
-        let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
-        // Only attempt CAS once
-        if my_ticket == self.next_called.load(Ordering::Relaxed)
-            && self
-                .locked
-                .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
-                .is_ok()
-        {
-            Some(IrqSpinLockGuard {
-                lock: self,
-                prev_interrupt_status: prev_mstatus,
-            })
-        } else {
-            // Failed to get the lock this time
-            interrupts::restore(prev_mstatus);
-            None
+    pub fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
+        // Check if the queue is busy
+        let my_ticket = self.next_ticket.load(Ordering::Relaxed);
+        if my_ticket != self.now_serving.load(Ordering::Acquire) {
+            return None;
         }
+        // Disable interrupts before attempting to claim the ticket
+        let prev_interrupt_status = interrupts::disable();
+        // Try to take the next ticket
+        if self
+            .next_ticket
+            .compare_exchange_weak(
+                my_ticket,
+                my_ticket.wrapping_add(1),
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .is_err()
+        {
+            interrupts::restore(prev_interrupt_status);
+            return None;
+        }
+        Some(IrqSpinLockGuard {
+            lock: self,
+            prev_interrupt_status,
+        })
     }
 }
 
@@ -109,8 +109,7 @@ impl<'a, T> DerefMut for IrqSpinLockGuard<'a, T> {
 
 impl<'a, T> Drop for IrqSpinLockGuard<'a, T> {
     fn drop(&mut self) {
-        self.lock.locked.store(false, Ordering::Release);
-        self.lock.next_called.fetch_add(1, Ordering::Relaxed);
+        self.lock.now_serving.fetch_add(1, Ordering::Release);
         // Enable interrupts if previously enabled
         interrupts::restore(self.prev_interrupt_status);
     }
@@ -122,7 +121,8 @@ impl<'a, T> Drop for IrqSpinLockGuard<'a, T> {
 //
 //-------------------------------------------------------------------------
 
-///SpinLock that leaves interrupts enabled
+/// SpinLock that leaves interrupts enabled
+/// This is an unfair lock
 pub struct SpinLock<T> {
     locked: AtomicBool,
     value: UnsafeCell<T>,

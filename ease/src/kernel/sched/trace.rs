@@ -254,7 +254,11 @@ impl SchedInner {
 // call sites do — percpu, the TCBs, AND `wake_overshoot` — in one consistent
 // pass. (The old with_tcbs path could not reach `wake_overshoot`.)
 pub(crate) fn take_snapshot(label: &'static str) {
-    SCHEDULER.sched.lock().snapshot_raw(label);
+    if let Some(sched) = SCHEDULER.sched.try_lock() {
+        sched.snapshot_raw(label);
+    } else {
+        dprint!("Could not lock sched for {label}");
+    }
 }
 
 /// Discard all buffered snapshots. The test runner calls this at each test
