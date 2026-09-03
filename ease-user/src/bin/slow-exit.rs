@@ -13,7 +13,7 @@ use ease_ulib as _; // linked for its entry point and panic handler, not its nam
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     let mut i = 0u32;
-    while core::hint::black_box(i) < 200_000 {
+    while core::hint::black_box(i) < 2_000_000 {
         i += 1;
     }
 }
