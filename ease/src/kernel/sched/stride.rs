@@ -37,10 +37,13 @@ unsafe extern "C" {
 pub const PRIORITY_DEFAULT: u8 = u8::MAX / 2;
 pub const PRIORITY_MIN: u8 = u8::MAX - 1;
 
-// Under contention use this time slice per thread
-const SLICE_US: u64 = 16_000;
-pub(super) const SLICE: u64 = SLICE_US * timer::CYCLES_PER_US;
-pub(super) const BONUS: u64 = 500 * timer::CYCLES_PER_US;
+/// Under contention use this time slice per thread
+const SLICE_MS: u64 = 16;
+pub(super) const SLICE: u64 = SLICE_MS * timer::CYCLES_PER_MS;
+/// A woken thread is given this bonus to its pass to encourage low latency
+pub(super) const WAKE_BONUS: u64 = 500 * timer::CYCLES_PER_US;
+/// Any switch must have more than this number of cycles of pass to be switched
+pub(super) const HYSTERESIS_CYCLES: u64 = WAKE_BONUS;
 
 // A Ready thread waiting longer than this is anomalous (longer than a full
 // slice means it lost to something it should have beaten); the trace records
@@ -133,6 +136,10 @@ impl SchedInner {
         let this_hart = hart_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
+        let current_pass = self.thread_blocks.0[percpu::current_thread_idx()]
+            .as_ref()
+            .expect("current thread must have a valid TCB")
+            .pass;
         for (idx, slot) in self.thread_blocks.0.iter().enumerate() {
             if let Some(tcb) = slot {
                 let candidate = tcb.state == State::Ready || idx == curr_idx;
@@ -144,7 +151,15 @@ impl SchedInner {
                 let not_stealing =
                     !percpu::other_scheduler_online() || idx != percpu::other_current_thread_idx();
                 let pri_ok = tcb.priority != PRIORITY_MIN;
-                if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
+                let pass_gap_greater_than_hysteresis = (idx == curr_idx)
+                    || (tcb.pass + (HYSTERESIS_CYCLES * tcb.priority as u64) < current_pass);
+                if candidate
+                    && not_stealing
+                    && affinity_ok
+                    && pri_ok
+                    && pass_gap_greater_than_hysteresis
+                    && tcb.pass < best_pass
+                {
                     best_pass = tcb.pass;
                     best_idx = Some(idx);
                 }
@@ -285,7 +300,7 @@ impl Scheduler {
                 continue;
             }
             if let Some((pass, _at_cycles, affinity)) =
-                tcbs.wake_if_due(idx, now, &mut pass_baseline, BONUS)
+                tcbs.wake_if_due(idx, now, &mut pass_baseline, WAKE_BONUS)
             {
                 // Stash the timer overshoot
                 #[cfg(feature = "trace")]
