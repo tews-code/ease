@@ -93,6 +93,12 @@ struct TracePoint {
     threads: [Option<ThreadControlBlockTracePoint>; THREADS_MAX],
     wake_overshoot: [u64; THREADS_MAX],
     pick_miss: Option<PickMiss>,
+    // A "light" point was recorded when take_snapshot could NOT lock the
+    // scheduler (the lock was hot). It carries only lock-free percpu data
+    // (timestamp, label, per-hart current/idle/needs_reschedule); its
+    // `threads` array is empty. These capture the *frequency and roster* of
+    // a reschedule storm that the full (lock-taking) snapshots miss.
+    light: bool,
 }
 
 impl TracePoint {
@@ -104,6 +110,7 @@ impl TracePoint {
             threads: [const { None }; THREADS_MAX],
             wake_overshoot: [0; THREADS_MAX],
             pick_miss: None,
+            light: false,
         }
     }
 }
@@ -257,7 +264,31 @@ pub(crate) fn take_snapshot(label: &'static str) {
     if let Some(sched) = SCHEDULER.sched.try_lock() {
         sched.snapshot_raw(label);
     } else {
-        dprint!("Could not lock sched for {label}");
+        // Lock was hot — record a lock-free "light" point so a reschedule
+        // storm (which is exactly when the lock is unavailable) still leaves
+        // a trail: timestamp, label, and per-hart percpu roster. No TCBs.
+        take_light_snapshot(label);
+    }
+}
+
+// Lock-free snapshot: percpu only, taken when the scheduler lock could not be
+// acquired. `stash_percpu` reads the same per-hart fields the full snapshot
+// does (owned per-hart, no new race); `thread_blocks` is skipped because it is
+// the lock-protected part. Marked `light` so the dump renders it compactly.
+fn take_light_snapshot(label: &'static str) {
+    let idx = TRACE_SEQ.fetch_add(1, Ordering::Relaxed) % TRACE_BUFFER_SIZE;
+    let tp = TRACE_BUF.0[idx].get();
+    // Safety: distinct ring slot; percpu reads are lock-free; the slot may hold
+    // a stale full snapshot from a previous wrap, so clear the TCB/derived
+    // fields to keep the light point honest.
+    unsafe {
+        (*tp).label = label;
+        (*tp).time_stamp = timer::elapsed();
+        (*tp).light = true;
+        (*tp).threads = [const { None }; THREADS_MAX];
+        (*tp).wake_overshoot = [0; THREADS_MAX];
+        (*tp).pick_miss = None;
+        stash_percpu(tp);
     }
 }
 
@@ -424,6 +455,18 @@ pub(crate) fn dump_trace() {
         let ms = unsafe { (**tp).time_stamp } / timer::CYCLES_PER_MS;
         let label = unsafe { (**tp).label };
         dprint!("{ms:>6} ms | {label:<13} |");
+        // Light points (recorded when the sched lock was hot) carry no TCBs —
+        // render a compact per-hart roster so a reschedule storm shows as a
+        // dense run of these lines, then move on.
+        if unsafe { (**tp).light } {
+            for h in 0..HARTS_MAX {
+                let cur = unsafe { (**tp).per_cpu[h].current_thread_idx };
+                let nr = unsafe { (**tp).per_cpu[h].needs_reschedule };
+                dprint!(" H{h}:cur{cur}{} |", if nr { "*" } else { "" });
+            }
+            dprintln!(" [light]");
+            continue;
+        }
         // Row floor: the lowest pass among present non-idle threads, mirroring
         // the scheduler's pass_baseline (PRI_MIN/idle excluded). Each cell then
         // shows `pN` = how far that thread sits above the floor, so a tie at the
