@@ -35,8 +35,10 @@ rust-objcopy -O binary \
     "$ELF" "$FLASH_BIN"
 
 #Start QEMU
-# QEMU virt requires 32MB even though we model 16MB
-$QEMU -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
+# QEMU virt requires 32MB flash even though we are modelling 16MB
+# Use accel and tb-size at 64MB to prevent stalls
+$QEMU -accel tcg,tb-size=64 \
+    -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
     -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
     -device virtio-keyboard-device,bus=virtio-mmio-bus.1 \
