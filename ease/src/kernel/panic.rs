@@ -147,6 +147,8 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     // both the test build (which exit_failure()s below) and normal runs.
     #[cfg(feature = "trace")]
     crate::sched::trace::dump_trace();
+    #[cfg(feature = "irqsoff")]
+    let _ = crate::kernel::irqsoff::write_report(&mut crate::io::DirectWriter);
 
     #[cfg(test)]
     {

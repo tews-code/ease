@@ -36,6 +36,9 @@ impl<T: Fn()> Testable for T {
         // test shows as an elevated runnable count here.
         #[cfg(feature = "trace")]
         crate::kernel::sched::trace::report_live(name);
+        // Name the test that grew a hart's longest interrupts-off section.
+        #[cfg(feature = "irqsoff")]
+        crate::kernel::irqsoff::test_boundary(name);
         print!("{name}...\t");
         // Clear the scheduler trace so a panic dump reflects only this test.
         #[cfg(feature = "trace")]
@@ -57,5 +60,10 @@ pub(super) fn test_runner(tests: &[&dyn Testable]) {
     println!("All tests passed!");
     #[cfg(feature = "paint-stack")]
     crate::kernel::stack::print_irq_idle_stacks();
+    #[cfg(feature = "irqsoff")]
+    {
+        crate::kernel::irqsoff::test_boundary("(end of run)");
+        crate::kernel::irqsoff::print_report();
+    }
     crate::qemu::exit_success();
 }

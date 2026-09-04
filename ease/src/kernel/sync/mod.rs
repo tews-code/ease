@@ -70,6 +70,7 @@ impl<'cs> CriticalSection<'cs> {
 /// Runs the closure with interrupts disabled, providing a `CriticalSection` token
 /// as proof. Interrupts are restored to their previous state when the closure returns.
 #[cfg(target_os = "none")]
+#[cfg_attr(feature = "irqsoff", track_caller)] // irqsoff attributes the section to our caller
 pub fn with_interrupts_disabled<F, R>(f: F) -> R
 where
     F: FnOnce(CriticalSection<'_>) -> R,

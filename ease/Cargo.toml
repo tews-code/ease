@@ -17,6 +17,9 @@ default = ["test-all"]
 qemu = []  # For QEMU-specific code
 profile = []
 trace = []
+# Interrupts-off tracer: per-hart share of time with MIE clear and the
+# longest section per opening site (see kernel/irqsoff.rs). QEMU-only.
+irqsoff = []
 # Benchmark suite. Sole gate for all benchmark `#[test_case]`s — NOT
 # ANDed with any area feature — so `cargo test --features bench` compiles
 # and runs only the benchmarks, no functional tests. Not part of test-all.

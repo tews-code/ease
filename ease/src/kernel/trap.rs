@@ -41,6 +41,9 @@ pub(crate) extern "C" fn trap_handler_h1(frame: &mut trap::Frame) {
 /// and an `mret`.
 #[inline(always)]
 fn trap_handler_impl(frame: &mut trap::Frame) {
+    // Hardware cleared MIE on entry: open an interrupts-off section
+    #[cfg(feature = "irqsoff")]
+    crate::kernel::irqsoff::trap_entry();
     // Check if other hart has triggered a panic
     if panic::STOP.load(Ordering::Relaxed) {
         panic::PARKED.store(true, Ordering::Release);

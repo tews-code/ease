@@ -9,6 +9,8 @@ pub mod alloc;
 pub mod collection;
 mod fd;
 pub mod ipi;
+#[cfg(feature = "irqsoff")]
+pub mod irqsoff;
 pub mod panic;
 pub mod percpu;
 pub mod profile;

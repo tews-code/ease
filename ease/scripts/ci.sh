@@ -16,6 +16,10 @@
 #                                            # `trace` feature (scheduler
 #                                            # trace points + panic dump);
 #                                            # off by default
+#   ./scripts/ci.sh --irqsoff                # build the QEMU stage with the
+#                                            # `irqsoff` feature (interrupts-
+#                                            # off tracer, report at end of
+#                                            # run and on panic); off by default
 #   ./scripts/ci.sh --fat16                  # build the FAT16 (superfloppy)
 #                                            # test disk instead of the default
 #                                            # FAT32 (MBR) image (see mkdisk.sh)
@@ -26,6 +30,7 @@ set -e
 TEST_SET="test-all"
 PAINT_STACK=0
 TRACE=0
+IRQSOFF=0
 FS_TYPE="fat32"
 
 for arg in "$@"; do
@@ -33,9 +38,10 @@ for arg in "$@"; do
         --test=*)      TEST_SET="${arg#*=}" ;;
         --paint-stack) PAINT_STACK=1 ;;
         --trace)       TRACE=1 ;;
+        --irqsoff)     IRQSOFF=1 ;;
         --fat16)       FS_TYPE="fat16" ;;
         --help|-h)
-            sed -n '2,22p' "$0"
+            sed -n '2,26p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -75,6 +81,15 @@ RISCV_FEATURES="$FEATURES"
 # --trace is passed.
 [ $TRACE -eq 1 ] && RISCV_FEATURES="$RISCV_FEATURES trace"
 
+# Interrupts-off tracing (the `irqsoff` feature) hooks the interrupt-disable
+# doors and trap entry, and prints a per-hart report at the end of the QEMU
+# run (and on panic). Same scoping as trace. Off unless --irqsoff is passed.
+[ $IRQSOFF -eq 1 ] && RISCV_FEATURES="$RISCV_FEATURES irqsoff"
+
+# Opt-in diagnostics that no default run compiles. Checked every full run so
+# they cannot bit-rot unnoticed (the trace feature did, once).
+DIAG_FEATURES="paint-stack trace irqsoff profile"
+
 # The bump and freelist allocator modules are kept in-tree as reference
 # implementations (with host_tests) but aren't wired into the kernel
 # binary, so their code is legitimately dead from the kernel's point of
@@ -86,6 +101,7 @@ echo "Disk image              : $FS_TYPE (feature: $FS_FEATURE)"
 [ $FOCUSED -eq 1 ] && echo "Focused mode            : skipping host tests, miri, docs"
 [ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
 [ $TRACE -eq 1 ] && echo "Tracing                 : on (trace feature in QEMU stage)"
+[ $IRQSOFF -eq 1 ] && echo "Interrupts-off tracing  : on (irqsoff feature in QEMU stage)"
 
 # Unconditionally reformat to pass clippy
 cargo fmt
@@ -117,6 +133,15 @@ cargo clippy --target riscv32imac-unknown-none-elf \
 echo ""
 echo "=== QEMU Tests ==="
 cargo test --bin ease --no-default-features --features "$RISCV_FEATURES"
+
+if [ $FOCUSED -eq 0 ]; then
+    echo ""
+    echo "=== Diagnostic Features Check ==="
+    # Compile-only, with every opt-in diagnostic on top of the tested set.
+    cargo clippy --target riscv32imac-unknown-none-elf \
+        --no-default-features --features "$FEATURES $DIAG_FEATURES" \
+        -- -D warnings $CLIPPY_EXTRA
+fi
 
 if [ $FOCUSED -eq 1 ]; then
     echo ""

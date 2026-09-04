@@ -85,6 +85,9 @@ mod arch {
         }
         #[inline]
         pub fn restore(_prev: usize) {}
+        #[cfg(feature = "irqsoff")]
+        #[inline]
+        pub fn restore_at(_prev: usize, _site: &'static core::panic::Location<'static>) {}
         #[inline]
         pub fn enabled() -> bool {
             false
@@ -183,6 +186,18 @@ mod kernel {
     pub mod collection;
     pub mod fd;
     pub mod ipi {}
+    // Stub for the `irqsoff` hooks in `sync::spinlock`; the real tracer
+    // lives in the binary crate.
+    #[cfg(feature = "irqsoff")]
+    pub mod irqsoff {
+        pub fn lock_acquired(
+            _site: &'static core::panic::Location<'static>,
+            _wait_start: u64,
+        ) -> u64 {
+            0
+        }
+        pub fn lock_released(_site: &'static core::panic::Location<'static>, _acquired: u64) {}
+    }
     pub mod percpu {
         pub fn set_needs_reschedule() {}
     }

@@ -18,6 +18,8 @@ use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use crate::arch::interrupts;
+#[cfg(feature = "irqsoff")]
+use core::panic::Location;
 
 //-------------------------------------------------------------------------
 //
@@ -44,21 +46,31 @@ impl<T> IrqSpinLock<T> {
         }
     }
 
+    #[cfg_attr(feature = "irqsoff", track_caller)] // irqsoff attributes the section to our caller
     pub fn lock(&self) -> IrqSpinLockGuard<'_, T> {
         // Disable interrupts before trying to take the lock
         let prev_interrupt_status = interrupts::disable();
         // Take a ticket
         let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "irqsoff")]
+        let wait_start = crate::kernel::timer::elapsed();
         // Spin while the lock is held elsewhere
         while my_ticket != self.now_serving.load(Ordering::Acquire) {
             core::hint::spin_loop();
         }
+        #[cfg(feature = "irqsoff")]
+        let acquired = crate::kernel::irqsoff::lock_acquired(Location::caller(), wait_start);
         IrqSpinLockGuard {
             lock: self,
             prev_interrupt_status,
+            #[cfg(feature = "irqsoff")]
+            site: Location::caller(),
+            #[cfg(feature = "irqsoff")]
+            acquired,
         }
     }
 
+    #[cfg_attr(feature = "irqsoff", track_caller)] // irqsoff attributes the section to our caller
     pub fn try_lock(&self) -> Option<IrqSpinLockGuard<'_, T>> {
         // Check if the queue is busy
         let my_ticket = self.next_ticket.load(Ordering::Relaxed);
@@ -84,6 +96,10 @@ impl<T> IrqSpinLock<T> {
         Some(IrqSpinLockGuard {
             lock: self,
             prev_interrupt_status,
+            #[cfg(feature = "irqsoff")]
+            site: Location::caller(),
+            #[cfg(feature = "irqsoff")]
+            acquired: crate::kernel::timer::elapsed(),
         })
     }
 }
@@ -92,6 +108,13 @@ impl<T> IrqSpinLock<T> {
 pub struct IrqSpinLockGuard<'a, T> {
     lock: &'a IrqSpinLock<T>,
     prev_interrupt_status: usize,
+    /// Where the lock was taken: `Drop` cannot name its caller, so the
+    /// section closes attributed to the lock site
+    #[cfg(feature = "irqsoff")]
+    site: &'static Location<'static>,
+    /// When the lock was acquired, so `Drop` can report the hold time
+    #[cfg(feature = "irqsoff")]
+    acquired: u64,
 }
 
 impl<'a, T> Deref for IrqSpinLockGuard<'a, T> {
@@ -109,8 +132,13 @@ impl<'a, T> DerefMut for IrqSpinLockGuard<'a, T> {
 
 impl<'a, T> Drop for IrqSpinLockGuard<'a, T> {
     fn drop(&mut self) {
+        #[cfg(feature = "irqsoff")]
+        crate::kernel::irqsoff::lock_released(self.site, self.acquired);
         self.lock.now_serving.fetch_add(1, Ordering::Release);
         // Enable interrupts if previously enabled
+        #[cfg(feature = "irqsoff")]
+        interrupts::restore_at(self.prev_interrupt_status, self.site);
+        #[cfg(not(feature = "irqsoff"))]
         interrupts::restore(self.prev_interrupt_status);
     }
 }
