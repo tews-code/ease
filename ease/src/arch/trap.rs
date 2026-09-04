@@ -232,7 +232,7 @@ per_hart::trap_vector!(
 
     # Put the trap frame into the first argument (a0) of the return function
     mv a0, sp
-    # Call the per-HART trap return, ok to use t0 as it will be restored in the return
+    # Call the per-HART trap return, ok to use temporaries as they will be restored in the return
     tail {trap_return}
     "#
 );
@@ -296,47 +296,8 @@ per_hart::naked_asm_function!(
     )
 );
 
-/// Caller-saved registers
-///
-/// Also holds `mepc` and `mstatus` for returning from Rust functions in trap handler deferred execution
-#[repr(C, align(16))]
-#[derive(Default)]
-pub(crate) struct CallerSavedFrame {
-    ra: usize,
-    gp: usize,
-    tp: usize,
-    t0: usize,
-    t1: usize,
-    t2: usize,
-    t3: usize,
-    t4: usize,
-    t5: usize,
-    t6: usize,
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
-    a7: usize,
-    mepc: usize,
-    mstatus: usize,
-    sp: usize,
-    _pad: [usize; 3],
-}
-
-pub(crate) const CALLER_SAVED_SLOTS: usize = 24; // Set to 24 even though we only need 21, as 24 * 4 = 96 which is a multiple of 16 for alignment.
-// Compile-time checks: if a field or a `sw` in the shim moves, the build fails
-// here instead of the dispatcher silently reading the wrong register.
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, ra) == 0);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a0) == 4 * 10);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a1) == 4 * 11);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, sp) == 4 * 20);
-const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
-
+// Trap resume functions
+// This is reached through `mret` from a divert, with all registers in place
 per_hart::naked_asm_function!(
     pub(crate),
     ".sram8_text",
@@ -344,68 +305,64 @@ per_hart::naked_asm_function!(
     ".sram9_text",
     resume_trampoline_h1,
     (
-    "addi sp, sp, -4 * 24",  // 24 x 4 = 96 to keep 16 byte aligned even though we only store caller-saved registers + sp
-    "sw ra,  4 *  0(sp)",
-    "sw gp,  4 *  1(sp)",
-    "sw tp,  4 *  2(sp)",
-    "sw t0,  4 *  3(sp)",
-    "sw t1,  4 *  4(sp)",
-    "sw t2,  4 *  5(sp)",
-    "sw t3,  4 *  6(sp)",
-    "sw t4,  4 *  7(sp)",
-    "sw t5,  4 *  8(sp)",
-    "sw t6,  4 *  9(sp)",
-    "sw a0,  4 * 10(sp)",
-    "sw a1,  4 * 11(sp)",
-    "sw a2,  4 * 12(sp)",
-    "sw a3,  4 * 13(sp)",
-    "sw a4,  4 * 14(sp)",
-    "sw a5,  4 * 15(sp)",
-    "sw a6,  4 * 16(sp)",
-    "sw a7,  4 * 17(sp)",
+        "addi sp, sp, -4 * {num_slots}",
+        "sw ra,  4 *  0(sp)",
+        "sw gp,  4 *  1(sp)",
+        "sw tp,  4 *  2(sp)",
+        "sw t0,  4 *  3(sp)",
+        "sw t1,  4 *  4(sp)",
+        "sw t2,  4 *  5(sp)",
+        "sw t3,  4 *  6(sp)",
+        "sw t4,  4 *  7(sp)",
+        "sw t5,  4 *  8(sp)",
+        "sw t6,  4 *  9(sp)",
+        "sw a0,  4 * 10(sp)",
+        "sw a1,  4 * 11(sp)",
+        "sw a2,  4 * 12(sp)",
+        "sw a3,  4 * 13(sp)",
+        "sw a4,  4 * 14(sp)",
+        "sw a5,  4 * 15(sp)",
+        "sw a6,  4 * 16(sp)",
+        "sw a7,  4 * 17(sp)",
+        "sw s0,  4 * 18(sp)",
+        "sw s1,  4 * 19(sp)",
+        "sw s2,  4 * 20(sp)",
+        "sw s3,  4 * 21(sp)",
+        "sw s4,  4 * 22(sp)",
+        "sw s5,  4 * 23(sp)",
+        "sw s6,  4 * 24(sp)",
+        "sw s7,  4 * 25(sp)",
+        "sw s8,  4 * 26(sp)",
+        "sw s9,  4 * 27(sp)",
+        "sw s10, 4 * 28(sp)",
+        "sw s11, 4 * 29(sp)",
 
-    // Get stored mepc, mstatus and sp and stash
-    "call {resume_mepc}",
-    "sw a0,  4 * 18(sp)",
-    "call {resume_mstatus}",
-    "sw a0,  4 * 19(sp)",
-    "call {resume_sp}",
-     "sw a0, 4 * 20(sp)",
+        // Get stored mepc, mstatus and sp and stash
+        "call {resume_mepc}",
+        "sw a0,  4 * 30(sp)",
+        "call {resume_mstatus}",
+        "sw a0,  4 * 31(sp)",
+        "call {resume_sp}",
+        "sw a0, 4 * 32(sp)",
 
-    // Call the scheduler
-    "call {run_resume_work}",
+        // Call the scheduler
+        "call {run_resume_work}",
 
-    // Return
-    "lw a0,  4 * 19(sp)",
-    "csrw mstatus, a0",
-    "lw a0,  4 * 18(sp)",
-    "csrw mepc, a0",
-
-    "lw ra,  4 *  0(sp)",
-    "lw gp,  4 *  1(sp)",
-    "lw tp,  4 *  2(sp)",
-    "lw t0,  4 *  3(sp)",
-    "lw t1,  4 *  4(sp)",
-    "lw t2,  4 *  5(sp)",
-    "lw t3,  4 *  6(sp)",
-    "lw t4,  4 *  7(sp)",
-    "lw t5,  4 *  8(sp)",
-    "lw t6,  4 *  9(sp)",
-    "lw a0,  4 * 10(sp)",
-    "lw a1,  4 * 11(sp)",
-    "lw a2,  4 * 12(sp)",
-    "lw a3,  4 * 13(sp)",
-    "lw a4,  4 * 14(sp)",
-    "lw a5,  4 * 15(sp)",
-    "lw a6,  4 * 16(sp)",
-    "lw a7,  4 * 17(sp)",
-
-    "lw sp, 4 * 20(sp)",
-
-    "mret",
-    resume_mepc = sym percpu::resume_mepc,
-    resume_mstatus = sym percpu::resume_mstatus,
-    resume_sp = sym percpu::resume_sp,
-    run_resume_work = sym run_resume_work,
+        // Return
+        // Put the trap frame into the first argument (a0) of the return function
+        "mv a0, sp",
+        // Call the per-HART trap return, ok to use temporaries as they will be restored in the return
+        "csrr t0, mhartid",
+        "bnez t0, 1f",
+        "tail {trap_return_h0}",
+        "1:",
+        "tail {trap_return_h1}",
+        num_slots = const Frame::NUM_SLOTS,
+        resume_mepc = sym percpu::resume_mepc,
+        resume_mstatus = sym percpu::resume_mstatus,
+        resume_sp = sym percpu::resume_sp,
+        run_resume_work = sym run_resume_work,
+        trap_return_h0 = sym trap_return_h0,
+        trap_return_h1 = sym trap_return_h1,
     )
 );

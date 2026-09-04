@@ -2,20 +2,25 @@
 
 // The visibility is common across both asm functions
 macro_rules! naked_asm_function {
-    ($vis: vis, $section0:literal, $name0:ident, $section1:literal, $name1:ident, $body:tt) => {
+    ($vis: vis,
+     $section0:literal, $name0:ident,
+     $section1:literal, $name1:ident,
+     $body:tt) => {
 
             #[unsafe(link_section = $section0)]
             #[unsafe(no_mangle)]
             #[unsafe(naked)]
             $vis unsafe extern "C" fn $name0() {
-                core::arch::naked_asm! $body;
+                core::arch::naked_asm!
+                    $body;
             }
 
             #[unsafe(link_section = $section1)]
             #[unsafe(no_mangle)]
             #[unsafe(naked)]
             $vis unsafe extern "C" fn $name1() {
-                core::arch::naked_asm! $body;
+                core::arch::naked_asm!
+                    $body;
             }
     };
 }
