@@ -22,7 +22,9 @@ macro_rules! naked_asm_function {
 
 #[rustfmt::skip]
 macro_rules! trap_vector {
-    ($section0:literal, $name0:ident, $handler0:path, $section1:literal, $name1:ident, $handler1:path, $num_slots:expr, $body:literal) => {
+    ($section0:literal, $name0:ident, $handler0:path, $trap_return0:path,
+     $section1:literal, $name1:ident, $handler1:path, $trap_return1:path,
+     $num_slots:expr, $body:literal) => {
         core::arch::global_asm!(
             concat!(
                 ".section ", $section0, ", \"ax\"\n",
@@ -32,6 +34,7 @@ macro_rules! trap_vector {
                 $body,
             ),
             handler = sym $handler0,
+            trap_return = sym $trap_return0,
             num_slots = const $num_slots,
         );
 
@@ -44,6 +47,7 @@ macro_rules! trap_vector {
                 $body,
             ),
             handler = sym $handler1,
+            trap_return = sym $trap_return1,
             num_slots = const $num_slots,
         );
     };
