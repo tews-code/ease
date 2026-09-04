@@ -237,54 +237,28 @@ pub(crate) extern "C" fn user_thread_block(
     }
 }
 /// Sets up user thread for first run
+///
+/// This function is called with interrupts disabled,
+/// the trap frame pointed to by `a0`.
+/// Every general register is overwritten in the frame restore
 #[unsafe(naked)]
 pub extern "C" fn user_first_run() -> ! {
     naked_asm!(
+        // Like any `switched_to` thread, we first need to clean up the last thread's activity
         "call {post_switch_cleanup}",
-        // Set up mepc and mstatus
-        "lw t0,  4 * 30(sp)",
-        "csrw mepc, t0",
-        "lw t0,  4 * 31(sp)",
-        "csrw mstatus, t0",
+        // The trap frame is passed to the trap return in the first argument `a0`. Right now our stack pointer is pointing to the full stack
+        "mv a0, sp",
+        // Branch by HART; t0 is restored by the trap return so can be used here
+        "csrr t0, mhartid",
+        "bnez t0, 1f",
+        "tail {trap_return_h0}",
 
-        // Load GP registers from forged trap frame in thread's kernel stack
-        "lw ra,  4 *  0(sp)",
-        "lw gp,  4 *  1(sp)",
-        "lw tp,  4 *  2(sp)",
-        "lw t0,  4 *  3(sp)",
-        "lw t1,  4 *  4(sp)",
-        "lw t2,  4 *  5(sp)",
-        "lw t3,  4 *  6(sp)",
-        "lw t4,  4 *  7(sp)",
-        "lw t5,  4 *  8(sp)",
-        "lw t6,  4 *  9(sp)",
-        "lw a0,  4 * 10(sp)",
-        "lw a1,  4 * 11(sp)",
-        "lw a2,  4 * 12(sp)",
-        "lw a3,  4 * 13(sp)",
-        "lw a4,  4 * 14(sp)",
-        "lw a5,  4 * 15(sp)",
-        "lw a6,  4 * 16(sp)",
-        "lw a7,  4 * 17(sp)",
-        "lw s0,  4 * 18(sp)",
-        "lw s1,  4 * 19(sp)",
-        "lw s2,  4 * 20(sp)",
-        "lw s3,  4 * 21(sp)",
-        "lw s4,  4 * 22(sp)",
-        "lw s5,  4 * 23(sp)",
-        "lw s6,  4 * 24(sp)",
-        "lw s7,  4 * 25(sp)",
-        "lw s8,  4 * 26(sp)",
-        "lw s9,  4 * 27(sp)",
-        "lw s10, 4 * 28(sp)",
-        "lw s11, 4 * 29(sp)",
+        "1:",
+        "tail {trap_return_h1}",
 
-        // Load sp from frame
-        "lw sp, 4 * 32(sp)",
-
-        "mret",
         post_switch_cleanup = sym post_switch_cleanup,
-        // num_slots = const crate::arch::trap::NUM_SLOTS,
+        trap_return_h0 = sym trap::trap_return_h0,
+        trap_return_h1 = sym trap::trap_return_h1,
     );
 }
 /// Return to user thread from M mode

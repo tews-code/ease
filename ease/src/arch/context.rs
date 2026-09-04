@@ -53,6 +53,7 @@ use crate::kernel::stack;
 // # Invariants #
 // Must be run with interrupts disabled
 per_hart::naked_asm_function!(
+    /* No visibility */,
     ".sram8_text",
     switch_to_h0,
     ".sram9_text",

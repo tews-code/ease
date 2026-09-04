@@ -136,6 +136,8 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
+    pub(crate) const NUM_SLOTS: usize = 36;
+
     pub(crate) fn syscall(&self) -> usize {
         self.a7
     }
@@ -159,57 +161,15 @@ impl Frame {
     }
 }
 
-pub(crate) const NUM_SLOTS: usize = 36;
-const _: () = assert!(core::mem::size_of::<Frame>() == NUM_SLOTS * 4);
+const _: () = assert!(core::mem::size_of::<Frame>() == Frame::NUM_SLOTS * 4);
 const _: () = assert!(core::mem::offset_of!(Frame, ra) == 0);
-const _: () = assert!(core::mem::offset_of!(Frame, mepc) == (NUM_SLOTS - 6) * 4);
-const _: () = assert!(core::mem::offset_of!(Frame, mstatus) == (NUM_SLOTS - 5) * 4);
-const _: () = assert!(core::mem::offset_of!(Frame, sp) == (NUM_SLOTS - 4) * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, mepc) == (Frame::NUM_SLOTS - 6) * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, mstatus) == (Frame::NUM_SLOTS - 5) * 4);
+const _: () = assert!(core::mem::offset_of!(Frame, sp) == (Frame::NUM_SLOTS - 4) * 4);
 const _: () = assert!(
     core::mem::size_of::<Frame>().is_multiple_of(core::mem::align_of::<Frame>()),
     "trap frame size must be a multiple of its alignment so it lands aligned at top of a stack"
 );
-
-/// Caller-saved registers
-///
-/// Also holds `mepc` and `mstatus` for returning from Rust functions in trap handler deferred execution
-#[repr(C, align(16))]
-#[derive(Default)]
-pub(crate) struct CallerSavedFrame {
-    ra: usize,
-    gp: usize,
-    tp: usize,
-    t0: usize,
-    t1: usize,
-    t2: usize,
-    t3: usize,
-    t4: usize,
-    t5: usize,
-    t6: usize,
-    a0: usize,
-    a1: usize,
-    a2: usize,
-    a3: usize,
-    a4: usize,
-    a5: usize,
-    a6: usize,
-    a7: usize,
-    mepc: usize,
-    mstatus: usize,
-    sp: usize,
-    _pad: [usize; 3],
-}
-
-pub(crate) const CALLER_SAVED_SLOTS: usize = 24; // Set to 24 even though we only need 21, as 24 * 4 = 96 which is a multiple of 16 for alignment.
-// Compile-time checks: if a field or a `sw` in the shim moves, the build fails
-// here instead of the dispatcher silently reading the wrong register.
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, ra) == 0);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a0) == 4 * 10);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a1) == 4 * 11);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
-const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, sp) == 4 * 20);
-const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
 
 per_hart::trap_vector!(
     ".sram8_text",
@@ -218,7 +178,7 @@ per_hart::trap_vector!(
     ".sram9_text",
     _trap_vector_h1,
     trap_handler_h1,
-    NUM_SLOTS,
+    Frame::NUM_SLOTS,
     r#"
     # Swap sp with IRQ stack top in mscratch
     csrrw sp, mscratch, sp
@@ -313,13 +273,113 @@ per_hart::trap_vector!(
     mret
     "#
 );
+// Common return path for any trap; restores the full frame
+// as well as restoring the frame's (possibly manipulated)
+// `mepc`, `mstatus` and `sp` values before calling `mret`
+//
+// Note that interrupts are disabled when this function is called.
+//
+// This function never returns
+per_hart::naked_asm_function!(
+    pub(crate),
+    ".sram8_text",
+    trap_return_h0,
+    ".sram9_text",
+    trap_return_h1,
+    (
+        // We pass the full frame pointer in as the first function parameter (in a0)
+        "mv sp, a0",
+        // Set up mepc and mstatus. `mstatus` first in case we accidentally
+        // arrived with interrupts enabled, as we don't want `mpec` to be clobbered
+        // We are also trusting the frame to have mstatus with interrupts disabled
+        "lw t0,  4 * 31(sp)",
+        "csrw mstatus, t0",
+        "lw t0,  4 * 30(sp)",
+        "csrw mepc, t0",
+        // Load GP registers from forged trap frame in thread's kernel stack
+        "lw ra,  4 *  0(sp)",
+        "lw gp,  4 *  1(sp)",
+        "lw tp,  4 *  2(sp)",
+        "lw t0,  4 *  3(sp)",
+        "lw t1,  4 *  4(sp)",
+        "lw t2,  4 *  5(sp)",
+        "lw t3,  4 *  6(sp)",
+        "lw t4,  4 *  7(sp)",
+        "lw t5,  4 *  8(sp)",
+        "lw t6,  4 *  9(sp)",
+        "lw a0,  4 * 10(sp)",
+        "lw a1,  4 * 11(sp)",
+        "lw a2,  4 * 12(sp)",
+        "lw a3,  4 * 13(sp)",
+        "lw a4,  4 * 14(sp)",
+        "lw a5,  4 * 15(sp)",
+        "lw a6,  4 * 16(sp)",
+        "lw a7,  4 * 17(sp)",
+        "lw s0,  4 * 18(sp)",
+        "lw s1,  4 * 19(sp)",
+        "lw s2,  4 * 20(sp)",
+        "lw s3,  4 * 21(sp)",
+        "lw s4,  4 * 22(sp)",
+        "lw s5,  4 * 23(sp)",
+        "lw s6,  4 * 24(sp)",
+        "lw s7,  4 * 25(sp)",
+        "lw s8,  4 * 26(sp)",
+        "lw s9,  4 * 27(sp)",
+        "lw s10, 4 * 28(sp)",
+        "lw s11, 4 * 29(sp)",
+        // Load sp from frame - we will abandon the old frame in place
+        "lw sp, 4 * 32(sp)",
+        "mret",
+    )
+);
+
+/// Caller-saved registers
+///
+/// Also holds `mepc` and `mstatus` for returning from Rust functions in trap handler deferred execution
+#[repr(C, align(16))]
+#[derive(Default)]
+pub(crate) struct CallerSavedFrame {
+    ra: usize,
+    gp: usize,
+    tp: usize,
+    t0: usize,
+    t1: usize,
+    t2: usize,
+    t3: usize,
+    t4: usize,
+    t5: usize,
+    t6: usize,
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+    mepc: usize,
+    mstatus: usize,
+    sp: usize,
+    _pad: [usize; 3],
+}
+
+pub(crate) const CALLER_SAVED_SLOTS: usize = 24; // Set to 24 even though we only need 21, as 24 * 4 = 96 which is a multiple of 16 for alignment.
+// Compile-time checks: if a field or a `sw` in the shim moves, the build fails
+// here instead of the dispatcher silently reading the wrong register.
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, ra) == 0);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a0) == 4 * 10);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, a1) == 4 * 11);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mepc) == 4 * 18);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, mstatus) == 4 * 19);
+const _: () = assert!(core::mem::offset_of!(CallerSavedFrame, sp) == 4 * 20);
+const _: () = assert!(core::mem::size_of::<CallerSavedFrame>() == 4 * CALLER_SAVED_SLOTS);
 
 per_hart::naked_asm_function!(
+    pub(crate),
     ".sram8_text",
     resume_trampoline_h0,
     ".sram9_text",
     resume_trampoline_h1,
-
     (
     "addi sp, sp, -4 * 24",  // 24 x 4 = 96 to keep 16 byte aligned even though we only store caller-saved registers + sp
     "sw ra,  4 *  0(sp)",

@@ -17,8 +17,6 @@ use ease_macros::profile;
 unsafe extern "C" {
     static __hart0_irq_stack_base: u8;
     static __hart1_irq_stack_base: u8;
-    fn resume_trampoline_h0();
-    fn resume_trampoline_h1();
 }
 
 // We create two versions of the trap handler to be placed in the relevant .text for HART0 and HART1
@@ -135,9 +133,9 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
             percpu::set_resume_sp(frame.sp);
             percpu::set_resume_work(Work::Exit(ExitReason::Fault));
             frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
-                resume_trampoline_h0 as *const () as usize
+                trap::resume_trampoline_h0 as *const () as usize
             } else {
-                resume_trampoline_h1 as *const () as usize
+                trap::resume_trampoline_h1 as *const () as usize
             });
             // Early return to avoid needs_reschedule below
             return;
@@ -149,9 +147,9 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         percpu::set_resume_sp(frame.sp);
         percpu::set_resume_work(Work::Preempt);
         frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
-            resume_trampoline_h0 as *const () as usize
+            trap::resume_trampoline_h0 as *const () as usize
         } else {
-            resume_trampoline_h1 as *const () as usize
+            trap::resume_trampoline_h1 as *const () as usize
         });
     }
 }
