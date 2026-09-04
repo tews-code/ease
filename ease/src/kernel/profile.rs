@@ -53,8 +53,11 @@ impl ProfileRecord {
             // `mcycle` CSR. mtime ticks at `TIMER_FREQ_HZ`, matching
             // `CYCLES_PER_US` used in dump formatting — so the µs deltas
             // shown by the dump reflect actual wall time. On QEMU `mcycle`
-            // counts emulated instructions and runs at a different (much
-            // higher) rate, which would inflate reported µs ~125x.
+            // runs at a different (much higher) rate, which would inflate
+            // reported µs ~125x. Note that without `-icount` QEMU reports
+            // host time there, not an instruction count (measured 2026-09:
+            // exactly 1000 ticks per µs), so it is no use as an instruction
+            // counter either.
             cycle_stamp: crate::kernel::timer::elapsed(),
             sp: sp(),
         }
