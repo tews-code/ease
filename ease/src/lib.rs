@@ -293,6 +293,11 @@ mod kernel {
         pub(crate) fn current_user_thread_needs_exit() -> bool {
             panic!("sched stub: must not be called from the lib crate");
         }
+
+        /// Sets the current thread to Running state
+        pub(crate) fn set_self_running() {
+            panic!("sched stub: must not be called from the lib crate");
+        }
     }
 }
 

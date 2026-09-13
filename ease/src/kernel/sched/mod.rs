@@ -250,6 +250,11 @@ pub fn park_if_blocked_until(deadline: Deadline) {
     SCHEDULER.park_if_blocked_until(deadline);
 }
 
+/// Set this thread to Running state without rescheduling
+pub fn set_self_running() {
+    SCHEDULER.set_self_running()
+}
+
 /// Flat this thread as ready to be preemptively rescheduled
 pub fn mark_for_preempt() {
     SCHEDULER.mark_for_preempt();

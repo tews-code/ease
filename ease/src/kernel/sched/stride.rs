@@ -841,6 +841,15 @@ impl Scheduler {
         }
     }
 
+    /// Set this thread to Running state without rescheduling
+    pub fn set_self_running(&self) {
+        let current = self.current_thread();
+        let mut sched = self.sched.lock();
+        if let Some(tcb) = sched.thread_blocks.0[current.idx].as_mut() {
+            tcb.state = State::Running;
+        }
+    }
+
     /// Print the painted stack high watermarks
     #[cfg(feature = "paint-stack")]
     pub fn stacks(&self) {

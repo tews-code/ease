@@ -15,10 +15,11 @@ mod mutex;
 mod spinlock;
 #[cfg(all(test, not(target_os = "none")))]
 pub mod tests;
+mod waitqueue;
 
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
-pub use completion::{Completion, TimedOut};
+pub use completion::Completion;
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub use counteru64::CounterU64;
@@ -26,7 +27,15 @@ pub use counteru64::CounterU64;
 #[allow(unused_imports)]
 pub use mutex::Mutex;
 #[allow(unused_imports)]
-pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock};
+pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock, SpinLockGuard};
+#[allow(unused_imports)]
+pub(crate) use waitqueue::WaitQueue;
+
+/// Return Err variants
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimedOut;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Interrupted;
 
 /// Lock used by kernel-wide singletons such as the global allocator.
 ///

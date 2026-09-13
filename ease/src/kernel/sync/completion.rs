@@ -3,15 +3,11 @@
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
+use super::{Interrupted, TimedOut};
 use crate::kernel::sched::{
     self, Deadline, ThreadHandle, current_thread, park_if_blocked, set_self_blocked,
 };
 use crate::kernel::sync::IrqSpinLock;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimedOut;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Interrupted;
 
 struct CompletionInner {
     pending: bool,                // Flag that gets set if signal() fires before any wait().
