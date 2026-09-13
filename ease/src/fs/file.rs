@@ -1,15 +1,27 @@
 //! File operations
 
 // Functions take the lock on the volume (and delegate as needed)
+use crate::kernel::collection::{Arena, Handle};
 use crate::kernel::sync::IrqSpinLock;
 
 use super::volume::with_volume;
 use super::{Dir, FileInfo, FsError, Location};
 
-const OPEN_FILES_MAX: usize = 128;
+const MAX: usize = 128;
 
-static OPEN_FILE_TABLE: IrqSpinLock<OpenFileTable> =
-    IrqSpinLock::new(OpenFileTable([const { None }; OPEN_FILES_MAX]));
+/// Table of open files
+///
+/// Each open file has its own slot (no reference counting)
+/// Table indices get reused after close. This is safe only because Handle can't be reused in an arena.
+/// Drop frees the slot — single ownership.
+/// If ever adding `dup`, this is the first thing that breaks.
+///
+/// # Invariants #
+/// - Slot indices stay valid because Handle can't be reused and Drop frees the slot.
+/// - Stored Locations stay valid because every operation that invalidates a location (e.g. rm) refuses open files.
+static OPEN_FILE_TABLE: IrqSpinLock<OpenFileTable> = IrqSpinLock::new(OpenFileTable(Arena::new()));
+
+struct OpenFileTable(Arena<OpenFile, MAX>);
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Access {
@@ -47,30 +59,10 @@ impl From<&OpenFile> for OpenFileSnapshot {
     }
 }
 
-/// Table with open files
-///
-/// Each open file has its own slot (no reference counting)
-/// Table indices get reused after close. This is safe only because FileHandle can't be cloned
-/// and its Drop frees the slot — single ownership.
-/// If ever adding `dup`, this is the first thing that breaks.
-///
-/// # Invariants #
-/// - Slot indices stay valid because FileHandle can't be cloned and Drop frees the slot.
-/// - Stored Locations stay valid because every operation that invalidates a location (e.g. rm) refuses open files.
-struct OpenFileTable([Option<OpenFile>; OPEN_FILES_MAX]);
-
 impl OpenFileTable {
-    /// Get mutable reference to a free slot in the table and the slot index
-    fn free_slot(&mut self) -> Option<(usize, &mut Option<OpenFile>)> {
-        self.0.iter_mut().enumerate().find(|(_, s)| s.is_none())
-    }
-
     /// Check if a file is open for the directory entry location
     fn is_open(&self, location: Location) -> bool {
-        self.0
-            .iter()
-            .flatten()
-            .any(|s| s.dir_entry_location == location)
+        self.0.iter().any(|s| s.dir_entry_location == location)
     }
     /// Get the access kind of a file by its directory entry location
     ///
@@ -78,7 +70,6 @@ impl OpenFileTable {
     fn access_by_location(&self, entry: Location) -> Option<Access> {
         self.0
             .iter()
-            .flatten()
             .find(|of| of.dir_entry_location == entry)
             .map(|of| of.access)
     }
@@ -87,8 +78,9 @@ impl OpenFileTable {
     /// # Panics #
     /// Panics if the file handle does not correspond with an open file entry in the table
     fn set_snapshot(&mut self, file: &FileHandle, snapshot: OpenFileSnapshot) {
-        let open_file = self.0[file.open_file_table_idx]
-            .as_mut()
+        let open_file = self
+            .0
+            .get_mut(file.open_file_table_handle)
             .expect("file handle should index the open file table to an open file entry");
         open_file.position = snapshot.position;
         open_file.size = snapshot.size;
@@ -101,8 +93,9 @@ impl OpenFileTable {
     /// # Panics #
     /// Panics if the file handle does not correspond to an open file entry in the table
     fn writable_snapshot(&self, file: &FileHandle) -> Option<OpenFileSnapshot> {
-        let open_file = self.0[file.open_file_table_idx]
-            .as_ref()
+        let open_file = self
+            .0
+            .get(file.open_file_table_handle)
             .expect("file handle should index the open file table to an open file entry");
         (open_file.access == Access::Write).then(|| open_file.into())
     }
@@ -112,8 +105,9 @@ impl OpenFileTable {
     /// # Panics #
     /// Panics if the file handle does not correspond with an open file entry in the table
     fn snapshot(&self, file: &FileHandle) -> OpenFileSnapshot {
-        let open_file = self.0[file.open_file_table_idx]
-            .as_ref()
+        let open_file = self
+            .0
+            .get(file.open_file_table_handle)
             .expect("file handle should index the open file table to an open file entry");
         open_file.into()
     }
@@ -126,7 +120,7 @@ impl OpenFileTable {
         access: Access,
         dir_entry: Location,
         file_info: &FileInfo,
-    ) -> Result<usize, FsError> {
+    ) -> Result<FileHandle, FsError> {
         match (access, self.access_by_location(dir_entry)) {
             (Access::Write, Some(_)) => return Err(FsError::OpeningForWriteButAlreadyOpen),
             (Access::Read, Some(Access::Write)) => {
@@ -136,28 +130,33 @@ impl OpenFileTable {
         }
         // Find an empty slot and insert the entry - no problem if mutiple read users
         // of the same file
-        if let Some((i, new_slot)) = self.free_slot() {
-            *new_slot = Some(OpenFile {
-                access,
-                dir_entry_location: dir_entry,
-                position: 0,
-                size: file_info.file_size,
-                current_cluster: file_info.first_cluster,
-                first_cluster: file_info.first_cluster,
-            });
-            return Ok(i);
+        if let Some(handle) = self.0.add(OpenFile {
+            access,
+            dir_entry_location: dir_entry,
+            position: 0,
+            size: file_info.file_size,
+            current_cluster: file_info.first_cluster,
+            first_cluster: file_info.first_cluster,
+        }) {
+            Ok(FileHandle {
+                open_file_table_handle: handle,
+                closed: false,
+            })
+        } else {
+            Err(FsError::TooManyOpenFiles)
         }
-        Err(FsError::TooManyOpenFiles)
     }
 
-    fn close(&mut self, idx: usize) {
-        self.0[idx].take();
+    fn close(&mut self, handle: Handle<OpenFile>) {
+        self.0
+            .take(handle)
+            .expect("should not be closing a file slot which is empty");
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct FileHandle {
-    open_file_table_idx: usize,
+    open_file_table_handle: Handle<OpenFile>,
     closed: bool,
 }
 
@@ -194,7 +193,7 @@ impl Drop for FileHandle {
                 })
             }
         }
-        OPEN_FILE_TABLE.lock().close(self.open_file_table_idx);
+        OPEN_FILE_TABLE.lock().close(self.open_file_table_handle);
     }
 }
 
@@ -226,14 +225,11 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
         // Check if this file already exists
         let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
         // Set up the open file table
-        let idx = OPEN_FILE_TABLE
+        let handle = OPEN_FILE_TABLE
             .lock()
             .open_for(access, location, &file_info)?;
         // Construct the file handle with private idx member
-        Ok(FileHandle {
-            open_file_table_idx: idx,
-            closed: false,
-        })
+        Ok(handle)
     })
 }
 
