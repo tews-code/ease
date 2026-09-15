@@ -79,10 +79,12 @@ impl<T> IrqSpinLock<T> {
         }
         // Disable interrupts before attempting to claim the ticket
         let prev_interrupt_status = interrupts::disable();
-        // Try to take the next ticket
+        // Try to take the next ticket.
+        // We use full compare_exchange to avoid spurious lack of locking. This costs a rarely used branch,
+        // but then allows callers to confidently know if the lock is already held
         if self
             .next_ticket
-            .compare_exchange_weak(
+            .compare_exchange(
                 my_ticket,
                 my_ticket.wrapping_add(1),
                 Ordering::Acquire,
@@ -188,9 +190,11 @@ impl<T> SpinLock<T> {
     #[allow(dead_code)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Only attempt CAS
+        // We use full compare_exchange to avoid spurious lack of locking. This costs a rarely used branch,
+        // but then allows callers to confidently know if the lock is already held
         if self
             .locked
-            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_ok()
         {
             Some(SpinLockGuard { lock: self })
