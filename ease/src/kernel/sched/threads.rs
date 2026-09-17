@@ -48,6 +48,13 @@ pub(crate) enum State {
     Switching(PostSwitch),
     Sleeping(Deadline),
 }
+/// Outcome of [Threads::make_blocked_ready]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UnblockedResult {
+    Unparked(Option<u8>), // Holds the affinity
+    Deferred,             // The thread is mid-switch
+    NotBlocked,           // No action to be taken
+}
 
 pub(super) struct UserContext {
     pub(super) stack: MemRegion,
@@ -208,7 +215,7 @@ impl Threads {
     /// Panics if
     /// - the thread index is greater than THREADS_MAX
     /// - the given index does not index a valid TCB
-    pub(super) fn make_blocked_ready(&mut self, idx: usize) -> (bool, Option<u8>) {
+    pub(super) fn make_blocked_ready(&mut self, idx: usize) -> UnblockedResult {
         assert!(idx < THREADS_MAX);
         let tcb = self.0[idx].as_mut().unwrap_or_else(|| {
             dprintln!("the thread index must be for a valid TCB at index {}", idx);
@@ -221,18 +228,14 @@ impl Threads {
                 {
                     tcb.ready_since = timer::elapsed(); // stamp Ready entry to track how long it stays in this state
                 }
-                (true, tcb.affinity)
+                UnblockedResult::Unparked(tcb.affinity)
             }
             State::Switching(PostSwitch::Blocked)
             | State::Switching(PostSwitch::BlockedUntil(_)) => {
-                tcb.state = State::Switching(PostSwitch::Ready);
-                #[cfg(feature = "trace")]
-                {
-                    tcb.ready_since = timer::elapsed(); // stamp Ready entry to track how long it stays in this state
-                }
-                (true, tcb.affinity)
+                // We were asked to wake up the thread too soon
+                UnblockedResult::Deferred
             }
-            _ => (false, None),
+            _ => UnblockedResult::NotBlocked,
         }
     }
     /// Find the minimum current pass value among active, non-idle threads.

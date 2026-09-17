@@ -13,6 +13,7 @@ use super::{ExitReason, State, THREADS_MAX, clear_wakeup_signal, set_needs_wakeu
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
+use crate::kernel::sched::threads::UnblockedResult;
 use crate::kernel::sync::IrqSpinLockGuard;
 
 pub(crate) const MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
@@ -247,18 +248,21 @@ impl Scheduler {
                         // Set marked for exit
                         self.needs_user_exit.set(idx);
                         // Now set to Ready
-                        let (did_unpark, affinity) = sched.thread_blocks.make_blocked_ready(idx);
-                        if !did_unpark {
-                            panic!("did not unpark blocked user thread");
-                        }
-                        if let Some(hart) = affinity
-                            && hart as usize != crate::arch::hart_id()
-                        {
-                            // This is for the other HART
-                            ipi::send(ipi::RESCHEDULE);
-                        } else {
-                            // This is for us
-                            percpu::set_needs_reschedule();
+                        match sched.thread_blocks.make_blocked_ready(idx) {
+                            UnblockedResult::NotBlocked | UnblockedResult::Deferred => {
+                                panic!("did not unpark blocked user thread")
+                            }
+                            UnblockedResult::Unparked(affinity) => {
+                                if let Some(hart) = affinity
+                                    && hart as usize != crate::arch::hart_id()
+                                {
+                                    // This is for the other HART
+                                    ipi::send(ipi::RESCHEDULE);
+                                } else {
+                                    // This is for us
+                                    percpu::set_needs_reschedule();
+                                }
+                            }
                         }
                     }
                     State::Ready | State::Sleeping(_) => release = true,

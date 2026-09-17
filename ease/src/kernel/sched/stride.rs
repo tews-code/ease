@@ -14,7 +14,7 @@ use crate::kernel::sched::THREADS_MAX;
 use crate::kernel::sched::process;
 use crate::kernel::sched::threads::{
     ExitReason, PostSwitch, State, ThreadControlBlock, ThreadControlBlockSpec, ThreadHandle,
-    Threads,
+    Threads, UnblockedResult,
 };
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_watermark;
@@ -321,8 +321,9 @@ impl Scheduler {
         }
         tcbs.is_under_contention()
     }
-
-    // Clean up a thread post switch
+    /// Clean up a thread post switch
+    /// Called by _every_ thread, even spawned threads (or
+    /// threads returning from a forged trap).
     pub(super) fn post_switch_cleanup(&self) {
         let mut sched = self.sched.lock();
         let switched_from_idx = percpu::take_switching_from_thread_idx()
@@ -741,17 +742,23 @@ impl Scheduler {
 
     // Helper function used by unpark and wake_sleeping_threads
     pub(super) fn wake_by_index(&self, threads: &mut Threads, idx: usize) {
-        let (did_unpark, affinity) = threads.make_blocked_ready(idx);
-        if did_unpark {
-            // If the unparked thread has affinity for the other hart, send an IPI
-            if let Some(h) = affinity
-                && h as usize != crate::arch::hart_id()
-            {
-                ipi::send(ipi::RESCHEDULE);
-            } else {
-                // In order to avoid waiting a time slice, set the preempt flag
-                percpu::set_needs_reschedule();
+        match threads.make_blocked_ready(idx) {
+            UnblockedResult::Unparked(affinity) => {
+                // If the unparked thread has affinity for the other hart, send an IPI
+                if let Some(h) = affinity
+                    && h as usize != crate::arch::hart_id()
+                {
+                    ipi::send(ipi::RESCHEDULE);
+                } else {
+                    // In order to avoid waiting a time slice, set the preempt flag
+                    percpu::set_needs_reschedule();
+                }
             }
+            UnblockedResult::Deferred => {
+                // We need a wake up
+                self.needs_wakeup.set(idx);
+            }
+            UnblockedResult::NotBlocked => {}
         }
     }
 
