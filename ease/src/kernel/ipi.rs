@@ -24,11 +24,18 @@ pub fn init() {
     mie::enable_bits(mie::MSIE);
 }
 
+/// Bench-only: IPIs sent by either hart since boot, so a benchmark can
+/// count cross-hart kicks inside its window.
+#[cfg(feature = "bench")]
+pub static SENT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 pub fn send(reason: usize) {
     assert!(reason < MAILBOX_SIZE, "Unknown IPI reason");
     let that_hart_id = percpu::that_hart_id();
     // If the other HART is offline these IPIs are ignored which is fine since no other threads are running
     if percpu::other_scheduler_online() {
+        #[cfg(feature = "bench")]
+        SENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         MAILBOX[that_hart_id].set(reason);
         clint::set_msip(that_hart_id);
     }

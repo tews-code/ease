@@ -37,7 +37,11 @@ rust-objcopy -O binary \
 #Start QEMU
 # QEMU virt requires 32MB flash even though we are modelling 16MB
 # Use accel and tb-size at 64MB to prevent stalls
-$QEMU -accel tcg,tb-size=64 \
+# EASE_QEMU_ARGS: extra flags for one-off runs, e.g. "-icount shift=0" to
+# make mcycle count guest instructions (deterministic, host-independent;
+# forces single-threaded TCG and a virtual clock, so timing-sensitive
+# tests are not meaningful under it).
+$QEMU -accel tcg,tb-size=64 ${EASE_QEMU_ARGS:-} \
     -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
     -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
