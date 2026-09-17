@@ -419,7 +419,12 @@ impl Scheduler {
                     sched.snapshot_raw("ps-ready");
                 }
             }
-            if percpu::other_scheduler_online() {
+            if percpu::other_scheduler_online()
+                && let Some(tcb) = sched.thread_blocks.0[switched_from_idx].as_ref()
+                && tcb
+                    .affinity
+                    .is_none_or(|hart| hart as usize != crate::arch::hart_id())
+            {
                 let other_idx = percpu::other_current_thread_idx();
                 let other = sched.thread_blocks.0[other_idx].as_ref().unwrap();
                 let now = timer::elapsed();
@@ -427,10 +432,7 @@ impl Scheduler {
                     now.saturating_sub(other.last_started_cycles)
                         .saturating_mul(other.priority as u64),
                 );
-                if sched.thread_blocks.0[switched_from_idx]
-                    .as_ref()
-                    .is_some_and(|tcb| tcb.pass < other_effective_pass)
-                {
+                if tcb.pass < other_effective_pass {
                     ipi::send(ipi::RESCHEDULE);
                 }
             }
