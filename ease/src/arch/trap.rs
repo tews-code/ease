@@ -346,6 +346,7 @@ per_hart::naked_asm_function!(
         "sw a0, 4 * 32(sp)",
 
         // Call the scheduler
+        "mv a0, sp",
         "call {run_resume_work}",
 
         // Return

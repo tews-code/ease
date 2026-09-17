@@ -116,6 +116,9 @@ pub(crate) enum Site {
     Wfi,
     /// Software cleared or set MIE at this call site
     At(&'static Location<'static>),
+    /// The trap handler is about to `mret` through a frame whose saved
+    /// `mstatus.MPIE` is set, so the `mret` itself turns interrupts back on
+    TrapReturn,
 }
 
 impl fmt::Display for Site {
@@ -124,6 +127,7 @@ impl fmt::Display for Site {
             Site::Trap(kind) => kind.fmt(f),
             Site::Wfi => f.write_str("wfi"),
             Site::At(loc) => write!(f, "{}:{}", loc.file(), loc.line()),
+            Site::TrapReturn => f.write_str("trap return"),
         }
     }
 }
@@ -217,15 +221,31 @@ struct Hart {
     count: AtomicU32,
     /// Closed sections whose opening site did not fit in `sites`
     overflow: AtomicU32,
+    /// Sections that were still open when the next one opened. Every
+    /// interrupts-on transition now has a hook (including `mret`), so a
+    /// non-zero count means a transition the tracer does not see.
+    dangling: AtomicU32,
     /// Longest section seen on this hart, any site
     longest: UnsafeCell<Section>,
     /// `mtime` at the last hook call, and the largest gap between consecutive
     /// hook calls with when it began. Hooks fire thousands of times a second on
     /// a busy hart, so this is a stall detector that works with interrupts
-    /// enabled too: the same gap at the same instant on both harts means the
-    /// virtual machine stopped.
+    /// enabled too.
+    ///
+    /// Read it against `SLICE_MS`. A thread that computes for a whole slice
+    /// takes no lock and no trap, so its only hook is the tick that ends the
+    /// slice: a gap of about the slice length is a full slice, not a stall.
+    /// Two such threads started together produce the same gap at the same
+    /// instant on both harts, which is what a whole-VM pause would also look
+    /// like, so that signature only means "stall" when the gap is not a
+    /// slice length. (Verified 2026-09-08: changing `SLICE_MS` 16 -> 11 moved
+    /// the 16.2 ms cluster to 11.2 ms.) The gaps worth chasing are the ones
+    /// that do not move with the slice.
     last_hook: UnsafeCell<u64>,
-    max_gap: UnsafeCell<(u64, u64)>,
+    /// The gap's length, when it began, and the hook that ended it. A gap
+    /// ended by a timer trap is a full slice; anything else means no tick
+    /// arrived for that long.
+    max_gap: UnsafeCell<(u64, u64, Option<Site>)>,
     sites: UnsafeCell<[Option<SiteStats>; SITES_MAX]>,
     /// Longest ticket-lock spin on this hart, and per-site lock hold times
     longest_wait: UnsafeCell<LockEvent>,
@@ -282,9 +302,10 @@ impl Hart {
             total: CounterU64::new(0),
             count: AtomicU32::new(0),
             overflow: AtomicU32::new(0),
+            dangling: AtomicU32::new(0),
             longest: UnsafeCell::new(Section::NONE),
             last_hook: UnsafeCell::new(0),
-            max_gap: UnsafeCell::new((0, 0)),
+            max_gap: UnsafeCell::new((0, 0, None)),
             sites: UnsafeCell::new([None; SITES_MAX]),
             longest_wait: UnsafeCell::new(LockEvent::NONE),
             longest_hold: UnsafeCell::new(LockEvent::NONE),
@@ -303,16 +324,18 @@ fn current_thread() -> u8 {
     percpu::current_thread_idx() as u8
 }
 
-/// Stamp a hook call and track the largest gap since the previous one.
+/// Stamp a hook call at `site` and track the largest gap since the previous
+/// one, remembering which hook ended it. The gap across a `wfi` sleep is
+/// idle time, not a stall, so a wake from `wfi` does not count.
 /// Must be called with interrupts disabled. Returns `mtime` now.
-fn hook_stamp(h: &Hart, count_gap: bool) -> u64 {
+fn hook_stamp(h: &Hart, site: Site) -> u64 {
     let now = timer::elapsed();
     // Safety: own hart, interrupts disabled — no concurrent writer.
     let last = unsafe { &mut *h.last_hook.get() };
     let gap = now.saturating_sub(*last);
     let max_gap = unsafe { &mut *h.max_gap.get() };
-    if count_gap && *last != 0 && gap > max_gap.0 {
-        *max_gap = (gap, *last);
+    if site != Site::Wfi && *last != 0 && gap > max_gap.0 {
+        *max_gap = (gap, *last, Some(site));
     }
     *last = now;
     now
@@ -320,13 +343,17 @@ fn hook_stamp(h: &Hart, count_gap: bool) -> u64 {
 
 /// Open a section: MIE has just gone from set to clear on this hart.
 ///
-/// Must be called with interrupts disabled. Overwrites any dangling open.
+/// Must be called with interrupts disabled. Overwrites any dangling open,
+/// counting it.
 pub(crate) fn open(site: Site) {
     let h = this_hart();
     // Safety: own hart, interrupts disabled — no concurrent writer.
-    // The gap across a `wfi` sleep is idle time, not a stall
-    let now = hook_stamp(h, site != Site::Wfi);
-    unsafe { *h.open.get() = Some((now, rdcycles(), site, current_thread())) };
+    let now = hook_stamp(h, site);
+    let slot = unsafe { &mut *h.open.get() };
+    if slot.is_some() {
+        h.dangling.fetch_add(1, Ordering::Relaxed);
+    }
+    *slot = Some((now, rdcycles(), site, current_thread()));
 }
 
 /// Close a section: MIE is about to go from clear to set on this hart.
@@ -335,7 +362,7 @@ pub(crate) fn open(site: Site) {
 pub(crate) fn close(close_site: Site) {
     let h = this_hart();
     // Safety: own hart, interrupts disabled — no concurrent writer.
-    let now = hook_stamp(h, true);
+    let now = hook_stamp(h, close_site);
     let Some((start, start_insns, open_site, open_thread)) = (unsafe { (*h.open.get()).take() })
     else {
         return;
@@ -373,6 +400,34 @@ pub(crate) fn close(close_site: Site) {
 /// The hardware door: trap entry cleared MIE. Tags the section with `mcause`.
 pub(crate) fn trap_entry() {
     open(Site::Trap(TrapKind::from_mcause(mcause::read())));
+}
+
+/// The hardware door out: the handler is done and the trap frame is about
+/// to be restored by `mret`, which copies the frame's `MPIE` into `MIE` and
+/// drops to the privilege in `MPP`. Closes the section only if that turns
+/// M-mode interrupts on, which happens two ways:
+/// - `MPIE` set: `MIE` comes back set.
+/// - `MPP` is U-mode: M-mode interrupts are always taken while running at
+///   a lower privilege, whatever `MIE` says (RISC-V privileged spec 3.1.6.1),
+///   so a user frame's `MPIE` is irrelevant.
+///
+/// A frame set up to divert into the kernel with interrupts disabled matches
+/// neither, and leaves the section open for the divert target to close.
+///
+/// Called with interrupts disabled, a few dozen instructions before the
+/// `mret` itself (the register restore is not counted).
+pub(crate) fn trap_return(frame_mstatus: usize) {
+    use crate::arch::csr::mstatus::{MPIE, MPP};
+    // A resume that blocked and was switched back in arrives here with
+    // interrupts already on and its section already closed; the hooks
+    // assume interrupts off, so leave.
+    if crate::arch::interrupts::enabled() {
+        return;
+    }
+    let returns_to_user = frame_mstatus & MPP == 0;
+    if frame_mstatus & MPIE != 0 || returns_to_user {
+        close(Site::TrapReturn);
+    }
 }
 
 /// An `IrqSpinLock` at `site` finished spinning on its ticket; the spin began
@@ -450,22 +505,27 @@ pub(crate) fn write_report(w: &mut impl Write) -> fmt::Result {
         let permille = total.saturating_mul(1000).checked_div(elapsed).unwrap_or(0);
         writeln!(
             w,
-            "irqsoff hart {id}: interrupts off {}.{}% of {} ms across {} sections ({} unattributed)",
+            "irqsoff hart {id}: interrupts off {}.{}% of {} ms across {} sections ({} unattributed, {} dangling)",
             permille / 10,
             permille % 10,
             elapsed / CYCLES_PER_MS,
             h.count.load(Ordering::Relaxed),
             h.overflow.load(Ordering::Relaxed),
+            h.dangling.load(Ordering::Relaxed),
         )?;
         // Safety: racy read of the other hart's record, by design.
         writeln!(w, "  longest: {}", unsafe { *h.longest.get() })?;
-        let (gap, at) = unsafe { *h.max_gap.get() };
-        writeln!(
+        let (gap, at, ended_by) = unsafe { *h.max_gap.get() };
+        write!(
             w,
             "  largest gap between hook calls: {} us at {} ms",
             gap / CYCLES_PER_US,
             at / CYCLES_PER_MS
         )?;
+        if let Some(site) = ended_by {
+            write!(w, ", ended by {site}")?;
+        }
+        writeln!(w)?;
         // Rank by longest section without copying the table: a panic in the
         // trap handler reports from the 1.5 KB IRQ stack.
         let sites = unsafe { &*h.sites.get() };
@@ -586,14 +646,18 @@ pub(crate) fn test_boundary(next_test: &'static str) {
             seen[id] = longest.cycles;
             crate::println!("irqsoff: hart {id} longest grew during {prev}: {longest}");
         }
-        let (gap, at) = unsafe { *h.max_gap.get() };
+        let (gap, at, ended_by) = unsafe { *h.max_gap.get() };
         if gap > seen_gap[id] {
             seen_gap[id] = gap;
-            crate::println!(
+            crate::print!(
                 "irqsoff: hart {id} largest hook gap grew during {prev}: {} us at {} ms",
                 gap / CYCLES_PER_US,
                 at / CYCLES_PER_MS
             );
+            if let Some(site) = ended_by {
+                crate::print!(", ended by {site}");
+            }
+            crate::println!();
         }
         let wait = unsafe { *h.longest_wait.get() };
         if wait.cycles > seen_wait[id] {

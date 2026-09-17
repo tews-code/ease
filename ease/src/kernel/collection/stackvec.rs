@@ -1,5 +1,6 @@
 //! Vector on the stack
 
+use core::fmt::Write;
 use core::mem::MaybeUninit;
 use core::ops::{Index, IndexMut};
 
@@ -151,6 +152,17 @@ impl<T: Copy, const N: usize> IndexMut<usize> for StackVec<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         assert!(index < self.len, "index out of bounds");
         unsafe { self.buf[index].assume_init_mut() }
+    }
+}
+
+impl<const N: usize> Write for StackVec<u8, N> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        for byte in s.bytes() {
+            if self.push(byte).is_err() {
+                return Err(core::fmt::Error);
+            }
+        }
+        Ok(())
     }
 }
 

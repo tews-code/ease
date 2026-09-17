@@ -1,5 +1,6 @@
 //! Keyboard event reader
 
+use crate::drivers::keyboard::DecodedKey;
 use crate::kernel::timer;
 use crate::shell::vt_parse::{EscapeParser, Key, ParseResult};
 
@@ -22,11 +23,11 @@ impl Keyboard {
     /// Polls for a keyboard event. Calls `read_byte` to get raw UART input.
     /// Returns `None` if no input is available. May block briefly (up to 2ms)
     /// when resolving escape sequences.
-    pub fn poll(&mut self, mut read_byte: impl FnMut() -> Option<usize>) -> Option<KeyEvent> {
+    pub fn poll(&mut self, mut read_byte: impl FnMut() -> Option<DecodedKey>) -> Option<KeyEvent> {
         if let Some(b) = self.parser.pending_byte() {
             return Some(KeyEvent::Byte(b));
         }
-        let byte = read_byte()?; // If no byte return None immediately
+        let byte = read_byte()?.code(); // If no byte return None immediately
 
         match self.parser.parse(byte as u8) {
             ParseResult::Byte(b) => Some(KeyEvent::Byte(b)),
@@ -37,7 +38,7 @@ impl Keyboard {
                 let start = timer::elapsed_ms();
                 loop {
                     if let Some(next) = read_byte() {
-                        match self.parser.parse(next as u8) {
+                        match self.parser.parse(next.code() as u8) {
                             ParseResult::Byte(b) => return Some(KeyEvent::Byte(b)), // Fallen out of sequence with ordinary byte
                             ParseResult::Special(k) => return Some(KeyEvent::Special(k)), // Fallen out of sequence with special char
                             ParseResult::InvalidSequence => return None,
@@ -65,7 +66,7 @@ mod tests {
     /// Helper: poll with a fixed sequence of bytes, then None thereafter
     fn poll_bytes(kb: &mut Keyboard, bytes: &[usize]) -> Option<KeyEvent> {
         let mut iter = bytes.iter();
-        kb.poll(|| iter.next().copied())
+        kb.poll(|| iter.next().copied().map(|c| DecodedKey::from_code(c)))
     }
 
     #[test_case]

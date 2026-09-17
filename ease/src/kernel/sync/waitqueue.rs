@@ -71,8 +71,13 @@ impl WaitQueue {
             inner: IrqSpinLock::new(WaitQueueInner::new()),
         }
     }
-    /// Use for kernel threads that are never exited
-    /// For user threads that may fault use [Self::wait_with_interruptible]
+    /// Use for kernel threads that are never exited.
+    /// For user threads that may fault use [Self::wait_with_interruptible].
+    ///
+    /// The first argument is a spinlock on the resource of interest.
+    /// The second argument is a closure what examines the resource state
+    /// and returns `true` if the state matches the wait criteria, or `false`
+    /// if they do not match and the thread can go back to sleep.
     ///
     /// Lock order is (1) Resource (2) WaitQueue (3) Scheduler
     pub(crate) fn wait_with<'a, F, R>(

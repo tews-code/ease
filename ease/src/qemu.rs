@@ -9,6 +9,8 @@
 
 #[cfg(test)]
 mod inner {
+    use crate::drivers::uart;
+
     /// Address of the SiFive test device on QEMU virt machine
     const SIFIVE_TEST_ADDR: usize = 0x100000;
 
@@ -23,6 +25,8 @@ mod inner {
     /// Writes to the SiFive test device to terminate QEMU cleanly.
     /// Used by test framework when all tests pass.
     pub fn exit_success() -> ! {
+        // Flush the UART
+        uart::flush();
         // FINISHER_PASS with exit code 0 in upper 16 bits
         unsafe {
             core::ptr::write_volatile(SIFIVE_TEST_ADDR as *mut u32, FINISHER_PASS);
@@ -35,6 +39,8 @@ mod inner {
     /// Writes to the SiFive test device to terminate QEMU with error.
     /// Used by test framework when a test fails.
     pub fn exit_failure() -> ! {
+        // Flush the UART
+        uart::flush();
         // FINISHER_FAIL with exit code 1 in upper 16 bits
         // Format: (exit_code << 16) | status
         unsafe {

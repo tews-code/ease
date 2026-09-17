@@ -77,8 +77,6 @@ impl VirtioBlkDev {
         let cap_hi = mmio::read32(blk::BASE, super::VIRTIO_REG_DEVICE_CONFIG + 4) as u64;
         let capacity = (cap_hi << 32 | cap_lo) * blk::BLOCK_SIZE as u64;
 
-        crate::println!("virtio-blk: capacity is {} bytes", capacity);
-
         // Allocate a region to store requests to the device.
         // Safety: VirtioBlkReq contains only integer types and byte arrays.
         // All-zero bytes is a valid representation for all fields.
@@ -231,6 +229,9 @@ pub fn virtio_blk_init() {
     );
     // Enable the block device
     *blk_dev = Some(VirtioBlkDev::new());
+    let capacity = blk_dev.as_ref().unwrap().capacity;
+    drop(blk_dev);
+    crate::println!("virtio-blk: capacity is {} bytes", capacity);
 }
 
 pub fn with_blk_dev<F, R>(f: F) -> R

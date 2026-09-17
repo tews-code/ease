@@ -187,7 +187,6 @@ impl<T> SpinLock<T> {
         SpinLockGuard { lock: self }
     }
 
-    #[allow(dead_code)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Only attempt CAS
         // We use full compare_exchange to avoid spurious lack of locking. This costs a rarely used branch,
@@ -224,5 +223,30 @@ impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
 impl<'a, T> Drop for SpinLockGuard<'a, T> {
     fn drop(&mut self) {
         self.lock.locked.store(false, Ordering::Release);
+    }
+}
+
+//-------------------------------------------------------------------------
+//
+//  TryLock
+//
+//-------------------------------------------------------------------------
+
+/// TryLock is a thin wrapper on SpinLock that can only be called through try_lock.
+///
+/// Not intended for contended locks, as it does not spin, and failure to lock simply
+/// means another thread is holding the resource (possibly for the lifetime of that thread).
+///
+/// Used to "lend" the `T` to one thread at a time.
+pub struct TryLock<T>(SpinLock<T>);
+
+impl<T> TryLock<T> {
+    /// New TryLock which just wraps a new SpinLock
+    pub const fn new(value: T) -> Self {
+        Self(SpinLock::new(value))
+    }
+    /// Try to get the lock. This is the only way to use this spin lock
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        self.0.try_lock()
     }
 }

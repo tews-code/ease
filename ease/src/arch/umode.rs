@@ -72,9 +72,18 @@ use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::ExitReason;
 use crate::kernel::sched::{self, post_switch_cleanup, userloader::UserEntry};
 use crate::kernel::stack;
+use crate::kernel::sync;
+use crate::kernel::trap::{Work, divert_work_to_kernel};
 use core::arch::naked_asm;
 use core::ptr::NonNull;
 use ease_abi::syscall;
+#[cfg(feature = "profile")]
+use ease_macros::profile;
+
+pub(crate) enum EcallResult {
+    Completed,
+    Diverted,
+}
 
 impl trap::Frame {
     /// Forge a trap frame in the thread's kernel stack'
@@ -174,6 +183,36 @@ pub unsafe fn init_stack_for_user_thread(
     }
     context_ptr.cast::<u8>()
 }
+/// Sets up user thread for first run
+///
+/// This function is called with interrupts disabled,
+/// the trap frame pointed to by `a0`.
+/// Every general register is overwritten in the frame restore
+#[unsafe(naked)]
+pub extern "C" fn user_first_run() -> ! {
+    naked_asm!(
+        // Like any `switched_to` thread, we first need to clean up the last thread's activity
+        "call {post_switch_cleanup}",
+        // The frame we are about to mret through is final: let the irqsoff tracer
+        // close the section the scheduler left open. sp survives the call (callee-saved).
+        "mv a0, sp",
+        "call {first_run_trap_return}",
+        // The trap frame is passed to the trap return in the first argument `a0`. Right now our stack pointer is pointing to the full stack
+        "mv a0, sp",
+        // Branch by HART; t0 is restored by the trap return so can be used here
+        "csrr t0, mhartid",
+        "bnez t0, 1f",
+        "tail {trap_return_h0}",
+
+        "1:",
+        "tail {trap_return_h1}",
+
+        post_switch_cleanup = sym post_switch_cleanup,
+        first_run_trap_return = sym crate::kernel::trap::first_run_trap_return,
+        trap_return_h0 = sym trap::trap_return_h0,
+        trap_return_h1 = sym trap::trap_return_h1,
+    );
+}
 /// User threads that exit via this function are faulting or voluntary exit.
 /// Threads that are exited in `post_switch_cleanup` do not pass through this function.
 /// It is possible for multiple threads in the same process running on different HARTs to
@@ -196,25 +235,32 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
 ///
 /// # Panics #
 /// Panics if the system call number is unknown
-pub(crate) extern "C" fn user_thread_block(
-    return_address: usize,
-    user_sp: usize,
-    syscall: usize,
-) -> ! {
+pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
     match syscall {
         syscall::GET_CHAR => {
             // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
             sched::exit_user_thread_if_needs_exit();
-            loop {
-                if let Some(b) = keyboard::read_key() {
-                    resume_user(0, b, return_address, user_sp);
-                } else {
-                    // Block using a completion on the key press
-                    if keyboard::KEY_PENDING.wait_interruptible().is_err() {
-                        sched::exit_user_thread(ExitReason::Fault);
-                    };
-                }
+            // Block using a wait queue, with a closure to evalute the key press
+            let mut key = None;
+            let result = keyboard::queue::KEYS_PENDING.wait_with_interruptible(
+                &keyboard::queue::CONSUMER,
+                |consumer| {
+                    key = consumer
+                        .as_mut()
+                        .expect("decoded key queue must be initialised")
+                        .pop();
+                    key.is_some()
+                },
+            );
+            match result {
+                Ok(guard) => drop(guard),
+                Err(sync::Interrupted) => sched::exit_user_thread(ExitReason::Fault),
             }
+            // Return the key in the frame's value field
+            frame.a0 = 0;
+            frame.a1 = key
+                .expect("wait should only have returned on a valid key popped")
+                .code();
         }
         // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
         // discipline. The guard lives in an inner scope: on Err(Interrupted)
@@ -236,57 +282,45 @@ pub(crate) extern "C" fn user_thread_block(
         _ => panic!("unexpected blocking syscall: {}", syscall),
     }
 }
-/// Sets up user thread for first run
+/// Handle U-mode ecalls
 ///
-/// This function is called with interrupts disabled,
-/// the trap frame pointed to by `a0`.
-/// Every general register is overwritten in the frame restore
-#[unsafe(naked)]
-pub extern "C" fn user_first_run() -> ! {
-    naked_asm!(
-        // Like any `switched_to` thread, we first need to clean up the last thread's activity
-        "call {post_switch_cleanup}",
-        // The trap frame is passed to the trap return in the first argument `a0`. Right now our stack pointer is pointing to the full stack
-        "mv a0, sp",
-        // Branch by HART; t0 is restored by the trap return so can be used here
-        "csrr t0, mhartid",
-        "bnez t0, 1f",
-        "tail {trap_return_h0}",
-
-        "1:",
-        "tail {trap_return_h1}",
-
-        post_switch_cleanup = sym post_switch_cleanup,
-        trap_return_h0 = sym trap::trap_return_h0,
-        trap_return_h1 = sym trap::trap_return_h1,
-    );
-}
-/// Return to user thread from M mode
-///
-/// `error` is returned in `a0` with 0 indicating success
-/// `value` is returned in `a1`
-#[unsafe(naked)]
-pub extern "C" fn resume_user(
-    error: usize,
-    value: usize,
-    resume_address: usize,
-    user_sp: usize,
-) -> ! {
-    naked_asm!(
-        // Note that `error` is already in a0 and value is already in a1 as they are the first function arguments
-        // Set up stack pointer
-        "mv sp, a3",
-        "li t0, {mstatus_MIE}", //Ensure interrupts are disabled so this asm doesn't get interrupted
-        "csrc mstatus, t0",
-        "li t0, {mstatus_MPP}", // Ensure mret retuns to U-mode
-        "csrc mstatus, t0",
-        "li t0, {mstatus_MPIE}",// Not strictly required (as overwritten by next trap) but matches forged context
-        "csrc mstatus, t0",
-        // Set the return address to the user thread
-        "csrw mepc, a2",
-        "mret",
-        mstatus_MIE = const crate::arch::csr::mstatus::MIE,
-        mstatus_MPP = const crate::arch::csr::mstatus::MPP,
-        mstatus_MPIE = const crate::arch::csr::mstatus::MPIE
-    );
+/// We only expect ecalls from u-mode
+/// For blocking calls we use the percpu::resume_* stash
+#[inline(never)]
+#[cold]
+#[cfg_attr(feature = "profile", profile)]
+pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> EcallResult {
+    match frame.syscall() {
+        syscall::EXIT => {
+            frame.a0 = ExitReason::Exit as usize;
+            frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
+            EcallResult::Diverted
+        }
+        syscall::PUT_CHAR => {
+            // Advance mepc
+            frame.mepc += 4;
+            if let Some(c) = char::from_u32(frame.a0 as u32) {
+                crate::dprint!("{c}");
+            }
+            frame.a0 = 0; // Report success
+            frame.a1 = 0;
+            EcallResult::Completed
+        }
+        syscall::GET_CHAR => {
+            divert_work_to_kernel(frame, frame.mepc + 4, Work::Syscall(frame.syscall()));
+            EcallResult::Diverted
+        }
+        // Test-only: park holding a kernel mutex, for the boundary-kill test.
+        #[cfg(all(test, feature = "test-sched"))]
+        syscall::TEST_MUTEX_BLOCK => {
+            divert_work_to_kernel(frame, frame.mepc + 4, Work::Syscall(frame.syscall()));
+            EcallResult::Diverted
+        }
+        _ => {
+            // Advance mepc
+            frame.mepc += 4;
+            crate::dprint!("user ecall code {}", frame.syscall());
+            EcallResult::Completed
+        }
+    }
 }

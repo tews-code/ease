@@ -200,6 +200,10 @@ mod kernel {
     }
     pub mod percpu {
         pub fn set_needs_reschedule() {}
+
+        pub fn current_thread_idx() -> usize {
+            0
+        }
     }
     pub mod profile;
     pub mod sync;

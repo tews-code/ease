@@ -4,12 +4,12 @@ use core::sync::atomic::Ordering;
 
 use crate::arch::csr::mcause::{self, Trap, exception::*, interrupt::*};
 use crate::arch::csr::{mepc, mtval};
+use crate::arch::umode::EcallResult;
 use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::sched::{ExitReason, userloader};
 use crate::kernel::{ipi, panic, percpu, sched, stack};
-use ease_abi::syscall;
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -24,11 +24,30 @@ unsafe extern "C" {
 #[cfg_attr(feature = "profile", profile)]
 pub(crate) extern "C" fn trap_handler_h0(frame: &mut trap::Frame) {
     trap_handler_impl(frame);
+    // The frame is final here: the `mret` that follows in trap_return
+    // copies its MPIE into MIE, so this is where the section ends.
+    #[cfg(feature = "irqsoff")]
+    crate::kernel::irqsoff::trap_return(frame.mstatus);
 }
 #[unsafe(link_section = ".sram9_text")]
 #[cfg_attr(feature = "profile", profile)]
 pub(crate) extern "C" fn trap_handler_h1(frame: &mut trap::Frame) {
     trap_handler_impl(frame);
+    #[cfg(feature = "irqsoff")]
+    crate::kernel::irqsoff::trap_return(frame.mstatus);
+}
+/// Helper function for divert work to the kernel
+pub(crate) fn divert_work_to_kernel(frame: &mut trap::Frame, mepc: usize, work: Work) {
+    // Stash this current thread's details in percpu
+    percpu::set_resume_mepc(mepc);
+    percpu::set_resume_mstatus(frame.mstatus);
+    percpu::set_resume_sp(frame.sp);
+    percpu::set_resume_work(work);
+    frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
+        trap::resume_trampoline_h0 as *const () as usize
+    } else {
+        trap::resume_trampoline_h1 as *const () as usize
+    });
 }
 /// Common trap handler that each HART runs independently in its own .text
 ///
@@ -92,7 +111,7 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
             // Drain my IPI mailbox flags
             let flags = ipi::drain();
             if flags.get(ipi::FENCEI) {
-                arch::fence_i();
+                arch::fence_instruction();
                 // Let the other HART know that the fence is complete
                 userloader::FENCE_ACK.store(true, Ordering::Relaxed);
             }
@@ -102,9 +121,10 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),
-        Trap::Exception(ECALL_FROM_U) => {
-            handle_ecall(frame);
-        }
+        Trap::Exception(ECALL_FROM_U) => match umode::handle_ecall(frame) {
+            EcallResult::Completed => {}
+            EcallResult::Diverted => return,
+        },
         Trap::Exception(ECALL_FROM_M) => {
             // Advance mepc
             frame.mepc += 4;
@@ -131,30 +151,23 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         }
         // Check if this user thread should be exited
         if sched::current_user_thread_needs_exit() {
-            percpu::set_resume_mepc(frame.mepc);
-            percpu::set_resume_mstatus(frame.mstatus);
-            percpu::set_resume_sp(frame.sp);
-            percpu::set_resume_work(Work::Exit(ExitReason::Fault));
-            frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
-                trap::resume_trampoline_h0 as *const () as usize
-            } else {
-                trap::resume_trampoline_h1 as *const () as usize
-            });
-            // Early return to avoid needs_reschedule below
+            divert_work_to_kernel(frame, frame.mepc, Work::Exit(ExitReason::Fault));
             return;
         }
     }
     if percpu::needs_reschedule() {
-        percpu::set_resume_mepc(frame.mepc);
-        percpu::set_resume_mstatus(frame.mstatus);
-        percpu::set_resume_sp(frame.sp);
-        percpu::set_resume_work(Work::Preempt);
-        frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
-            trap::resume_trampoline_h0 as *const () as usize
-        } else {
-            trap::resume_trampoline_h1 as *const () as usize
-        });
+        divert_work_to_kernel(frame, frame.mepc, Work::Preempt);
     }
+}
+/// Third and last place a frame is final before its `mret`: a user thread's
+/// first run tails into trap_return straight from asm (see
+/// `umode::user_first_run`). Empty without `irqsoff`; the call costs a few
+/// cycles once per user thread.
+pub(crate) extern "C" fn first_run_trap_return(frame: &mut trap::Frame) {
+    #[cfg(feature = "irqsoff")]
+    crate::kernel::irqsoff::trap_return(frame.mstatus);
+    #[cfg(not(feature = "irqsoff"))]
+    let _ = frame;
 }
 /// The kind of work that the thread should do on resume
 #[derive(Clone, Copy)]
@@ -162,7 +175,7 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
 pub(crate) enum Work {
     // Preempt must remain the first variant — NOLOAD percpu zero-fill depends on it.
     Preempt,
-    // Syscall(usize),
+    Syscall(usize),
     Exit(ExitReason),
 }
 /// Examines the percpu resume work field and dispatches to resume that work
@@ -170,52 +183,18 @@ pub(crate) enum Work {
 ///
 /// The caller *must* use [percpu::set_resume_work] before this is called, otherwise
 /// the stale value will be used.
-pub(crate) extern "C" fn run_resume_work() {
+pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
     match percpu::resume_work() {
         Work::Preempt => sched::schedule(),
+        Work::Syscall(syscall) => umode::user_thread_block(frame, syscall),
         Work::Exit(reason) => sched::exit_user_thread(reason),
     }
-}
-
-#[inline(never)]
-#[cold]
-#[cfg_attr(feature = "profile", profile)]
-fn handle_ecall(frame: &mut trap::Frame) {
-    match frame.syscall() {
-        syscall::EXIT => {
-            frame.a0 = ExitReason::Exit as usize;
-            frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
-        }
-        syscall::PUT_CHAR => {
-            // Advance mepc
-            frame.mepc += 4;
-            if let Some(c) = char::from_u32(frame.a0 as u32) {
-                crate::dprint!("{c}");
-            }
-            frame.a0 = 0; // Report success
-            frame.a1 = 0;
-        }
-        syscall::GET_CHAR => {
-            // Set up frame for user_thread_block
-            frame.a0 = frame.mepc + 4; // When we return to user mode we need to have advanced
-            frame.a1 = frame.sp; // Must do this before divert, since divert clobbers frame.sp
-            frame.a2 = syscall::GET_CHAR;
-            frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
-        }
-        // Test-only: park holding a kernel mutex, for the boundary-kill test.
-        #[cfg(all(test, feature = "test-sched"))]
-        syscall::TEST_MUTEX_BLOCK => {
-            frame.a0 = frame.mepc + 4;
-            frame.a1 = frame.sp; // Must do this before divert, since divert clobbers frame.sp
-            frame.a2 = syscall::TEST_MUTEX_BLOCK;
-            frame.set_up_for_divert_to_kernel(umode::user_thread_block as *const () as usize);
-        }
-        _ => {
-            // Advance mepc
-            frame.mepc += 4;
-            crate::dprint!("user ecall code {}", frame.syscall());
-        }
-    }
+    // The resume trampoline tails into trap_return from here, bypassing the
+    // trap handler, so this is the other place a frame is final before its
+    // `mret`. If the work above switched threads, the section was already
+    // closed by the scheduler and this finds nothing open.
+    #[cfg(feature = "irqsoff")]
+    crate::kernel::irqsoff::trap_return(frame.mstatus);
 }
 /// Handle remaining exceptions
 ///

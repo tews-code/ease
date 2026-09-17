@@ -43,3 +43,11 @@ pub fn write32(base: usize, offset: usize, value: u32) {
         core::ptr::write_volatile((base + offset) as *mut u32, value)
     }
 }
+/// Fence to order between a memory write and a subsequent mmio output
+pub(crate) fn fence_mem_write_to_mmio_write() {
+    unsafe { core::arch::asm!("fence w, o",) }
+}
+/// Fence to order between an mmio output and a subsequent memory read
+pub(crate) fn fence_mmio_write_to_mem_read() {
+    unsafe { core::arch::asm!("fence o, r",) }
+}

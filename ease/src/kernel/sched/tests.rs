@@ -2346,20 +2346,72 @@ fn seventh_thread_never_joins_a_process() {
 // Two threads in a BLOB process: the second thread enters at the window
 // base — the only address the kernel knows for a blob image, which is
 // ulib's `_start` — so both threads run main on separate stacks and exit
-// independently. slow-exit's main busy-delays long enough for the second
-// spawn to land before the first exit. The process must tear down only
-// once BOTH threads have exited (thread-count accounting for blobs),
-// observed as the PCB slot going stale.
+// independently. wait-exit's main parks in GET_CHAR, so each thread's
+// lifetime is under the test's control: the second spawn lands while the
+// first thread is provably blocked, then one injected key releases each
+// thread in turn. The process must tear down only once BOTH threads have
+// exited (thread-count accounting for blobs), observed as the PCB slot
+// going stale.
 #[test_case]
 fn blob_process_second_thread_at_start_then_teardown() {
     unsafe extern "C" {
         static __user_text_start: u8;
     }
-    let handle = crate::kernel::sched::spawn_process("slow-exit")
+    // Number of this process's threads currently parked in GET_CHAR.
+    fn blocked_threads(handle: &super::process::Handle) -> usize {
+        let sched = super::SCHEDULER.sched.lock();
+        sched
+            .thread_blocks
+            .0
+            .iter()
+            .filter(|slot| {
+                matches!(slot, Some(tcb)
+                    if tcb.user.as_ref().is_some_and(|u| u.process_idx as usize == handle.idx)
+                    && matches!(tcb.state, super::State::Blocked))
+            })
+            .count()
+    }
+    fn wait_for_blocked(handle: &super::process::Handle, n: usize) -> bool {
+        for _ in 0..200 {
+            if blocked_threads(handle) == n {
+                return true;
+            }
+            crate::kernel::sched::sleep(10);
+        }
+        false
+    }
+    fn release_one() {
+        crate::drivers::keyboard::inject_key(crate::drivers::keyboard::DecodedKey::from_code(
+            b'k' as usize,
+        ));
+    }
+
+    let handle = crate::kernel::sched::spawn_process("wait-exit")
         .expect("blob process spawn should succeed");
+    assert!(
+        wait_for_blocked(&handle, 1),
+        "first thread never parked in GET_CHAR"
+    );
     let start = UserEntry::from_addr(&raw const __user_text_start as usize);
     crate::kernel::sched::spawn_user(&handle, start)
         .expect("second thread should join the blob process at _start");
+    assert!(
+        wait_for_blocked(&handle, 2),
+        "second thread never parked in GET_CHAR"
+    );
+    // Release the threads one at a time, so the test does not depend on
+    // how many waiters a single Completion signal wakes. The process must
+    // still be alive after the first exit.
+    release_one();
+    assert!(
+        wait_for_blocked(&handle, 1),
+        "first released thread never exited"
+    );
+    assert!(
+        process_alive(&handle),
+        "process tore down with a thread still parked"
+    );
+    release_one();
     let mut torn_down = false;
     for _ in 0..200 {
         if !process_alive(&handle) {
@@ -2580,6 +2632,61 @@ fn blocked_user_thread_frames_on_kernel_stack() {
     assert!(drained, "echo process never released after fault-kill");
 }
 
+// REGRESSION GUARD for the single trap-return path: a blocking syscall
+// hands back every register except its two results. The probe program
+// loads a distinctive value into s0-s11, t0-t6 and a2-a7, blocks in
+// GET_CHAR, and after the kernel injects a key compares all 25 (see
+// user::user_register_probe). REG OK on the console plus a clean exit
+// is the pass signal; any mismatch prints REG MISMATCH <bitmask> and
+// spins, so the drain timeout below is the failure. Before the syscall path went
+// through the trampoline's full Frame, the s registers survived only by
+// C-ABI discipline and the t/a registers leaked kernel values.
+#[test_case]
+fn blocking_syscall_preserves_user_registers() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle = crate::kernel::sched::spawn_process("user_register_probe")
+        .expect("register probe spawn should succeed");
+    // Wait for the probe to park in GET_CHAR so the key wakes it through
+    // the blocking path rather than being read on the way in.
+    let mut blocked = false;
+    for _ in 0..200 {
+        {
+            let sched = super::SCHEDULER.sched.lock();
+            blocked = sched.thread_blocks.0.iter().any(|slot| {
+                matches!(slot, Some(tcb) if tcb.user.as_ref().is_some_and(|u| u.process_idx as usize == handle.idx)
+                    && matches!(tcb.state, super::State::Blocked))
+            });
+        }
+        if blocked {
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(blocked, "register probe never blocked in GET_CHAR");
+    crate::drivers::keyboard::inject_key(crate::drivers::keyboard::DecodedKey::from_code(
+        b'k' as usize,
+    ));
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        drained,
+        "register probe did not exit: a register was not preserved across the blocking syscall (see REG MISMATCH on the console)"
+    );
+    // A fault-kill drains the process too, so demand the probe's own verdict.
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("REG OK"),
+        "register probe drained without printing REG OK: it faulted or mis-resumed instead of returning from the syscall"
+    );
+}
+
 // Exercises the user-stack canary response: user_canary_stomp overwrites
 // the canary word at the base of its own stack (its own memory — PMP
 // permits it) and spins. The trap handler's post-match canary check must
@@ -2710,18 +2817,21 @@ fn fixed_leeway_sleeper_never_wakes_early() {
 // Institutionalizes the console-backpressure discovery (2026-09-02): the
 // old UART writer deadlocked when the TX ring filled — it spun waiting
 // for the drain interrupt while holding the IrqSpinLock that masked it.
-// This test makes the overflow deterministic: a single print!() larger
-// than TX_BUF runs entirely under the writer lock (interrupts off), so
-// no drain interrupt can empty the ring mid-write — the ring MUST fill
-// and every further byte MUST go through the writer's self-drain valve.
-// A helper floods from (usually) the other hart at the same time, so the
-// valve also contends with the real interrupt consumer for the drain
-// lock. Success is simply completion: under the old driver this test
-// hangs mid-print, exactly like ghost (d)'s truncated console lines.
+// The writer's contract is now printk-shaped: a print never blocks and
+// never panics; bytes that find the ring full are dropped and counted,
+// and the count is reported as a "Lost bytes: N" marker pushed the next
+// time a write finds room for it. This test makes the overflow
+// deterministic: a single print!() larger than TX_LEN cannot fit, so
+// bytes MUST be dropped and the marker MUST appear. A helper floods from
+// (usually) the other hart at the same time so the writer lock is also
+// contended. Completion proves no deadlock; the captured output (test-io)
+// proves the loss was reported rather than silent.
 #[test_case]
 fn console_flood_survives_tx_backpressure() {
     static FLOOD_DONE: AtomicUsize = AtomicUsize::new(0);
     FLOOD_DONE.store(0, Ordering::Relaxed);
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
 
     fn flooder() {
         // Width padding makes fmt emit kilobytes through one locked writer
@@ -2750,4 +2860,24 @@ fn console_flood_survives_tx_backpressure() {
         crate::kernel::sched::sleep(10);
     }
     assert!(done, "flooder thread never completed its oversized print");
+
+    // The capture buffer records bytes accepted into the ring (marker
+    // included), so the first marker lands well inside its 4 KB.
+    #[cfg(feature = "test-io")]
+    {
+        const MARKER: &str = "Lost bytes: ";
+        const TOTAL_PRINTED: usize = 3000 + 4 * 2000 + 1;
+        let out = crate::io::test_io::output();
+        let at = out
+            .find(MARKER)
+            .expect("oversized prints must drop bytes and report them with a Lost bytes marker");
+        let digits: &str = out[at + MARKER.len()..].split('\n').next().unwrap_or("");
+        let lost: usize = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("Lost bytes marker not followed by a count: {digits:?}"));
+        assert!(
+            lost > 0 && lost < TOTAL_PRINTED,
+            "lost-byte count {lost} is not a plausible fraction of {TOTAL_PRINTED} printed bytes"
+        );
+    }
 }

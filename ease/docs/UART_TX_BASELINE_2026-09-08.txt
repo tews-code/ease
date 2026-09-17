@@ -1,0 +1,249 @@
+UART TX baseline before the 'too simple v4' redesign
+Captured 2026-09-08 on the old self-drain design (commit 6f164ff lineage).
+Tree: HEAD 72ce0a8 plus uncommitted trap-return work in arch/trap.rs, arch/umode.rs,
+      drivers/keyboard.rs, kernel/sched/tests.rs, kernel/trap.rs, user.rs.
+Units: mcycle on QEMU is host time, 1000 cycles = 1 us. Compare MIN across designs; avg is QEMU noise.
+
+== Full ci.sh: pass, ~26 s wall.
+
+== irqsoff (./scripts/ci.sh --irqsoff --test=test-sched) — the number v4 should collapse
+UART_WRITER lock at drivers/uart.rs:244 is the longest interrupts-off section on both harts.
+irqsoff hart 0: interrupts off 28.3% of 4959 ms across 5078 sections (0 unattributed)
+  longest: 17488 us / 17469 kcyc at 492 ms  ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244  (thread 5 -> 5)
+      17488        17469        25677        131   5->5   ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244
+  longest lock wait: 1388 us  ease/src/kernel/sched/stride.rs:577  (thread 0)
+  longest lock hold: 17353 us  ease/src/drivers/uart.rs:244  (thread 5)
+      17353           46        32963       1855  ease/src/drivers/uart.rs:244
+       1648           41        42430       1980  ease/src/drivers/uart.rs:135
+         45           32        13635       6102  ease/src/drivers/uart.rs:227
+irqsoff hart 1: interrupts off 63.0% of 4959 ms across 9287 sections (0 unattributed)
+  longest: 25432 us / 25432 kcyc at 495 ms  ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244  (thread 2 -> 2)
+      25432        25432        63129         72   2->2   ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244
+  longest lock wait: 14885 us  ease/src/drivers/uart.rs:244  (thread 2)
+  longest lock hold: 10481 us  ease/src/drivers/uart.rs:244  (thread 2)
+      10481        14885        43805         72  ease/src/drivers/uart.rs:244
+       1390            0         1390          1  ease/src/drivers/uart.rs:135
+         26          823        13134       8345  ease/src/drivers/uart.rs:227
+
+== irqsoff full run (./scripts/ci.sh --irqsoff), up to the flaky panic in
+   blob_process_second_thread_at_start_then_teardown (spawn_user Err; passed on rerun, not chased)
+irqsoff hart 0: interrupts off 25.1% of 3621 ms across 25911 sections (0 unattributed)
+        640          640        31341        329   2->2   ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244
+        693           48        11615        330  ease/src/drivers/uart.rs:244
+        618           34        27265        428  ease/src/drivers/uart.rs:135
+         37           28         2158        838  ease/src/drivers/uart.rs:227
+irqsoff hart 1: interrupts off 12.1% of 3621 ms across 6072 sections (0 unattributed)
+        900          894        47653        107   2->2   ease/src/drivers/uart.rs:244 -> ease/src/drivers/uart.rs:244
+        834          255        14669        107  ease/src/drivers/uart.rs:244
+         55          200         3952        223  ease/src/drivers/uart.rs:227
+
+== uart_benchmarks (./scripts/ci.sh --test=bench), worker pinned per hart.
+PLIC routes ALL external IRQs to hart 0 (plic.rs programs only the HART0 context).
+hart 1 = enqueue only (drain runs concurrently on hart 0); hart 0 = enqueue + THRE drain in-window.
+Hart 0 line cost is ~27 us/byte of QEMU chardev write inside the ISR, not driver cost.
+-- bench-uart-run5
+  [hart 0] print!(64-byte line, ring empty): wall min=1659753 avg=4155473 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (4x ring): wall min=62565311 avg=82710861 cycles (5 runs), min 15274 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=9375 avg=91141 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (4x ring): wall min=22328995 avg=26014101 cycles (5 runs), min 5451 cycles/byte
+-- bench-uart-run6
+  [hart 0] print!(64-byte line, ring empty): wall min=1830628 avg=3445085 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (4x ring): wall min=59497973 avg=89121055 cycles (5 runs), min 14525 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=9208 avg=82146 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (4x ring): wall min=21471119 avg=24200690 cycles (5 runs), min 5241 cycles/byte
+-- ci-full-after-bench2
+  [hart 0] print!(64-byte line, ring empty): wall min=1475044 avg=2957321 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (4x ring): wall min=63304604 avg=89512780 cycles (5 runs), min 15455 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=11417 avg=22795 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (4x ring): wall min=17799904 avg=26884411 cycles (5 runs), min 4345 cycles/byte
+
+== earlier unpinned runs (bimodal because the bench thread landed on either hart)
+-- bench-uart-run1
+  print!(64-byte line, ring empty): cpu=0 wall=1769978 cycles (avg of 10)
+  print! burst of 4096 bytes (4x ring): cpu=56703 wall=15586362 cycles, 3805 wall cycles/byte
+-- bench-uart-run2
+  print!(64-byte line, ring empty): cpu=0 wall=1866036 cycles (avg of 10)
+  print! burst of 4096 bytes (4x ring): cpu=0 wall=93812755 cycles, 22903 wall cycles/byte
+-- bench-uart-run3
+  print!(64-byte line, ring empty): wall min=13459 avg=1293702 cycles (10 runs)
+  print! burst of 4096 bytes (4x ring): wall min=14854360 avg=83420135 cycles (5 runs), min 3626 cycles/byte
+-- bench-uart-run4
+  print!(64-byte line, ring empty): wall min=10000 avg=1549515 cycles (10 runs)
+  print! burst of 4096 bytes (4x ring): wall min=46665924 avg=78197667 cycles (5 runs), min 11393 cycles/byte
+-- ci-full-after-bench
+  print!(64-byte line, ring empty): wall min=12625 avg=2492025 cycles (10 runs)
+  print! burst of 4096 bytes (4x ring): wall min=10682729 avg=61050434 cycles (5 runs), min 2608 cycles/byte
+
+== other benchmarks from the same full run, for context
+ease::drivers::virtio::blk::test::read_block_zero_mbr_fat32_partition...	[[32mok[0m]
+  OK read_block(sector 0): cpu=12801 wall=1863811 cycles (baseline cpu: 4000000, -99%)
+  OK write_block(sector 1): cpu=31234 wall=3347451 cycles (baseline cpu: 4000000, -99%)
+  OK write+read_block(sector 1): cpu=19506 wall=3159275 cycles (baseline cpu: 4000000, -99%)
+  yield_now round-trip: cpu=48 wall=45356 cycles/call (1000 calls)
+  OK Console::write_str("hello\n"): cpu=0 wall=27241 cycles (baseline cpu: 2500000, -100%)
+  Console::write_str("hello\n"): cpu=0 wall=26975 cycles (avg of 10)
+
+==================================================================
+== v4 FIRST DRAFT, measured 2026-09-08 (same day), user's working tree
+   Driver state: plain spinlock writer, assert interrupts-on, ISR-only drain capped at FIFO_SIZE=16,
+   lost-wakeup recheck, fences; producer still PANICS on full (no wait yet); ring bumped to 32 KB.
+   Bench change: burst is now a fixed 4 KB (was 4x ring). Baseline burst overfilled a 1 KB ring; the
+   v4 burst fits a 32 KB ring, so burst numbers are NOT like-for-like until the wait path exists and
+   the ring is back to 1 KB. Single-line numbers are comparable.
+
+-- irqsoff --test=test-sched: uart.rs no longer appears in ANY interrupts-off or lock table (was the
+   longest section: 17.5 ms hart0 / 25.4 ms hart1). Longest sections are now the scheduler's:
+irqsoff: hart 0 longest lock wait grew during (before first test): 140 us  ease/src/kernel/alloc/buddy.rs:725  (thread 0)
+irqsoff: hart 0 longest lock hold grew during (before first test): 1546 us  ease/src/drivers/virtio/keyboard.rs:31  (thread 1)
+irqsoff: hart 1 longest lock wait grew during (before first test): 10 us  ease/src/kernel/sched/stride.rs:256  (thread 0)
+irqsoff: hart 1 longest lock hold grew during (before first test): 200 us  ease/src/kernel/sched/stride.rs:256  (thread 4)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::affinity_hart0_runs_on_hart0: 19 us  ease/src/kernel/sched/stride.rs:327  (thread 1)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::affinity_hart1_runs_on_hart1: 68 us  ease/src/kernel/sched/stride.rs:327  (thread 4)
+irqsoff: hart 1 longest lock hold grew during ease::kernel::sched::tests::affinity_unpark_wakes_via_ipi: 508 us  ease/src/kernel/sched/spawn.rs:60  (thread 2)
+irqsoff: hart 0 longest lock wait grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 271 us  ease/src/kernel/sched/stride.rs:454  (thread 1)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 391 us  ease/src/kernel/sched/tests.rs:2302  (thread 2)
+irqsoff: hart 0 longest lock wait grew during ease::kernel::sched::tests::completion_signal_then_wait: 1232 us  ease/src/kernel/sched/stride.rs:577  (thread 0)
+irqsoff: hart 1 longest lock hold grew during ease::kernel::sched::tests::completion_signal_then_wait: 1054 us  ease/src/kernel/sched/stride.rs:577  (thread 2)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 391 us  ease/src/kernel/sched/stride.rs:577  (thread 1)
+irqsoff: hart 1 longest lock hold grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 4358 us  ease/src/kernel/sched/stride.rs:577  (thread 1)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::fault_waits_for_running_sibling_before_release: 392 us  ease/src/kernel/sched/process.rs:294  (thread 6)
+irqsoff: hart 0 longest lock wait grew during ease::kernel::sched::tests::fixed_leeway_sleeper_never_wakes_early: 4059 us  ease/src/kernel/sched/stride.rs:577  (thread 0)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::fixed_leeway_sleeper_never_wakes_early: 1075 us  ease/src/kernel/sched/stride.rs:577  (thread 4)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::minimal_wake_latency_under_two_busy_harts: 1157 us  ease/src/kernel/sched/stride.rs:577  (thread 6)
+irqsoff: hart 1 longest lock wait grew during ease::kernel::sched::tests::sleep10_wakes_promptly_under_partner_load: 1183 us  ease/src/kernel/sched/stride.rs:577  (thread 4)
+irqsoff hart 0: interrupts off 27.7% of 5295 ms across 5123 sections (0 unattributed)
+  longest: 6473 us / 6516 kcyc at 4514 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 0 -> 1)
+  longest lock wait: 4059 us  ease/src/kernel/sched/stride.rs:577  (thread 0)
+  longest lock hold: 1546 us  ease/src/drivers/virtio/keyboard.rs:31  (thread 1)
+irqsoff hart 1: interrupts off 30.0% of 5295 ms across 5261 sections (0 unattributed)
+  longest: 6413 us / 6455 kcyc at 903 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 4 -> 5)
+  longest lock wait: 1183 us  ease/src/kernel/sched/stride.rs:577  (thread 4)
+  longest lock hold: 4358 us  ease/src/kernel/sched/stride.rs:577  (thread 1)
+
+-- uart_benchmarks
+-- run 1
+  [hart 0] print!(64-byte line, ring empty): wall min=1407879 avg=2918178 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (0x ring): wall min=61243736 avg=87038550 cycles (5 runs), min 14952 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=8500 avg=70162 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (0x ring): wall min=292293 avg=4403119 cycles (5 runs), min 71 cycles/byte
+-- run 2
+  [hart 0] print!(64-byte line, ring empty): wall min=1689171 avg=3183745 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (0x ring): wall min=63096199 avg=90242399 cycles (5 runs), min 15404 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=9667 avg=67558 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (0x ring): wall min=303792 avg=3972876 cycles (5 runs), min 74 cycles/byte
+-- run 3
+  [hart 0] print!(64-byte line, ring empty): wall min=2224505 avg=3202407 cycles (10 runs)
+  [hart 0] print! burst of 4096 bytes (ring 32768 bytes): wall min=62907324 avg=92382855 cycles (5 runs), min 15358 cycles/byte
+  [hart 1] print!(64-byte line, ring empty): wall min=8583 avg=69233 cycles (10 runs)
+  [hart 1] print! burst of 4096 bytes (ring 32768 bytes): wall min=289167 avg=4291943 cycles (5 runs), min 70 cycles/byte
+
+-- Side by side (min cycles, mcycle=1000/us)
+                          baseline (1 KB ring, self-drain)    v4 draft (32 KB ring, no wait)
+  hart 1 line             9.2k-11.4k                          8.5k-9.7k
+  hart 0 line             1.48M-1.83M                         1.41M-1.69M   (QEMU host write per byte in ISR; unchanged by design)
+  hart 1 4 KB burst       17.8M-22.3M (waited on self-drain)   ~0.3M (pure enqueue; ring never fills)
+  hart 0 4 KB burst       59.5M-63.3M                         61.2M-63.1M   (ISR drains whole ring per trap on QEMU)
+
+-- irqsoff --test=test-sched AFTER adding the trap-return close hook (same v4 driver draft).
+   Directly-returning traps are now measured; 'external trap -> trap return' is the UART ISR.
+irqsoff hart 0: interrupts off 30.2% of 5395 ms across 6200 sections (0 unattributed, 3790 dangling)
+  longest: 7437 us / 7484 kcyc at 588 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 0 -> 1)
+  largest gap between hook calls: 17361 us at 5342 ms
+     max us     max kcyc     total us      count  thr  opened at -> longest closed at
+       7437         7484      1101409       1759   0->1   ipi trap -> ease/src/kernel/sched/stride.rs:447
+       6407         6491       251113        414   0->7   timer trap -> ease/src/kernel/sched/stride.rs:447
+       2284         2285       240820       1447   1->1   external trap -> trap return
+       1254         1257        52315        467   6->7   ease/src/kernel/sched/stride.rs:447 -> ease/src/kernel/sched/stride.rs:447
+       1241         1241         1241          1   7->1   exception 2 trap -> ease/src/kernel/sched/stride.rs:447
+        984          985         2537          4   7->1   ecall trap -> ease/src/kernel/sched/stride.rs:447
+        811          812          811          1   0->1   ease/src/kernel/sched/stride.rs:576 -> ease/src/arch/context.rs:209
+irqsoff hart 1: interrupts off 55.9% of 5395 ms across 9424 sections (0 unattributed, 6771 dangling)
+  longest: 6527 us / 6571 kcyc at 5127 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 4 -> 1)
+  largest gap between hook calls: 16765 us at 1719 ms
+     max us     max kcyc     total us      count  thr  opened at -> longest closed at
+       6527         6571      1020361       1612   4->1   ipi trap -> ease/src/kernel/sched/stride.rs:447
+       6331         6375      1964825       3288   4->1   timer trap -> ease/src/kernel/sched/stride.rs:447
+       1669         1669         4923          4   6->1   exception 5 trap -> ease/src/kernel/sched/stride.rs:447
+        910          910        45374        406   1->6   ease/src/kernel/sched/stride.rs:447 -> ease/src/arch/context.rs:209
+        859          859         2249         25   2->2   ease/src/kernel/sched/spawn.rs:98 -> ease/src/kernel/sched/spawn.rs:98
+        434          434         1320         10   2->2   ease/src/kernel/sched/spawn.rs:178 -> ease/src/kernel/sched/spawn.rs:178
+        420          420         4946         21   2->2   ease/src/kernel/sched/spawn.rs:60 -> ease/src/kernel/sched/spawn.rs:60
+
+-- irqsoff --test=test-sched with BOTH trap-return close hooks (handler wrappers + run_resume_work),
+   U-mode-aware (MPIE set OR MPP==U closes). Dangling opens fell from ~3600/6000 to 21/27 (user_first_run
+   tails into trap_return from asm with no Rust hook point). Interrupts-off share on hart 0 rose from ~29%
+   to ~51% because directly-returning traps are now counted. 'external trap -> trap return' is the UART ISR.
+   Note: the ~16.7 ms hook gap is at the SAME instant (4959 ms) on both harts = whole-VM stall, not the driver.
+irqsoff hart 0: interrupts off 51.2% of 5518 ms across 9329 sections (0 unattributed, 21 dangling)
+  longest: 6746 us / 6829 kcyc at 3960 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 1 -> 6)
+  largest gap between hook calls: 16732 us at 4959 ms
+     max us     max kcyc     total us      count  thr  opened at -> longest closed at
+       6746         6829      1218442       1894   1->6   ipi trap -> ease/src/kernel/sched/stride.rs:447
+       6347         6347      1037247       1826   0->1   timer trap -> ease/src/kernel/sched/stride.rs:447
+       4594         4657       292051       2525   1->0   ease/src/kernel/sched/stride.rs:447 -> trap return
+       3708         3709       244313       1178   5->5   external trap -> trap return
+       1861         1856         1861          1   7->0   exception 2 trap -> trap return
+       1364         1364         4975          5  12->2   exception 5 trap -> ease/src/kernel/sched/stride.rs:447
+irqsoff hart 1: interrupts off 51.9% of 5518 ms across 8709 sections (0 unattributed, 27 dangling)
+  longest: 6531 us / 6532 kcyc at 2615 ms  ipi trap -> ease/src/kernel/sched/stride.rs:447  (thread 4 -> 1)
+  largest gap between hook calls: 16750 us at 4959 ms
+     max us     max kcyc     total us      count  thr  opened at -> longest closed at
+       6531         6532      1294229       2030   4->1   ipi trap -> ease/src/kernel/sched/stride.rs:447
+       6107         6152      1222172       2068   4->4   timer trap -> trap return
+       4565         4608       316914       2725   7->1   ease/src/kernel/sched/stride.rs:447 -> ease/src/kernel/sched/stride.rs:447
+       2029         2024         5820          4   6->4   exception 5 trap -> trap return
+       1275         1275        12255         22   8->4   ecall trap -> trap return
+        605          605          605          1   4->4   ease/src/kernel/sched/stride.rs:576 -> ease/src/kernel/sched/stride.rs:576
+
+== Hook-gap experiment: SLICE_MS 16 -> 11 (irqsoff --test=test-sched, per-test 'largest hook gap grew' lines)
+-- SLICE_MS = 16
+irqsoff: hart 0 largest hook gap grew during (before first test): 1981 us at 22 ms
+irqsoff: hart 1 largest hook gap grew during (before first test): 35 us at 62 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::affinity_hart0_runs_on_hart0: 1635 us at 328 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 8398 us at 476 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 6097 us at 475 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::console_flood_survives_tx_backpressure: 12897 us at 927 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 16233 us at 1432 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::fault_waits_for_running_sibling_before_release: 16209 us at 1690 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::fault_waits_for_two_running_siblings: 16229 us at 1819 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::forced_preempt_lets_sleeper_reclaim_cpu_from_hog: 16257 us at 3005 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::forced_preempt_preserves_computation: 16234 us at 3201 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::seventh_thread_never_joins_a_process: 16803 us at 4944 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::seventh_thread_never_joins_a_process: 16845 us at 4944 ms
+  largest gap between hook calls: 16803 us at 4944 ms
+  largest gap between hook calls: 16845 us at 4944 ms
+-- SLICE_MS = 11
+irqsoff: hart 0 largest hook gap grew during (before first test): 4699 us at 24 ms
+irqsoff: hart 1 largest hook gap grew during (before first test): 39 us at 79 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::affinity_hart0_runs_on_hart0: 1775 us at 336 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 8445 us at 532 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 6617 us at 529 ms
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::console_flood_survives_tx_backpressure: 12164 us at 1036 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 11187 us at 1215 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::fault_waits_for_running_sibling_before_release: 11212 us at 1854 ms
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::forced_preempt_lets_sleeper_reclaim_cpu_from_hog: 11750 us at 3185 ms
+  largest gap between hook calls: 11750 us at 3185 ms
+  largest gap between hook calls: 12164 us at 1036 ms
+Conclusion: the ~16.2 ms gaps (hog/computation tests, incl. the same-instant pair on both harts) moved to ~11.2 ms:
+they are CPU-bound threads running a full slice with no hook calls, NOT a VM stall. Slice-independent gaps remain:
+console_flood ~12-13 ms on hart 1, blob_process ~8.4 ms hart 0 / ~6-6.6 ms hart 1, boot 2-4.7 ms hart 0.
+
+== irqsoff --test=test-sched, SLICE_MS=16 restored, all three trap-return hook sites + gap 'ended by' site
+irqsoff: hart 0 largest hook gap grew during (before first test): 1660 us at 22 ms, ended by ease/src/arch/context.rs:209
+irqsoff: hart 1 largest hook gap grew during (before first test): 24 us at 59 ms, ended by ease/src/kernel/sched/mod.rs:98
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::affinity_hart0_runs_on_hart0: 1963 us at 296 ms, ended by ease/src/kernel/sched/stride.rs:447
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::affinity_unpark_wakes_via_ipi: 1763 us at 467 ms, ended by ease/src/kernel/sched/stride.rs:447
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 5578 us at 587 ms, ended by ecall trap
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::blob_process_second_thread_at_start_then_teardown: 5622 us at 588 ms, ended by ecall trap
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::console_flood_survives_tx_backpressure: 16218 us at 846 ms, ended by timer trap
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 16223 us at 1011 ms, ended by timer trap
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::fair_stride_resists_wake_spammer: 16232 us at 1367 ms, ended by timer trap
+irqsoff: hart 1 largest hook gap grew during ease::kernel::sched::tests::forced_preempt_lets_sleeper_reclaim_cpu_from_hog: 16248 us at 3052 ms, ended by timer trap
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::forced_preempt_preserves_computation: 16239 us at 3138 ms, ended by timer trap
+irqsoff: hart 0 largest hook gap grew during ease::kernel::sched::tests::voluntary_exit_does_not_block_later_fault_kill: 16257 us at 5479 ms, ended by timer trap
+irqsoff hart 0: interrupts off 50.8% of 5563 ms across 9478 sections (0 unattributed, 0 dangling)
+  largest gap between hook calls: 16257 us at 5479 ms, ended by timer trap
+irqsoff hart 1: interrupts off 85.0% of 5563 ms across 15863 sections (0 unattributed, 0 dangling)
+  largest gap between hook calls: 16248 us at 3052 ms, ended by timer trap
+Dangling = 0 on both harts. Every ~16.2 ms gap ends in a timer trap (full slice). The blob_process gap (5.6 ms,
+both harts, same instant) ends in an ecall trap: two user threads running U-mode code until their first syscall.

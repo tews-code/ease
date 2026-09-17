@@ -4,6 +4,9 @@
 // Test Framework
 // =============================================================================
 
+#[cfg(test)]
+use crate::drivers::uart;
+
 /// Wrap `test_main` so it can be spawned as a thread entry.
 #[cfg(test)]
 pub(super) fn test_runner_thread() {
@@ -44,6 +47,7 @@ impl<T: Fn()> Testable for T {
         #[cfg(feature = "trace")]
         crate::kernel::sched::trace::reset();
         self();
+        uart::flush();
         println!("[\x1b[32mok\x1b[0m]");
     }
 }

@@ -1,16 +1,14 @@
 //! Console keyboard driver
 //!
 //! Decodes duplicate key press and shift tracking.
+//! Keys are `usize` and hold either ASCII or special codes.
 //! See [read_byte] as the API
 
 use super::virtio::input;
 use super::virtio::input::evdev;
-use crate::kernel::collection::{Bitmap, SpscRingBuf, bitmap_words_for};
-use crate::kernel::sync::Completion;
+use crate::kernel::collection::{Bitmap, bitmap_words_for};
 use crate::syscall;
 
-// Number of ASCII or special keys in queue (max burst size, more are dropped)
-const KEY_QUEUE_LEN: usize = 64;
 // Limits on codes for validation
 const EVDEV_CODES_MAX: usize = 768;
 const KEYMAP_CODES_MAX: usize = 128;
@@ -23,15 +21,79 @@ const KEY_MAP: &[u8] = include_bytes!(concat!(
 ));
 const _: () = assert!(KEY_MAP.len() == KEYMAP_CODES_MAX * KEY_MAP_BYTES_PER_CODE);
 
-static KEY_QUEUE: SpscRingBuf<usize, KEY_QUEUE_LEN> = SpscRingBuf::new();
-pub(crate) static KEY_PENDING: Completion = Completion::new();
+/// Initialise the keyboard driver queue
+pub(crate) fn init() {
+    queue::init();
+}
 
-/// Read a decoded key from virtio keyboard
+/// Newtype for keys that have been run through the virtio decoder (as opposed to raw)
+#[derive(Clone, Copy)]
+pub(crate) struct DecodedKey(usize);
+
+impl DecodedKey {
+    #[cfg(test)]
+    /// Create a DecodedKey from a `usize` code
+    pub(crate) fn from_code(code: usize) -> Self {
+        Self(code)
+    }
+    /// Get the underlying `usize` code
+    pub(crate) fn code(&self) -> usize {
+        self.0
+    }
+}
+
+/// Queue to pass decoded keys from the virtio keyboard decoder thread to the shell thread
+/// We use statics as the keyboard is permanently attached to the hardware
+pub(crate) mod queue {
+    use super::DecodedKey;
+    use crate::kernel::collection::spsc;
+    use crate::kernel::sync::{SpinLock, StaticCell, WaitQueue};
+    /// Number of ASCII or special keys in queue (max burst size, more are dropped)
+    const LEN: usize = 64;
+    /// SPSC queue to Send the keys
+    pub(super) static KEYS: StaticCell<spsc::Queue<DecodedKey, LEN>> = StaticCell::new();
+    /// Holds the static key queue producer
+    pub(super) static PRODUCER: SpinLock<Option<spsc::Producer<'static, DecodedKey, LEN>>> =
+        SpinLock::new(None);
+    /// Holds the static key queue consumer
+    pub(crate) static CONSUMER: SpinLock<Option<spsc::Consumer<'static, DecodedKey, LEN>>> =
+        SpinLock::new(None);
+    /// Wait queue on new decoded key ready in the queue
+    pub(crate) static KEYS_PENDING: WaitQueue = WaitQueue::new();
+
+    pub(super) fn init() {
+        let (producer, consumer) = KEYS.init(spsc::Queue::new()).split();
+        let mut p = PRODUCER.lock();
+        let mut c = CONSUMER.lock();
+        *p = Some(producer);
+        *c = Some(consumer);
+    }
+}
+
+/// Read a decoded key from virtio keyboard queue
 ///
 /// Returns None if no key presses have been decoded
 /// Special keys are encoded above 0xFF see [crate::syscall::special_key]
-pub(crate) fn read_key() -> Option<usize> {
-    KEY_QUEUE.pop()
+pub(crate) fn read_key() -> Option<DecodedKey> {
+    queue::CONSUMER
+        .lock()
+        .as_mut()
+        .expect("decoded key queue must be initialised")
+        .pop()
+}
+
+/// Test support: queue a decoded key exactly as the decoder would, so a
+/// thread blocked in GET_CHAR wakes without a virtio keyboard event.
+///
+/// This is a second user of the PRODUCER (but is safe due to SpinLock)
+#[cfg(test)]
+pub(crate) fn inject_key(key: DecodedKey) {
+    let _ = queue::PRODUCER
+        .lock()
+        .as_mut()
+        .expect("decoded key queue must be intialised")
+        .push(key);
+    queue::KEYS_PENDING.wake_all();
 }
 
 fn ascii_code(key_code: u16, shift: bool, opt: bool, caps_lock: bool) -> u8 {
@@ -204,9 +266,13 @@ impl Decoder {
                 // Every decoded byte queues (incl. CR, DEL, CP437 highs).
                 // If the queue is full the keystroke is dropped: blocking
                 // here would back-pressure into the device ring instead.
-                let _ = KEY_QUEUE.push(val);
+                let _ = queue::PRODUCER
+                    .lock()
+                    .as_mut()
+                    .expect("decoded key queue should be initialised")
+                    .push(DecodedKey(val));
                 // Let the blocked thread know
-                KEY_PENDING.signal();
+                queue::KEYS_PENDING.wake_all();
             }
             Emit::UnknownKeyCode(k) => {
                 println!("Unknown key code {}", k);

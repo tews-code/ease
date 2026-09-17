@@ -28,7 +28,7 @@ pub(crate) fn hart_id() -> usize {
     crate::arch::csr::mhartid::read()
 }
 /// Instruction fence - all HARTs need this after writing instructions to memory
-pub(crate) fn fence_i() {
+pub(crate) fn fence_instruction() {
     unsafe {
         core::arch::asm!("fence.i");
     }

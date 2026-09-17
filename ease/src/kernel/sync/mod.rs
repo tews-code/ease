@@ -13,6 +13,7 @@ mod counteru64;
 #[cfg(target_os = "none")]
 mod mutex;
 mod spinlock;
+mod staticcell;
 #[cfg(all(test, not(target_os = "none")))]
 pub mod tests;
 mod waitqueue;
@@ -27,7 +28,9 @@ pub use counteru64::CounterU64;
 #[allow(unused_imports)]
 pub use mutex::Mutex;
 #[allow(unused_imports)]
-pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock, SpinLockGuard};
+pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock, SpinLockGuard, TryLock};
+#[allow(unused_imports)]
+pub(crate) use staticcell::StaticCell;
 #[allow(unused_imports)]
 pub(crate) use waitqueue::WaitQueue;
 

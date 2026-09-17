@@ -35,10 +35,11 @@ pub mod plic {
     pub const HART1_CLAIM_COMPLETE: usize = 0x0020_2004; // Claim/complete for context 2
 }
 
-// UART base address for 16550 compatible Uart on QEMU virt
+// 16550A UART on QEMU virt
 pub mod uart {
     pub const BASE: usize = 0x1000_0000;
     pub const IRQ: u32 = 10;
+    pub const FIFO_SIZE: usize = 16;
 }
 
 // HARTS
