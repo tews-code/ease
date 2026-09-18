@@ -369,3 +369,182 @@ mod tests {
         );
     }
 }
+
+// Benchmark: the cost of waking a full wait queue. wake_all is a plain
+// start-to-end walk of the array with one unpark per registered thread,
+// so with every spare TCB slot parked on one queue this measures the
+// unpark loop itself, and separately the serial chain that follows on
+// one hart: each woken waiter runs, evaluates its closure, finds it false
+// and parks again, until the LAST one to run finds the round complete.
+// Everything is pinned to hart 0 so no IPIs or cross-hart wakeups are
+// inside the bracket. Waiters exit at the end so their slots go back.
+#[cfg(all(test, feature = "bench"))]
+mod bench {
+    use super::*;
+    use crate::arch::csr::rdcycles;
+    use crate::kernel::alloc::Order;
+    use crate::kernel::sched::{Builder, sleep, yield_now};
+    use crate::kernel::timer;
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    const RUNS: usize = 20;
+
+    struct Round {
+        armed: bool,
+        unarmed_evals: usize, // closure runs before the first round: one per waiter parking
+        evals: usize,         // closure runs this round: the n-th one is the last waiter to run
+        end: u64,             // rdcycles at that n-th evaluation
+        quit: bool,
+    }
+    static ROUND: SpinLock<Round> = SpinLock::new(Round {
+        armed: false,
+        unarmed_evals: 0,
+        evals: 0,
+        end: 0,
+        quit: false,
+    });
+    static QUEUE: WaitQueue = WaitQueue::new();
+    static WAITERS: AtomicUsize = AtomicUsize::new(0);
+    static START: AtomicUsize = AtomicUsize::new(0);
+    static ROUND_DONE: AtomicUsize = AtomicUsize::new(0);
+    static EXITED: AtomicUsize = AtomicUsize::new(0);
+    static WAKER_DONE: AtomicUsize = AtomicUsize::new(0);
+    static WAKE_ALL_MIN: AtomicU32 = AtomicU32::new(u32::MAX);
+    static CHAIN_MIN: AtomicU32 = AtomicU32::new(u32::MAX);
+
+    /// riscv32 has no 64-bit atomics; anything over u32::MAX saturates.
+    fn clamp(v: u64) -> u32 {
+        v.min(u32::MAX as u64) as u32
+    }
+
+    fn waiter() {
+        loop {
+            let guard = QUEUE.wait_with(&ROUND, |r| {
+                if r.quit {
+                    return true;
+                }
+                if !r.armed {
+                    r.unarmed_evals += 1;
+                    return false;
+                }
+                r.evals += 1;
+                if r.evals == WAITERS.load(Ordering::Relaxed) {
+                    r.end = rdcycles();
+                    true
+                } else {
+                    false
+                }
+            });
+            let quit = guard.quit;
+            drop(guard);
+            if quit {
+                break;
+            }
+            ROUND_DONE.store(1, Ordering::Release);
+        }
+        EXITED.fetch_add(1, Ordering::Release);
+    }
+
+    fn waker() {
+        while START.load(Ordering::Acquire) == 0 {
+            sleep(1);
+        }
+        let n = WAITERS.load(Ordering::Relaxed);
+        // Every waiter has run its closure once (unarmed) and is parking.
+        while ROUND.lock().unarmed_evals < n {
+            yield_now();
+        }
+        sleep(1);
+
+        let mut best_wake_all = u64::MAX;
+        let mut best_chain = u64::MAX;
+        for _ in 0..RUNS {
+            {
+                let mut r = ROUND.lock();
+                r.armed = true;
+                r.evals = 0;
+                r.end = 0;
+            }
+            ROUND_DONE.store(0, Ordering::Relaxed);
+            let t0 = rdcycles();
+            QUEUE.wake_all();
+            let t1 = rdcycles();
+            while ROUND_DONE.load(Ordering::Acquire) == 0 {
+                yield_now();
+            }
+            let end = ROUND.lock().end;
+            best_wake_all = best_wake_all.min(t1 - t0);
+            best_chain = best_chain.min(end - t0);
+            // The last waiter re-registers by evaluating once more (evals
+            // goes past n); give it a moment to actually park before the
+            // next round's wake_all.
+            while ROUND.lock().evals <= n {
+                yield_now();
+            }
+            sleep(1);
+        }
+        WAKE_ALL_MIN.store(clamp(best_wake_all), Ordering::Relaxed);
+        CHAIN_MIN.store(clamp(best_chain), Ordering::Relaxed);
+
+        // Release the waiters so their slots return to the pool.
+        ROUND.lock().quit = true;
+        QUEUE.wake_all();
+        WAKER_DONE.store(1, Ordering::Release);
+    }
+
+    /// No assertion; numbers are informational.
+    #[test_case]
+    fn waitqueue_benchmarks() {
+        // The waker takes a slot first, then parks on START while the
+        // waiters fill every remaining slot.
+        let w = Builder::new()
+            .with_stack_class(Order::KB4)
+            .with_affinity(0)
+            .spawn(waker);
+        assert!(w.is_some(), "waker spawn failed");
+        let mut n = 0;
+        while Builder::new()
+            .with_stack_class(Order::KB2)
+            .with_affinity(0)
+            .spawn(waiter)
+            .is_some()
+        {
+            n += 1;
+        }
+        assert!(n >= 2, "need at least two waiters, got {n}");
+        WAITERS.store(n, Ordering::Relaxed);
+        START.store(1, Ordering::Release);
+
+        let start = timer::elapsed_ms();
+        while WAKER_DONE.load(Ordering::Acquire) == 0 {
+            sleep(10);
+            assert!(
+                timer::elapsed_ms() - start < 20_000,
+                "wait queue bench did not finish in 20 s"
+            );
+        }
+        while EXITED.load(Ordering::Acquire) < n {
+            sleep(10);
+            assert!(
+                timer::elapsed_ms() - start < 20_000,
+                "wait queue waiters did not all exit in 20 s"
+            );
+        }
+
+        let wake_all = WAKE_ALL_MIN.load(Ordering::Relaxed);
+        let chain = CHAIN_MIN.load(Ordering::Relaxed);
+        println!();
+        println!("====== WAIT QUEUE ====== ");
+        println!("  ({n} waiters, all on hart 0, min of {RUNS} rounds)");
+        println!(
+            "  wake_all, {n} parked waiters: wall min={wake_all:>7} cycles ({:>6} per unpark)",
+            wake_all / n as u32
+        );
+        println!(
+            "  wake_all -> last waiter ran:  wall min={chain:>7} cycles ({:>6} per waiter: switch + closure + re-park)",
+            chain / n as u32
+        );
+        println!("======================== ");
+        println!();
+    }
+}
