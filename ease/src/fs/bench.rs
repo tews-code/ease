@@ -52,16 +52,16 @@ const MKDIR_MAX_WRITES_FAT32: u32 = 8;
 /// partially-filled sector from being re-written on every call.
 const WRITE_BUF_LEN: usize = 512;
 
-/// Run `f`, returning (block reads, block writes, cpu cycles) attributed to it.
+/// Run `f`, returning (block reads, block writes, wall cycles) attributed to it.
 fn count<F: FnOnce()>(f: F) -> (u32, u32, u64) {
     bench_counters::reset();
     let cycles = bench::measure(f);
     let (reads, writes) = bench_counters::snapshot();
-    (reads, writes, cycles.cpu)
+    (reads, writes, cycles.wall)
 }
 
-fn report(name: &str, reads: u32, writes: u32, cpu: u64) {
-    println!("  {name}: reads={reads} writes={writes} (cpu={cpu} cycles)");
+fn report(name: &str, reads: u32, writes: u32, wall: u64) {
+    println!("  {name}: reads={reads} writes={writes} (wall={wall} cycles)");
 }
 
 #[test_case]
@@ -72,12 +72,12 @@ fn fs_block_io_benchmarks() {
 
     let current_dir = Dir::Root;
     // 1. Metadata lookup: scan the root directory for a file by name.
-    let (reads, writes, cpu) = count(|| {
+    let (reads, writes, wall) = count(|| {
         // file::open takes the volume lock internally, so no with_volume here.
         let entry = file::open(Access::Read, current_dir, "HELLO.TXT").unwrap();
         let _ = entry.close();
     });
-    report("open(HELLO.TXT)", reads, writes, cpu);
+    report("open(HELLO.TXT)", reads, writes, wall);
     assert_eq!(writes, 0, "open should not write");
     assert!(
         reads <= OPEN_MAX_READS,
@@ -87,14 +87,14 @@ fn fs_block_io_benchmarks() {
     // 2. Sequential read of a 64 KB multi-cluster file. Ideal is ~1 sector read
     //    per 512 bytes of payload (128 data reads) plus a small, cache-amortised
     //    number of FAT-sector reads.
-    let (reads, writes, cpu) = count(|| {
+    let (reads, writes, wall) = count(|| {
         let mut entry = file::open(Access::Read, current_dir, "BIG.TXT").unwrap();
         // Stream the whole file through read_at into a one-sector buffer.
         let mut buf = [0u8; 512];
         while file::read_at(&mut entry, &mut buf).unwrap() != 0 {}
         let _ = entry.close();
     });
-    report("read_at(BIG.TXT, 64KB)", reads, writes, cpu);
+    report("read_at(BIG.TXT, 64KB)", reads, writes, wall);
     #[cfg(feature = "fat16")]
     assert!(
         reads <= READ_BIG_MAX_READS_FAT16,
@@ -112,12 +112,12 @@ fn fs_block_io_benchmarks() {
     //    cache that costs ~ceil(clusters / 256) sector reads; without it, one
     //    read per cluster. This is the guard on that cache — the only
     //    optimisation currently in the FS.
-    let (reads, writes, cpu) = count(|| {
+    let (reads, writes, wall) = count(|| {
         with_volume(|vol| {
             vol.allocate_cluster().unwrap();
         });
     });
-    report("allocate_cluster (FAT scan)", reads, writes, cpu);
+    report("allocate_cluster (FAT scan)", reads, writes, wall);
     #[cfg(feature = "fat16")]
     assert!(
         reads <= ALLOC_MAX_READS_FAT16,
@@ -136,7 +136,7 @@ fn fs_block_io_benchmarks() {
     //    re-writes a partially-filled sector on each call — the write count is
     //    sensitive to this buffer size, not just the payload.
     let data = [b'Z'; 8 * 1024];
-    let (reads, writes, cpu) = count(|| {
+    let (reads, writes, wall) = count(|| {
         file::touch(current_dir, "BENCH.TMP").unwrap();
         file::truncate(current_dir, "BENCH.TMP").unwrap();
         let mut handle = file::open(Access::Write, current_dir, "BENCH.TMP").unwrap();
@@ -145,7 +145,7 @@ fn fs_block_io_benchmarks() {
         }
         handle.close().unwrap();
     });
-    report("write_at(BENCH.TMP, 8KB)", reads, writes, cpu);
+    report("write_at(BENCH.TMP, 8KB)", reads, writes, wall);
     #[cfg(feature = "fat16")]
     assert!(
         writes <= WRITE_MAX_WRITES_FAT16,
@@ -161,12 +161,12 @@ fn fs_block_io_benchmarks() {
     //    Writes are the FAT update (+ mirror copies), the zeroed data cluster,
     //    and the "." / ".." + parent-entry writes; warm reads are just the
     //    read-before-write of the touched sectors.
-    let (reads, writes, cpu) = count(|| {
+    let (reads, writes, wall) = count(|| {
         with_volume(|vol| {
             vol.make_dir(current_dir, "BENCHDIR").unwrap();
         });
     });
-    report("make_dir(BENCHDIR)", reads, writes, cpu);
+    report("make_dir(BENCHDIR)", reads, writes, wall);
     #[cfg(feature = "fat16")]
     assert!(
         reads <= MKDIR_MAX_READS_FAT16,
