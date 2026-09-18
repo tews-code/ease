@@ -399,13 +399,18 @@ pub mod bench_counters {
 
 #[cfg(all(test, feature = "bench"))]
 mod baselines {
-    // Measured on QEMU virt, set with wide margin for variance
-    //   READ_BLOCK:       200,000  (measured ~49,000)
-    //   WRITE_BLOCK:    1,000,000  (measured ~277,000)
-    //   WRITE_READ_BLOCK: 1,000,000  (measured ~246,000)
-    pub const READ_BLOCK: u64 = 4_000_000;
-    pub const WRITE_BLOCK: u64 = 4_000_000;
-    pub const WRITE_READ_BLOCK: u64 = 4_000_000;
+    // Gates are on the MINIMUM wall cycles of the run, QEMU pinned to the
+    // host's performance cores (run.sh). Wall includes the virtio round trip
+    // through QEMU's I/O thread, so even the minimum moves ~2x between runs;
+    // set at ~2x the top of the observed range. Pinned minimums, 2026-09-18,
+    // three runs:
+    //   READ_BLOCK         67k - 121k
+    //   WRITE_BLOCK       150k - 208k
+    //   WRITE_READ_BLOCK  196k - 231k
+    // (The old 4_000_000 gated a cpu column that read ~200.)
+    pub const READ_BLOCK: u64 = 250_000;
+    pub const WRITE_BLOCK: u64 = 420_000;
+    pub const WRITE_READ_BLOCK: u64 = 480_000;
 }
 
 #[cfg(all(test, feature = "bench"))]

@@ -22,16 +22,15 @@ use crate::kernel::alloc::slab::{
 };
 
 mod baseline {
-    // Rung-3 baseline: includes ~18k cycles/iter of preemption overhead
-    // (trap save/restore + boot↔idle context switch on every 10ms tick).
-    // Allocator code unchanged from rung 2 (which was 2_500); the bump
-    // reflects the per-tick rescheduling cost.
-    pub(super) const ONE_BYTE_ALLOC: u64 = 25_000;
+    // Gates are on the MINIMUM wall cycles of the run (bench::check_regression),
+    // measured with QEMU pinned to the host's performance cores (run.sh).
+    // Set at ~2x the pinned minimum; 2026-09-18: one_byte 1584, small_mix 6750.
+    // (Earlier 25_000 / 55_000 gated a dead cpu column that always read 0.)
+    pub(super) const ONE_BYTE_ALLOC: u64 = 3_500;
     pub(super) const ONE_BYTE_ALLOC_ITERS: u32 = 100_000;
 
-    // Rung-3 baseline: small_mix does 8 allocs+deallocs per iter, with
-    // proportional preemption overhead. Measured ~53k after rung 3.
-    pub(super) const SMALL_MIX_ALLOC: u64 = 55_000;
+    // small_mix does 8 allocs+deallocs per iter.
+    pub(super) const SMALL_MIX_ALLOC: u64 = 14_000;
     pub(super) const SMALL_MIX_ALLOC_ITERS: u32 = 10_000;
 }
 

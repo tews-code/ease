@@ -304,9 +304,10 @@ mod benchmarks {
     const ITER_LARGE: u32 = 100;
     const ITER_SMALL: u32 = 10;
 
-    // Baselines measured without IrqSpinLock overhead (owned Console).
-    // Set at ~2x measured values for QEMU timing variance.
-    const WRITE_STR_HELLO: u64 = 2_500_000;
+    // Gate is on the MINIMUM wall cycles of the run, QEMU pinned to the
+    // host's performance cores (run.sh). ~2x the pinned minimum
+    // (2026-09-18: 29,292; the old 2_500_000 gated a cpu column that read 0).
+    const WRITE_STR_HELLO: u64 = 60_000;
 
     #[test_case]
     fn console_benchmarks() {
