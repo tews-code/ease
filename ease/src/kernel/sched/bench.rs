@@ -41,8 +41,10 @@ const N: u32 = 1000;
 /// The unit costs the switch path is built from, so the round trip can
 /// be partitioned:
 ///  - `rdcycles`: the measurement itself (a CSR read)
-///  - `timer::elapsed`: three CLINT MMIO reads; reschedule calls it
-///    twice and writes mtimecmp (same MMIO class) once
+///  - `timer::elapsed`: three CLINT MMIO reads; reschedule reads it once
+///    at the top and reuses that `now` throughout
+///  - `set_next_deadline`: three CLINT MMIO writes to mtimecmp (same MMIO
+///    class); reschedule programs it once, before releasing the lock
 ///  - interrupts off/on: the mstatus CSR dance around the critical section
 ///  - sched lock: uncontended IrqSpinLock acquire + release
 fn unit_costs() {

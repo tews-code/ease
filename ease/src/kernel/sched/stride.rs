@@ -509,9 +509,7 @@ impl Scheduler {
             }
             let Some((curr, curr_idx, next, next_idx)) = disjoint_threads else {
                 timer::set_next_deadline(
-                    sched
-                        .thread_blocks
-                        .next_timer_deadline(SLICE, timer::elapsed()),
+                    sched.thread_blocks.next_timer_deadline(SLICE, now_cycles),
                 );
                 drop(sched);
                 return;
@@ -537,11 +535,7 @@ impl Scheduler {
             }
 
             sched.activate_thread(next_idx, Some(curr_idx));
-            timer::set_next_deadline(
-                sched
-                    .thread_blocks
-                    .next_timer_deadline(SLICE, timer::elapsed()),
-            );
+            timer::set_next_deadline(sched.thread_blocks.next_timer_deadline(SLICE, now_cycles));
             drop(sched);
 
             if hart_id() == 0 {
@@ -591,25 +585,20 @@ impl Scheduler {
                 let pick = sched.pick_next_if_fairer_mut();
                 let Some((curr, curr_idx, next, next_idx)) = pick else {
                     timer::set_next_deadline(
-                        sched
-                            .thread_blocks
-                            .next_timer_deadline(SLICE, timer::elapsed()),
+                        sched.thread_blocks.next_timer_deadline(SLICE, now_cycles),
                     );
                     return;
                 };
                 // Perform switch
                 curr.state = State::Switching(PostSwitch::Ready);
                 next.state = State::Running;
-                let now_cycles = timer::elapsed();
                 next.last_started_cycles = now_cycles;
                 // Create local variables before dropping the lock
                 let prev_sp_ptr = &raw mut curr.sp;
                 let next_sp_ptr = &raw mut next.sp;
                 sched.activate_thread(next_idx, Some(curr_idx));
                 timer::set_next_deadline(
-                    sched
-                        .thread_blocks
-                        .next_timer_deadline(SLICE, timer::elapsed()),
+                    sched.thread_blocks.next_timer_deadline(SLICE, now_cycles),
                 );
                 drop(sched);
 

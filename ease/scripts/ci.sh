@@ -8,6 +8,10 @@
 #                                            # in the QEMU stage; skips host
 #                                            # tests, miri, and docs for fast
 #                                            # iteration on one feature.
+#   ./scripts/ci.sh --test=bench             # benchmarks only: the bench
+#                                            # tables and regression gates
+#                                            # (pinned to the host's fast
+#                                            # cores by run.sh)
 #   ./scripts/ci.sh --scheduler=sched-stride # (currently the only option)
 #   ./scripts/ci.sh --paint-stack            # also paint stacks and print
 #                                            # high-watermarks in the QEMU
@@ -41,7 +45,7 @@ for arg in "$@"; do
         --irqsoff)     IRQSOFF=1 ;;
         --fat16)       FS_TYPE="fat16" ;;
         --help|-h)
-            sed -n '2,26p' "$0"
+            sed -n '2,30p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
