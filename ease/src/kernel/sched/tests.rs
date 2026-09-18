@@ -2295,6 +2295,50 @@ fn fault_kill_races_a_voluntary_exit() {
     );
 }
 
+// Nothing may join a process once its teardown role is claimed. A late
+// joiner would run in a process whose fds are already closed, and its
+// release would aim a wakeup at the teardown thread's slot after that slot
+// has been freed (the "invalid TCB" tick-sweep panic seen under
+// --paint-stack). The race window is short, so this claims the role
+// directly under the scheduler lock rather than trying to hit it, then
+// hands the role back and kills the process for real to clean up.
+#[test_case]
+fn spawn_user_refused_once_teardown_claimed() {
+    let handle = crate::kernel::sched::spawn_process("user_spin_forever")
+        .expect("process spawn should succeed");
+    let claimed = super::SCHEDULER.sched.lock().claim_teardown_role(
+        handle.idx as u8,
+        crate::kernel::percpu::current_thread_idx(),
+    );
+    assert!(claimed, "fresh process must have no teardown claimant");
+    assert!(
+        crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_test))
+            .is_none(),
+        "a thread joined a process whose teardown had been claimed"
+    );
+    assert!(
+        process_alive(&handle),
+        "refusing the join must not itself tear the process down"
+    );
+
+    // Cleanup: give the role back so a real faulter can claim it.
+    super::SCHEDULER.sched.lock().process_blocks.0[handle.idx]
+        .as_mut()
+        .expect("process is still alive")
+        .teardown_thread = None;
+    crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_fault_now))
+        .expect("faulter should join once the role is free again");
+    let mut killed = false;
+    for _ in 0..200 {
+        if !process_alive(&handle) {
+            killed = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(killed, "cleanup faulter never killed the process");
+}
+
 /// Ground-truth process liveness: the slot still holds a PCB with this
 /// handle's pid. Reads the scheduler tables directly (tests live inside
 /// the sched module) so polling doesn't have to spawn probe threads.
