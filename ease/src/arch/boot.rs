@@ -16,6 +16,8 @@ unsafe extern "C" {
     static __bss_start: u8;
     static __bss_end: u8;
 
+    static __scratch_ram_pmp_size: u8;
+
     static __sram8_text_start: u8;
     static __sram8_text_end: u8;
     static __sram8_text_lma: u8;
@@ -205,7 +207,7 @@ extern "C" fn _start() -> ! {
 
             # Lock the scratch RAM text region with PMP for HART0
             la a0, {sram8_text_start}
-            la a1, {sram8_text_end}
+            la a1, {scratch_ram_pmp_size}
             call {protect_sram_text}
 
             # Zero PerCpu
@@ -277,7 +279,7 @@ extern "C" fn _start() -> ! {
 
             # Lock the text region with PMP for HART1
             la a0, {sram9_text_start}
-            la a1, {sram9_text_end}
+            la a1, {scratch_ram_pmp_size}
             call {protect_sram_text}
 
             # Store the IRQ stack top in mscratch
@@ -313,6 +315,8 @@ extern "C" fn _start() -> ! {
 
         bss_start = sym __bss_start,
         bss_end = sym __bss_end,
+
+        scratch_ram_pmp_size = sym __scratch_ram_pmp_size,
 
         sram8_text_lma = sym __sram8_text_lma,
         sram8_text_start = sym __sram8_text_start,

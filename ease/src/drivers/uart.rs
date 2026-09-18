@@ -703,4 +703,97 @@ mod tests {
             "paced cross-hart producer dropped bytes: the drain stalled behind a masked THRE"
         );
     }
+
+    // The drop-and-report half of the printk-shaped contract, made
+    // deterministic. Whether a big print overflows the ring is normally a
+    // RACE between the writer and the THRE handler (on QEMU the handler
+    // wins, so nothing drops), so this test removes the handler: hart 0 is
+    // the only hart that takes UART interrupts, and a writer pinned there
+    // with interrupts off fills a ring that cannot drain. Exactly
+    // OVERSIZE - room bytes must be counted as lost, and once the ring has
+    // drained the next write must report exactly that count.
+    #[test_case]
+    fn uart_overflow_drops_and_reports_exact_count() {
+        const OVERSIZE: usize = 2 * queue::TX_LEN - 48; // well over the ring, under the capture buffer
+        const UNSET: usize = usize::MAX;
+        static DONE: AtomicUsize = AtomicUsize::new(0);
+        static RAN_ON: AtomicUsize = AtomicUsize::new(UNSET);
+        static ROOM: AtomicUsize = AtomicUsize::new(UNSET);
+        static LEFT: AtomicUsize = AtomicUsize::new(UNSET);
+        static LOST: AtomicUsize = AtomicUsize::new(UNSET);
+        for cell in [&DONE, &RAN_ON, &ROOM, &LEFT, &LOST] {
+            cell.store(UNSET, Ordering::Relaxed);
+        }
+        DONE.store(0, Ordering::Relaxed);
+        assert!(wait_drained(500), "ring never idle before test");
+        test_io::clear();
+
+        fn writer() {
+            use core::fmt::Write as _;
+            // Nothing may panic while the writer lock is held with
+            // interrupts off, so record here and assert on the test thread.
+            crate::kernel::sync::with_interrupts_disabled(|_cs| {
+                RAN_ON.store(hart_id(), Ordering::Relaxed);
+                let mut uart_writer = UART_WRITER.lock();
+                ROOM.store(queue::TX.remaining(), Ordering::Relaxed);
+                let _ = write!(uart_writer, "{:>OVERSIZE$}", "D");
+                LEFT.store(queue::TX.remaining(), Ordering::Relaxed);
+                LOST.store(uart_writer.lost, Ordering::Relaxed);
+            });
+            DONE.store(1, Ordering::Release);
+        }
+        Builder::new()
+            .with_stack_class(Order::KB2)
+            .with_affinity(0)
+            .spawn(writer)
+            .expect("writer should spawn");
+
+        let mut waited = 0;
+        while DONE.load(Ordering::Acquire) == 0 {
+            assert!(waited < 2000, "pinned writer never finished");
+            sched::sleep(10);
+            waited += 10;
+        }
+        assert_eq!(
+            RAN_ON.load(Ordering::Relaxed),
+            0,
+            "writer must run on hart 0, the only hart that drains the ring"
+        );
+        let room = ROOM.load(Ordering::Relaxed);
+        assert!(
+            room < OVERSIZE,
+            "print of {OVERSIZE} bytes would fit in {room} bytes of room: nothing to drop"
+        );
+        assert_eq!(
+            LEFT.load(Ordering::Relaxed),
+            0,
+            "ring drained while hart 0 had interrupts off"
+        );
+        let expected = OVERSIZE - room;
+        assert_eq!(
+            LOST.load(Ordering::Relaxed),
+            expected,
+            "writer miscounted the bytes that found the ring full"
+        );
+
+        // The marker needs room in the ring, or this write joins the gap.
+        assert!(wait_drained(2000), "overflowed ring never drained");
+        println!();
+        const MARKER: &str = "Lost bytes: ";
+        let out = test_io::output();
+        let at = out
+            .find(MARKER)
+            .expect("first write after an overflow must report the loss");
+        let digits = out[at + MARKER.len()..].split('\n').next().unwrap_or("");
+        assert_eq!(
+            digits.parse::<usize>().ok(),
+            Some(expected),
+            "marker reported {digits:?}, writer dropped {expected}"
+        );
+        assert_eq!(
+            UART_WRITER.lock().lost,
+            0,
+            "loss count not cleared after being reported"
+        );
+    }
 }

@@ -10,6 +10,14 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  * PSRAM region, it is placed at a separate address 0x81000000
  * Flash memory is used to replicate XIP.
  *
+ * The RP2350 has two 4KB hot-path RAM regions for each of the HARTs - SRAM8 for HART0
+ * and SRAM9 for HART1. On the RP2350 we split this into 2KB of .text and 2KB of stack
+ * and per-cpu data. However, on QEMU having NAPOT regions of less that 4KB (page size)
+ * causes every instruction in the .text retranslate on every execution, so unlike the
+ * hardware on QEMU we extend the scratch RAM to 8KB, which allows QEMU to translate the
+ * whole page. We also add an assert to ensure the total _use_ of the 8KB is less than 4KB.
+ *
+ *
  * 0x2000_0000 +--------------------+   Represents Adafruit Metro 16 MB flash which supports XIP
  *             | .text              |
  *             | .rodata / .srodata |
@@ -39,9 +47,9 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             |                    |
  * 0x8008_0000 +--------------------+
  *             |SRAM8: HART0 scratch|   Also in Power Domain 1
- * 0x80081000  +--------------------+
+ * 0x8008_2000 +--------------------+
  *             |SRAM9: HART1 scratch|   Also in Power Domain 1
- * 0x80082000  +--------------------+   End of declared SRAM (520KiB)
+ * 0x8008_4000 +--------------------+   End of declared SRAM (520KiB + additional 8KiB to stretch scratch RAM .text to be  4K page size for QEMU)
  *             :                    :
  *             :   (unused gap)     :   Backed by QEMU RAM, but unused (QEMU virt only supports one RAM region)
  *             :                    :
@@ -61,31 +69,39 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *
  *  Scratch RAM is split into
  *
- *             +--------------------+
- *             |   .text      2KB   |   .text is switch_to, preempt trampoline, mark_for_preempt
- *             +--------------------+   It is NAPOT 2KB to allow PMP M-mode to protect from writes
- *             |   IRQ stack 1.5KB  |
- *             +--------------------+
- *             |    per cpu ~64B    |
- *             +--------------------+
+ *       +->   +--------------------+
+ *       |     |   .text      2KB   |   .text is switch_to, preempt trampoline, mark_for_preempt
+ *      4K     |         ---        |
+ *       |     |   Region size 4KB  |
+ *       +->   +--------------------+   They are NAPOT 4KB to allow PMP M-mode to protect from writes
+ *       |     |   IRQ stack 1.5KB  |
+ *       |     +--------------------+
+ *      4K     |    per cpu ~64B    |
+ *       |     +--------------------+
+ *       |     |         ---        |
+ *       +->   +--------------------+
+ *
  */
 
 MEMORY {
     FLASH       : ORIGIN = 0x20000000, LENGTH = 0x01000000 /* 16 MB */
     SRAM_PD0    : ORIGIN = 0x80000000, LENGTH = 0x00040000 /* SRAM0-3 - 256KB */
     SRAM_PD1    : ORIGIN = 0x80040000, LENGTH = 0x00040000 /* SRAM4-7 - 256KB */
-    SRAM8       : ORIGIN = 0x80080000, LENGTH = 0x00001000 /* HART0 4KB scratch RAM */
-    SRAM9       : ORIGIN = 0x80081000, LENGTH = 0x00001000 /* HART1 4KB scratch RAM */
+    SRAM8       : ORIGIN = 0x80080000, LENGTH = 0x00002000 /* HART0 8KB scratch RAM, on RP2350 this is 4KB */
+    SRAM9       : ORIGIN = 0x80082000, LENGTH = 0x00002000 /* HART1 8KB scratch RAM, on RP2350 this is 4KB */
     PSRAM       : ORIGIN = 0x81000000, LENGTH = 0x00800000 /* 8MB */
 }
 
 /* Include the user memory definitions that are shared between user programs and the OS */
 INCLUDE memory-shared-qemu.x
 
-__idle_stack_size       = 2K;
-__irq_stack_size        = 1K + 512;
-__scratch_ram_text_size = 2K;
-__kernel_heap_size      = 128K;
+__idle_stack_size         = 2K;
+__irq_stack_size          = 1K + 512;
+__scratch_ram_text_size   = 4K; /* 2K on RP2350 */
+__scratch_ram_pmp_size    = 4K; /* 2K on RP2350 */
+__scratch_ram_text_budget = 2K;
+__scratch_ram_total_budget = 4K;
+__kernel_heap_size        = 128K;
 __fb_width = 640; __fb_height = 480; __fb_bytes_pp = 4; /* 640  x 480 x 4 bytes = ~1.2MiB */
 
 __sram_pd1_end  = ORIGIN(SRAM_PD1) + LENGTH(SRAM_PD1);
@@ -162,9 +178,11 @@ SECTIONS {
     /* SRAM8 */
 
     /* SRAM8 is the dedicated HART0 scratch RAM */
+    /* For QEMU this is 8KB, for RP2350 this is 4KB */
     .sram8_text : ALIGN(__scratch_ram_text_size) {
         __sram8_text_start = .;
         *(.sram8_text .sram8_text.*)
+        __sram8_text_use_end = .;
         . = __sram8_text_start + __scratch_ram_text_size;
         __sram8_text_end = .;
     } > SRAM8 AT > FLASH
@@ -186,9 +204,11 @@ SECTIONS {
     /* SRAM9 */
 
     /* SRAM9 is the dedicated HART1 scratch RAM */
+    /* For QEMU this is 8KB, for RP2350 this is 4KB */
     .sram9_text : ALIGN(__scratch_ram_text_size) {
         __sram9_text_start = .;
         *(.sram9_text .sram9_text.*)
+        __sram9_text_use_end = .;
         . = __sram9_text_start + __scratch_ram_text_size;
         __sram9_text_end = .;
     } > SRAM9 AT > FLASH
@@ -260,7 +280,31 @@ SECTIONS {
     /DISCARD/ : { *(.comment) *(.eh_frame_hdr) *(.eh_frame)} /* Discard comment strings to keep binary small */
 }
 
+/* Make sure the scratch RAM budget is not exceeded */
+__sram8_text_use_size = __sram8_text_use_end - __sram8_text_start;
+__sram8_irq_stack_size = __hart0_irq_stack_top - __hart0_irq_stack_base;
+__sram8_percpu_size = __hart0_percpu_end - __hart0_percpu_start;
+ASSERT(__sram8_text_use_size < __scratch_ram_text_budget, "SRAM8 .text budget exceeded")
+ASSERT((__sram8_text_use_size + __sram8_irq_stack_size + __sram8_percpu_size) <= __scratch_ram_total_budget, "SRAM8 budget exceeded")
+
+__sram9_text_use_size = __sram9_text_use_end - __sram9_text_start;
+__sram9_irq_stack_size = __hart1_irq_stack_top - __hart1_irq_stack_base;
+__sram9_percpu_size = __hart1_percpu_end - __hart1_percpu_start;
+ASSERT(__sram9_text_use_size < __scratch_ram_text_budget, "SRAM9 .text budget exceeded")
+ASSERT((__sram9_text_use_size + __sram9_irq_stack_size + __sram9_percpu_size) <= __scratch_ram_total_budget, "SRAM9 budget exceeded")
+
+ASSERT(__sram8_text_start % __scratch_ram_pmp_size == 0, "SRAM8 text start not aligned to PMP region size (NAPOT base)")
+ASSERT(__hart0_irq_stack_base >= __sram8_text_start + __scratch_ram_pmp_size, "SRAM8 IRQ stack inside PMP region")
+ASSERT(__hart0_percpu_start   >= __sram8_text_start + __scratch_ram_pmp_size, "SRAM8 percpu inside PMP region")
+ASSERT(__hart0_irq_stack_base % 16 == 0, "SRAM8 IRQ stack base must be 16-aligned (ABI sp)")
+
+ASSERT(__sram9_text_start % __scratch_ram_pmp_size == 0, "SRAM9 text start not aligned to PMP region size (NAPOT base)")
+ASSERT(__hart1_irq_stack_base >= __sram9_text_start + __scratch_ram_pmp_size, "SRAM9 IRQ stack inside PMP region")
+ASSERT(__hart1_percpu_start   >= __sram9_text_start + __scratch_ram_pmp_size, "SRAM9 percpu inside PMP region")
+ASSERT(__hart1_irq_stack_base % 16 == 0, "SRAM9 IRQ stack base must be 16-aligned (ABI sp)")
+
 ASSERT(__heap_psram_end == __user_text_origin, "user .text is should be immediately after the heap PSRAM allocation")
+ASSERT(__scratch_ram_pmp_size % 4K == 0, "scratch text size must be NAPOT and page-aligned for underlying OS in QEMU ")
 ASSERT(__scratch_ram_text_size % 4  == 0, "scratch text size must be word-multiple (copy_region)")
 ASSERT(__irq_stack_size        % 16 == 0, "irq stack size must be 16-multiple (paint + ABI sp)")
 ASSERT(__idle_stack_size       % 16 == 0, "idle stack size must be 16-multiple (paint + ABI sp)")

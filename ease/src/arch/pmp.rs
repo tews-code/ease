@@ -207,12 +207,14 @@ pub(crate) extern "C" fn protect_null_ptr_deref() {
 ///
 /// Safety: Caller must call this function _after_ .text has been copied from flash, but
 /// _before_ any U-mode PMP.
-pub(crate) extern "C" fn protect_sram_text(sram_text_start: usize, sram_text_end: usize) {
+///
+/// Note that the pmp_region_size is larger than the scratch RAM .text size on QEMU to page align with the underlying OS.
+pub(crate) extern "C" fn protect_sram_text(sram_text_start: usize, pmp_region_size: usize) {
     let mut pmp = Pmp::new();
     pmp.set_region(
         1,
         sram_text_start,
-        sram_text_end - sram_text_start,
+        pmp_region_size,
         pmp::NAPOT,
         pmp::R | pmp::X,
     );

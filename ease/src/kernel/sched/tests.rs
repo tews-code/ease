@@ -2818,21 +2818,17 @@ fn fixed_leeway_sleeper_never_wakes_early() {
 // old UART writer deadlocked when the TX ring filled — it spun waiting
 // for the drain interrupt while holding the IrqSpinLock that masked it.
 // The writer's contract is now printk-shaped: a print never blocks and
-// never panics; bytes that find the ring full are dropped and counted,
-// and the count is reported as a "Lost bytes: N" marker pushed the next
-// time a write finds room for it. This test makes the overflow
-// deterministic: a single print!() larger than TX_LEN cannot fit, so
-// bytes MUST be dropped and the marker MUST appear. A helper floods from
-// (usually) the other hart at the same time so the writer lock is also
-// contended. Completion proves no deadlock; the captured output (test-io)
-// proves the loss was reported rather than silent.
+// never panics, whatever the ring is doing. Two threads (usually one per
+// hart) push prints several times the size of the TX ring through the
+// contended writer lock; completion is the pass. Whether bytes actually
+// drop here is a race between the writers and the THRE handler, so this
+// test says nothing about loss: the drop-and-report half of the contract
+// is pinned down deterministically by
+// uart_overflow_drops_and_reports_exact_count in drivers/uart.rs.
 #[test_case]
 fn console_flood_survives_tx_backpressure() {
     static FLOOD_DONE: AtomicUsize = AtomicUsize::new(0);
     FLOOD_DONE.store(0, Ordering::Relaxed);
-    #[cfg(feature = "test-io")]
-    crate::io::test_io::clear();
-
     fn flooder() {
         // Width padding makes fmt emit kilobytes through one locked writer
         // session without us allocating anything.
@@ -2860,24 +2856,4 @@ fn console_flood_survives_tx_backpressure() {
         crate::kernel::sched::sleep(10);
     }
     assert!(done, "flooder thread never completed its oversized print");
-
-    // The capture buffer records bytes accepted into the ring (marker
-    // included), so the first marker lands well inside its 4 KB.
-    #[cfg(feature = "test-io")]
-    {
-        const MARKER: &str = "Lost bytes: ";
-        const TOTAL_PRINTED: usize = 3000 + 4 * 2000 + 1;
-        let out = crate::io::test_io::output();
-        let at = out
-            .find(MARKER)
-            .expect("oversized prints must drop bytes and report them with a Lost bytes marker");
-        let digits: &str = out[at + MARKER.len()..].split('\n').next().unwrap_or("");
-        let lost: usize = digits
-            .parse()
-            .unwrap_or_else(|_| panic!("Lost bytes marker not followed by a count: {digits:?}"));
-        assert!(
-            lost > 0 && lost < TOTAL_PRINTED,
-            "lost-byte count {lost} is not a plausible fraction of {TOTAL_PRINTED} printed bytes"
-        );
-    }
 }
