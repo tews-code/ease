@@ -100,6 +100,7 @@ impl Scheduler {
         let Some(pcb) = sched.process_blocks.0[process.idx]
             .as_ref()
             .filter(|pcb| pcb.pid == process.pid)
+            .filter(|pcb| pcb.teardown_thread.is_none())
         else {
             drop(sched);
             return None;
