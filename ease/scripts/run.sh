@@ -34,6 +34,29 @@ rust-objcopy -O binary \
     --gap-fill=0xff \
     "$ELF" "$FLASH_BIN"
 
+# CPU placement: on a big.LITTLE host the kernel parks a mostly-idle vCPU
+# thread (hart 1 in wfi) on an efficiency core, where TCG runs ~3x slower
+# and its bursts (ticks, IPIs, lock holds) drag hart 0 with them; bench
+# numbers then read 2-3x high and bimodal run to run (2026-09-18). Pin
+# QEMU to the highest-capacity cores when the host has more than one
+# class. Override with EASE_QEMU_CPUS=<cpulist> or EASE_QEMU_CPUS=none.
+PIN=""
+if command -v taskset >/dev/null 2>&1; then
+    case "${EASE_QEMU_CPUS:-auto}" in
+        none) ;;
+        auto)
+            caps=$(cat /sys/devices/system/cpu/cpu[0-9]*/cpu_capacity 2>/dev/null | sort -u)
+            if [ "$(echo "$caps" | wc -l)" -gt 1 ]; then
+                top=$(echo "$caps" | sort -n | tail -1)
+                cpus=$(for c in /sys/devices/system/cpu/cpu[0-9]*; do
+                           [ "$(cat "$c/cpu_capacity")" = "$top" ] && basename "$c" | tr -d 'cpu'
+                       done | paste -sd,)
+                PIN="taskset -c $cpus"
+            fi ;;
+        *) PIN="taskset -c ${EASE_QEMU_CPUS}" ;;
+    esac
+fi
+
 #Start QEMU
 # QEMU virt requires 32MB flash even though we are modelling 16MB
 # Use accel and tb-size at 64MB to prevent stalls
@@ -41,7 +64,7 @@ rust-objcopy -O binary \
 # make mcycle count guest instructions (deterministic, host-independent;
 # forces single-threaded TCG and a virtual clock, so timing-sensitive
 # tests are not meaningful under it).
-$QEMU -accel tcg,tb-size=64 ${EASE_QEMU_ARGS:-} \
+$PIN $QEMU -accel tcg,tb-size=64 ${EASE_QEMU_ARGS:-} \
     -machine virt -bios none -device ramfb $DISPLAY_ARG -serial stdio \
     -drive id=drive0,file="$CRATE_ROOT/disk.img",format=raw,if=none \
     -device virtio-blk-device,drive=drive0,bus=virtio-mmio-bus.0 \
