@@ -68,6 +68,22 @@ fn unit_costs() {
         drop(super::SCHEDULER.sched.lock());
     });
     println!("  sched lock (uncontended):    wall min={lk:>6} cycles/call");
+
+    // The mtimecmp reprogram every reschedule ends with: three CLINT MMIO
+    // writes (hi=MAX, lo, hi), and QEMU re-arms a host timer behind them.
+    // Far-future deadline so no tick lands inside the bracket; alternate
+    // two values so a same-value write can't be short-circuited. The yield
+    // afterwards hands the timer back to the scheduler's real deadline.
+    let far = timer::elapsed() + 1_000 * timer::CYCLES_PER_MS;
+    let mut flip = 0;
+    let sd = per_call(RUNS, M, || {
+        flip ^= 1;
+        with_interrupts_disabled(|_cs| timer::set_next_deadline(far + flip));
+    });
+    sched::yield_now();
+    println!(
+        "  set_next_deadline (mtimecmp): wall min={sd:>6} cycles/call (3 MMIO writes, IRQs off/on)"
+    );
 }
 
 /// The scans reschedule runs under the lock, each timed alone. The pick
