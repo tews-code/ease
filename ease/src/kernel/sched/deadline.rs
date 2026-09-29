@@ -8,7 +8,6 @@
 
 use super::Qos;
 use crate::kernel::timer;
-use crate::percpu;
 
 const LEEWAY_DEFAULT_US: u64 = 100;
 const LEEWAY_DEFAULT_CYCLES: u64 = LEEWAY_DEFAULT_US * timer::CYCLES_PER_US;
@@ -44,11 +43,11 @@ impl Deadline {
         }
     }
     /// New absolute deadline millisecond value using system leeway.
-    pub(crate) fn from_ms_with_system_leeway(deadline_ms: u64) -> Self {
+    pub(crate) fn from_ms_with_system_leeway(deadline_ms: u64, qos: Qos) -> Self {
         let at = deadline_ms.saturating_mul(timer::CYCLES_PER_MS);
         Self {
             at,
-            leeway: Self::system_leeway_cycles(at, percpu::current_qos()),
+            leeway: Self::system_leeway_cycles(at, qos),
         }
     }
     /// New deadline after duration millisecond values.
@@ -60,12 +59,12 @@ impl Deadline {
         }
     }
     /// New deadline after duration millisecond values using system leeway.
-    pub(crate) fn after_ms_with_system_leeway(duration_ms: u64) -> Self {
+    pub(crate) fn after_ms_with_system_leeway(duration_ms: u64, qos: Qos) -> Self {
         let at =
             (duration_ms.saturating_add(timer::elapsed_ms())).saturating_mul(timer::CYCLES_PER_MS);
         Self {
             at,
-            leeway: Self::system_leeway_cycles(at, percpu::current_qos()),
+            leeway: Self::system_leeway_cycles(at, qos),
         }
     }
     /// Coalesce to a given time in cycles. If there is a leeway this

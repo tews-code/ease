@@ -9,7 +9,7 @@
 //! right state for them. If it is not, then they go back to sleep.
 //!
 //! In order to support threads registering on a wait queues there is a wait queue which
-//! holds an array of `Option<ThreadHandle>`. In EASE there are only `THREADS_MAX` threads so a simple array
+//! holds an array of `Option<thread::Handle>`. In EASE there are only `thread::MAX` threads so a simple array
 //! is used for the queue. For a thread to register its interest it puts its thread handle into the array.
 //! To deregister it clears that same slot. We use thread handles (rather than thread TCB index) to
 //! avoid stale slots triggering against new threads.
@@ -28,35 +28,36 @@
 //! The closure with the resource lock held and must not block, sleep, or take the scheduler lock.
 
 use super::Interrupted;
-use crate::kernel::sched::{self, THREADS_MAX, ThreadHandle};
+use crate::kernel::percpu;
+use crate::kernel::sched::{self, thread};
 use crate::kernel::sync::{IrqSpinLock, SpinLock, SpinLockGuard};
 
-struct WaitQueueInner([Option<ThreadHandle>; THREADS_MAX]);
+struct WaitQueueInner([Option<thread::Handle>; thread::MAX_COUNT]);
 
 impl WaitQueueInner {
     /// New is const
     const fn new() -> Self {
-        Self([const { None }; THREADS_MAX])
+        Self([const { None }; thread::MAX_COUNT])
     }
     /// Register a thread in the wait queue. This is idempotent and does not check existing state
     ///
     /// # Panics #
     /// Panics if the thread handle is invalid
-    fn register(&mut self, handle: ThreadHandle) {
-        assert!(handle.idx < THREADS_MAX);
-        self.0[handle.idx] = Some(handle);
+    fn register(&mut self, handle: thread::Handle) {
+        assert!(handle.idx() < thread::MAX_COUNT);
+        self.0[handle.idx()] = Some(handle);
     }
     /// Deregister a thread from the wait queue. This is idempotent and does not check existing state
     ///
     /// # Panics #
     /// Panics if the thread handle is invalid
-    fn deregister(&mut self, handle: ThreadHandle) {
-        assert!(handle.idx < THREADS_MAX);
-        self.0[handle.idx] = None;
+    fn deregister(&mut self, handle: thread::Handle) {
+        assert!(handle.idx() < thread::MAX_COUNT);
+        self.0[handle.idx()] = None;
     }
     /// Drain the queue
-    fn drain(&mut self) -> [Option<ThreadHandle>; THREADS_MAX] {
-        core::mem::replace(&mut self.0, [const { None }; THREADS_MAX])
+    fn drain(&mut self) -> [Option<thread::Handle>; thread::MAX_COUNT] {
+        core::mem::replace(&mut self.0, [const { None }; thread::MAX_COUNT])
     }
 }
 
@@ -107,7 +108,8 @@ impl WaitQueue {
         F: FnMut(&mut R) -> bool,
     {
         loop {
-            let current_handle = sched::current_thread();
+            let current_handle =
+                percpu::current_thread().expect("current thread should be installed");
             // Take the wait queue lock to ensure next steps are never split by an interrupt
             let mut wait_queue = self.inner.lock();
             // First register this thread
@@ -146,7 +148,7 @@ impl WaitQueue {
     pub(crate) fn wake_all(&self) {
         let current_queue = self.inner.lock().drain();
         for handle in current_queue.iter().flatten() {
-            sched::unpark(handle);
+            sched::unpark(*handle);
         }
     }
 }

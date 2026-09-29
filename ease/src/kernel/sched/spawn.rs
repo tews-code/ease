@@ -10,7 +10,7 @@ use crate::kernel::timer;
 use super::Qos;
 use super::process;
 use super::stride::{SLICE, SchedInner, Scheduler};
-use super::threads::{ThreadControlBlockSpec, ThreadHandle, UserContext};
+use super::thread;
 use super::userloader;
 
 impl Scheduler {
@@ -18,11 +18,7 @@ impl Scheduler {
     fn finish_spawn(&self, mut sched: IrqSpinLockGuard<SchedInner>, affinity: Option<u8>) {
         // Set the timer
         self.wake_sleeping_threads(&mut sched);
-        timer::set_next_deadline(
-            sched
-                .thread_blocks
-                .next_timer_deadline(SLICE, timer::elapsed()),
-        );
+        timer::set_next_deadline(sched.threads.next_timer_deadline(SLICE, timer::elapsed()));
         // If the spawned thread has affinity for the other hart, send an IPI
         drop(sched);
         if let Some(h) = affinity
@@ -52,7 +48,7 @@ impl Scheduler {
         stack_order: Order,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Option<ThreadHandle> {
+    ) -> Option<thread::Handle> {
         // Thread stack is taken from the kernel heap
         let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
@@ -60,9 +56,9 @@ impl Scheduler {
         let mut sched = self.sched.lock();
         // Acquire a valid initialised thread control block slot with sp
         // pointing to a forged stack.
-        let handle = sched.thread_blocks.acquire(
+        let handle = sched.threads.acquire(
             |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
-            ThreadControlBlockSpec {
+            thread::ControlBlockSpec {
                 kernel_stack,
                 qos,
                 priority,
@@ -71,7 +67,7 @@ impl Scheduler {
             },
         )?;
         // Make sure threads don't launch with stale flags
-        self.clear_thread_flags(handle.idx);
+        self.clear_thread_flags(handle);
         self.finish_spawn(sched, affinity);
         Some(handle)
     }
@@ -88,7 +84,7 @@ impl Scheduler {
         user_stack_order: Order,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Option<ThreadHandle> {
+    ) -> Option<thread::Handle> {
         // Allocate stacks before locking
         let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
@@ -108,7 +104,7 @@ impl Scheduler {
         let user_stack_top = user_stack.top();
         let user_stack_base = user_stack.base();
         let user_exit = pcb.entry_ra;
-        let thread_handle = sched.thread_blocks.acquire(
+        let thread_handle = sched.threads.acquire(
             |kernel_stack| unsafe {
                 umode::init_stack_for_user_thread(
                     kernel_stack,
@@ -118,12 +114,12 @@ impl Scheduler {
                     user_exit,
                 )
             },
-            ThreadControlBlockSpec {
+            thread::ControlBlockSpec {
                 kernel_stack,
                 qos,
                 priority,
                 affinity,
-                user: Some(UserContext {
+                user: Some(thread::UserContext {
                     stack: user_stack,
                     entry,
                     process_idx: process.idx as u8,
@@ -137,12 +133,12 @@ impl Scheduler {
             .add_thread_count()
             .is_err()
         {
-            sched.thread_blocks.release(&thread_handle);
+            sched.threads.release(thread_handle);
             drop(sched);
             return None;
         }
         // Make sure threads don't launch with stale flags
-        self.clear_thread_flags(thread_handle.idx);
+        self.clear_thread_flags(thread_handle);
         self.finish_spawn(sched, affinity);
         Some(thread_handle)
     }
@@ -185,7 +181,7 @@ impl Scheduler {
             .find_process_slot()
             .ok_or(process::SpawnError::TooManyProcesses)?;
         let thread_handle = sched
-            .thread_blocks
+            .threads
             .acquire(
                 |kernel_stack| unsafe {
                     umode::init_stack_for_user_thread(
@@ -196,12 +192,12 @@ impl Scheduler {
                         entry_ra,
                     )
                 },
-                ThreadControlBlockSpec {
+                thread::ControlBlockSpec {
                     kernel_stack,
                     qos,
                     priority,
                     affinity,
-                    user: Some(UserContext {
+                    user: Some(thread::UserContext {
                         stack: user_stack,
                         entry,
                         process_idx: pcb_idx as u8,
@@ -210,7 +206,7 @@ impl Scheduler {
             )
             .ok_or(process::SpawnError::NotEnoughThreads)?;
         // Clear all stale flags
-        self.clear_thread_flags(thread_handle.idx);
+        self.clear_thread_flags(thread_handle);
         // Install
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");

@@ -69,8 +69,7 @@ use super::{context, umode};
 use crate::arch::trap;
 use crate::drivers::keyboard;
 use crate::kernel::alloc::MemRegion;
-use crate::kernel::sched::ExitReason;
-use crate::kernel::sched::{self, post_switch_cleanup, userloader::UserEntry};
+use crate::kernel::sched::{self, post_switch_cleanup, thread, userloader::UserEntry};
 use crate::kernel::stack;
 use crate::kernel::sync;
 use crate::kernel::trap::{Work, divert_work_to_kernel};
@@ -224,8 +223,8 @@ pub extern "C" fn user_first_run() -> ! {
 /// Panics if the exit reason is unknown
 pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
     let exit_reason = match reason {
-        0 => ExitReason::Exit,
-        1 => ExitReason::Fault,
+        0 => thread::ExitReason::Exit,
+        1 => thread::ExitReason::Fault,
         _ => panic!("unknown user thread exit reason"),
     };
     sched::exit_user_thread(exit_reason);
@@ -254,7 +253,7 @@ pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
             );
             match result {
                 Ok(guard) => drop(guard),
-                Err(sync::Interrupted) => sched::exit_user_thread(ExitReason::Fault),
+                Err(sync::Interrupted) => sched::exit_user_thread(thread::ExitReason::Fault),
             }
             // Return the key in the frame's value field
             frame.a0 = 0;
@@ -277,7 +276,7 @@ pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
                 }
                 // Err(Interrupted): fall out of the scope, dropping _guard.
             }
-            sched::exit_user_thread(ExitReason::Fault);
+            sched::exit_user_thread(thread::ExitReason::Fault);
         }
         _ => panic!("unexpected blocking syscall: {}", syscall),
     }
@@ -292,7 +291,7 @@ pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
 pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> EcallResult {
     match frame.syscall() {
         syscall::EXIT => {
-            frame.a0 = ExitReason::Exit as usize;
+            frame.a0 = thread::ExitReason::Exit as usize;
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             EcallResult::Diverted
         }

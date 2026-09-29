@@ -199,6 +199,10 @@ mod kernel {
         pub fn lock_released(_site: &'static core::panic::Location<'static>, _acquired: u64) {}
     }
     pub mod percpu {
+        pub fn current_thread() -> Option<super::sched::thread::Handle> {
+            Some(super::sched::thread::Handle { idx: 0 })
+        }
+
         pub fn set_needs_reschedule() {}
 
         pub fn current_thread_idx() -> usize {
@@ -225,7 +229,20 @@ mod kernel {
     #[allow(dead_code)]
     pub mod sched {
 
-        pub const THREADS_MAX: usize = 16;
+        pub mod thread {
+            pub const MAX_COUNT: usize = 16;
+
+            #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+            pub struct Handle {
+                pub idx: usize,
+            }
+
+            impl Handle {
+                pub fn idx(&self) -> usize {
+                    self.idx
+                }
+            }
+        }
 
         #[derive(Clone, Copy)]
         pub(crate) struct Deadline;
@@ -236,27 +253,15 @@ mod kernel {
             }
         }
 
-        #[derive(Clone, Copy)]
-        pub struct ThreadHandle {
-            pub id: u32,
-            pub idx: usize,
-        }
-
-        impl ThreadHandle {
-            pub fn idx(&self) -> usize {
-                self.idx
-            }
-        }
-
-        pub fn current_thread() -> ThreadHandle {
+        pub fn current_thread() -> thread::Handle {
             panic!("sched stub: must not be called from the lib crate");
         }
 
-        pub fn set_next_waiter(_handle: &ThreadHandle, _next: Option<ThreadHandle>) {
+        pub fn set_next_waiter(_handle: thread::Handle, _next: Option<thread::Handle>) {
             panic!("sched stub: must not be called from the lib crate");
         }
 
-        pub fn get_next_waiter(_thread: &ThreadHandle) -> Option<ThreadHandle> {
+        pub fn get_next_waiter(_thread: thread::Handle) -> Option<thread::Handle> {
             panic!("sched stub: must not be called from the lib crate");
         }
 
@@ -268,7 +273,7 @@ mod kernel {
             panic!("sched stub: must not be called from the lib crate");
         }
 
-        pub fn unpark(_handle: &ThreadHandle) {
+        pub fn unpark(_handle: thread::Handle) {
             panic!("sched stub: must not be called from the lib crate");
         }
 

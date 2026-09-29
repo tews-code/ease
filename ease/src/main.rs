@@ -77,18 +77,17 @@ fn interrupts_init_hart1() {
 
 fn kernel_init() {
     // Initialise just the basics to keep stack use light
-    percpu::set_current_kernel_stack_base(&raw const __hart0_idle_stack_base as *mut u8);
+    sched::bootstrap(0);
     // The initialisation functions panic or succeed
     #[cfg(feature = "profile")]
     kernel::profile::init();
-    percpu::set_scheduler_online();
     kernel::alloc::init_global_allocator();
     kernel::timer::init();
     drivers::plic::init();
     drivers::uart::init();
     drivers::plic::enable(uart::IRQ);
-    sched::bootstrap(0);
     kernel::ipi::init();
+    percpu::set_ipi_online();
     interrupts_init_hart0();
 
     // Spawn the trace sampler on HART0 BEFORE the init thread, so it is
@@ -157,12 +156,11 @@ extern "C" fn secondary_main() -> ! {
     while !INIT_COMPLETE.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
-    // Perform Hart-specific initialisation
-    percpu::set_current_kernel_stack_base(&raw const __hart1_idle_stack_base as *mut u8);
-    kernel::timer::init();
+    // Perform Hart-specific initialisation with the idle/boot thread details
     sched::bootstrap(1);
+    kernel::timer::init();
     kernel::ipi::init();
-    percpu::set_scheduler_online();
+    percpu::set_ipi_online();
     // HART1 does not service external (PLIC) or driver interrupts; only timer and IPI
     interrupts_init_hart1();
     // Drop into idle

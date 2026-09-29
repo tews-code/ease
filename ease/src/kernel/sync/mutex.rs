@@ -6,7 +6,8 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::SpinLock;
 
-use crate::kernel::sched::ThreadHandle;
+use crate::kernel::percpu;
+use crate::kernel::sched::thread;
 
 //-------------------------------------------------------------------------
 //
@@ -29,7 +30,7 @@ enum MutexState {
 pub struct Mutex<T> {
     state: AtomicU8, // 0 - unlocked; 1 - locked no waiters; 2 - locked with waiter
     data: UnsafeCell<T>,
-    waiters: SpinLock<Option<ThreadHandle>>,
+    waiters: SpinLock<Option<thread::Handle>>,
 }
 
 #[cfg(target_os = "none")]
@@ -140,8 +141,8 @@ impl<T> Mutex<T> {
         }
         // Now block
         // Enqueue self at the head of the waiter list
-        let curr_handle = crate::kernel::sched::current_thread();
-        crate::kernel::sched::set_next_waiter(&curr_handle, *head);
+        let curr_handle = percpu::current_thread().expect("current thread should be installed");
+        crate::kernel::sched::set_next_waiter(curr_handle, *head);
         *head = Some(curr_handle);
 
         // Set the state to Blocked - in case a thread has called Drop in the mean time
@@ -196,8 +197,8 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
         let popped = head
             .take()
             .expect("there should be waiters in the blocked list");
-        let next_waiter_in_list = crate::kernel::sched::get_next_waiter(&popped);
-        crate::kernel::sched::set_next_waiter(&popped, None);
+        let next_waiter_in_list = crate::kernel::sched::get_next_waiter(popped);
+        crate::kernel::sched::set_next_waiter(popped, None);
         *head = next_waiter_in_list;
         // Change the state using Release atomics to ensure unparked thread sees new state
         self.lock.state.store(
@@ -210,6 +211,6 @@ impl<'a, T> Drop for MutexGuard<'a, T> {
         );
 
         drop(head);
-        crate::kernel::sched::unpark(&popped);
+        crate::kernel::sched::unpark(popped);
     }
 }

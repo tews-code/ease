@@ -1,48 +1,63 @@
 //! Per HART struct
+//!
+//! Most fields are written and read by the same HART, avoiding concurrent
+//! reads and writes which would be undefined behaviour.
+//!
+//! Some "other" accessors can only be safely read or written to under the scheduler
+//! locks and hence  take `&SchedInner` as a token parameter, or are atomics.
 
 use core::cell::UnsafeCell;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch;
-use crate::kernel::sched::{Qos, THREADS_MAX};
+use crate::kernel::sched::{Qos, SchedInner, thread};
 use crate::kernel::trap::Work;
 
-#[repr(C)]
-struct PerCpu {
-    scheduler_online: UnsafeCell<bool>,
-    idle_thread_idx: UnsafeCell<u8>,
-    switching_from_thread_idx: UnsafeCell<Option<u8>>,
-    needs_reschedule: AtomicBool,
-    current_thread_idx: UnsafeCell<u8>,
-    current_kernel_stack_base: UnsafeCell<*mut u8>,
-    current_kernel_stack_top: UnsafeCell<*mut u8>,
-    current_user_stack_base: UnsafeCell<Option<*mut u8>>,
-    current_qos: UnsafeCell<Qos>, // Current thread's Qos affects deadlines
-    resume_work: UnsafeCell<Work>, // On trap return the thread's deferred work
-    resume_sp: UnsafeCell<usize>,
-    resume_mstatus: UnsafeCell<usize>, // Deferred work resumes with this mstatus
-    resume_mepc: UnsafeCell<usize>,    // Deferred work resumes with this mepc
+/// Currently running thread details.
+/// These fields must always be consistent with each other
+// Derive Copy as when getting the fields we are taking a snapshot at the time
+// and need to copy those fields out of the UnsafeCell.
+#[derive(Clone, Copy)]
+struct CurrentThread {
+    handle: thread::Handle,
+    kernel_stack_base: NonNull<u8>, // Required for lock-free canary check
+    kernel_stack_top: NonNull<u8>,  // Required for lock-free mret divert to kernel mode
+    user_stack_base: Option<NonNull<u8>>, // Required for lock-free canary check
+    qos: Qos,                       // Required for lock-free deadline calculations
 }
-
-// Safety: Each HART only accesses its own per-cpu data
+/// Deferred work resumes with this context
+// No `Copy` as Resume should only be taken on resumption and not copied or reused
+pub(crate) struct ResumeContext {
+    pub(crate) work: Work,
+    pub(crate) sp: usize,
+    pub(crate) mstatus: usize,
+    pub(crate) mepc: usize,
+}
+/// The per-HART struct
+struct PerCpu {
+    ipi_online: AtomicBool,
+    current_thread: UnsafeCell<Option<CurrentThread>>,
+    idle_thread: UnsafeCell<Option<thread::Handle>>,
+    switching_from_thread: UnsafeCell<Option<thread::Handle>>,
+    needs_reschedule: AtomicBool,
+    resume_context: UnsafeCell<Option<ResumeContext>>,
+}
+// Safety: Each HART only accesses its own per-cpu data, with the exception of the
+// "other" accessors, which can only be called with the scheduler lock held. As a
+// result, the fields are either Sync as they are atomic, trivally never used by other
+// threads, or because of the scheduler spinlock serialisation.
 unsafe impl Sync for PerCpu {}
 
 impl PerCpu {
     pub const fn new() -> Self {
         Self {
-            scheduler_online: UnsafeCell::new(false),
-            idle_thread_idx: UnsafeCell::new(0),
-            switching_from_thread_idx: UnsafeCell::new(None),
+            ipi_online: AtomicBool::new(false),
+            current_thread: UnsafeCell::new(None),
+            idle_thread: UnsafeCell::new(None),
+            switching_from_thread: UnsafeCell::new(None),
             needs_reschedule: AtomicBool::new(false),
-            current_thread_idx: UnsafeCell::new(0),
-            current_kernel_stack_base: UnsafeCell::new(core::ptr::null_mut()),
-            current_kernel_stack_top: UnsafeCell::new(core::ptr::null_mut()),
-            current_user_stack_base: UnsafeCell::new(None),
-            current_qos: UnsafeCell::new(Qos::High),
-            resume_work: UnsafeCell::new(Work::Preempt), // This is option 0 in the NOLOAD percpu segment - which is what we want
-            resume_sp: UnsafeCell::new(0),
-            resume_mstatus: UnsafeCell::new(0),
-            resume_mepc: UnsafeCell::new(0),
+            resume_context: UnsafeCell::new(None),
         }
     }
 }
@@ -72,222 +87,193 @@ fn that_hart() -> &'static PerCpu {
 pub(super) fn that_hart_id() -> usize {
     arch::hart_id() ^ 1
 }
-
-/// Get this hart's online status
-#[expect(dead_code)]
-pub fn scheduler_online() -> bool {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().scheduler_online.get() }
+/// Get this hart's IPI availability status
+pub(crate) fn ipi_online() -> bool {
+    // We don't order memory against this atomic, it is purely a flag.
+    // (The IPI mailbox handles ordering).
+    this_hart().ipi_online.load(Ordering::Relaxed)
 }
-
-// Get the other hart's online status
-pub fn other_scheduler_online() -> bool {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_hart().scheduler_online.get() }
+/// Get the other hart's IPI online status
+pub(crate) fn other_ipi_online() -> bool {
+    // We don't order memory against this atomic, it is purely a flag.
+    // (The IPI mailbox handles ordering).
+    that_hart().ipi_online.load(Ordering::Relaxed)
 }
-
-/// Set the online status
-pub fn set_scheduler_online() {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().scheduler_online.get() = true }
+/// Set this HART's IPI online status
+pub(crate) fn set_ipi_online() {
+    // We don't order memory against this atomic, it is purely a flag.
+    // (The IPI mailbox handles ordering).
+    this_hart().ipi_online.store(true, Ordering::Relaxed)
 }
-
-/// Get the idle thread TCB index.
-pub fn idle_thread_idx() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().idle_thread_idx.get() as usize }
+/// Get the idle thread handle.
+/// Returns `None` if called before this has been installed by the scheduler.
+pub(crate) fn idle_thread() -> Option<thread::Handle> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().idle_thread.get() }
 }
-
-// Tracing thread behaviour requires reading cross-Hart PerCpu details
-#[allow(dead_code)]
-pub fn other_idle_thread_idx() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_hart().idle_thread_idx.get() as usize }
+/// The handle of the idle thread on the other HART. Returns `None` if this is not
+/// yet installed. Tracing thread behaviour requires reading cross-Hart PerCpu details.
+pub(crate) fn other_idle_thread(_sched: &SchedInner) -> Option<thread::Handle> {
+    // Safety: the scheduler lock ensures no concurrent writes, so deferencing is safe
+    unsafe { *that_hart().idle_thread.get() }
 }
-
-/// Set the idle thread TCB index.
-pub fn set_idle_thread_idx(thread_idx: usize) {
-    assert!(
-        thread_idx < THREADS_MAX,
-        "setting idle thread index outside of THREADS_MAX"
-    );
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().idle_thread_idx.get() = thread_idx as u8 }
+/// Set the idle thread handle.
+/// Requres proof of holding a scheduler lock to prevent concurrent writes with reads.
+/// Note also that the lock around SchedInner provides memory ordering.
+pub(crate) fn set_idle_thread(_sched: &SchedInner, handle: thread::Handle) {
+    // Safety: can only be called with the scheduler lock held so
+    // no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().idle_thread.get() = Some(handle) }
 }
-
-/// Get the current TCB index.
-pub fn current_thread_idx() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_thread_idx.get() as usize }
+/// Get the current thread handle, or `None` before this hart's scheduler
+/// bootstrap has installed one.
+pub(crate) fn current_thread() -> Option<thread::Handle> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }.map(|c| c.handle)
 }
-
-// Tracing thread behaviour requires reading cross-Hart PerCpu details
-pub fn other_current_thread_idx() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_hart().current_thread_idx.get() as usize }
+/// Returns the other HART's currently running thread handle if the scheduler has installed
+/// a current thread for that HART, otherwise returns `None`.
+///
+/// Must only be called with the scheduler lock held to ensure no concurrent writes with the read
+pub(crate) fn other_current_thread(_sched: &SchedInner) -> Option<thread::Handle> {
+    // Safety: the scheduler lock ensures there are no concurrent writes
+    unsafe { *that_hart().current_thread.get() }.map(|c| c.handle)
 }
-
-/// Set the current TCB index.
-pub fn set_current_thread_idx(thread_idx: usize) {
-    assert!(
-        thread_idx < THREADS_MAX,
-        "setting current thread index outside of THREADS_MAX"
-    );
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_thread_idx.get() = thread_idx as u8 }
+/// Set the current thread details.
+///
+/// Takes a SchedInner token to ensure scheduler lock is held.
+pub(crate) fn set_current_thread(
+    _sched: &SchedInner,
+    handle: thread::Handle,
+    kernel_stack_base: NonNull<u8>,
+    kernel_stack_top: NonNull<u8>,
+    user_stack_base: Option<NonNull<u8>>,
+    qos: Qos,
+) {
+    let current_thread = CurrentThread {
+        handle,
+        kernel_stack_base,
+        kernel_stack_top,
+        user_stack_base,
+        qos,
+    };
+    // Safety: The scheduler lock ensures that there are no concurrent reads or writers and also
+    // ensures interrupts are off so the write cannot be interrupted to create a torn write
+    unsafe { *this_hart().current_thread.get() = Some(current_thread) };
 }
-
-/// Get the current thread kernel stack base
-pub fn current_kernel_stack_base() -> *mut u8 {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_kernel_stack_base.get() }
+/// Set the current thread details.
+///
+/// Safety: Caller must ensure that there are no concurrent readers or writers
+pub(crate) unsafe fn set_current_thread_unchecked(
+    handle: thread::Handle,
+    kernel_stack_base: NonNull<u8>,
+    kernel_stack_top: NonNull<u8>,
+    user_stack_base: Option<NonNull<u8>>,
+    qos: Qos,
+) {
+    let current_thread = CurrentThread {
+        handle,
+        kernel_stack_base,
+        kernel_stack_top,
+        user_stack_base,
+        qos,
+    };
+    // Safety: The scheduler lock ensures that there are no concurrent reads or writers and also
+    // ensures interrupts are off so the write cannot be interrupted to create a torn write
+    unsafe { *this_hart().current_thread.get() = Some(current_thread) };
 }
-
-/// Set the current thread kernel stack base
-pub fn set_current_kernel_stack_base(stack_base: *mut u8) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_kernel_stack_base.get() = stack_base };
+/// Get the current thread kernel stack base.
+/// Returns `None` if the current thread has not yet been installed (early init)
+pub(crate) fn current_kernel_stack_base() -> Option<NonNull<u8>> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }.map(|c| c.kernel_stack_base)
 }
-
 /// Get the current thread kernel stack top
-pub fn current_kernel_stack_top() -> *mut u8 {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_kernel_stack_top.get() }
+/// Returns `None` if the current thread has not yet been installed (early init)
+pub(crate) fn current_kernel_stack_top() -> Option<NonNull<u8>> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }.map(|c| c.kernel_stack_top)
 }
-
-/// Set the current thread kernel stack top
-pub fn set_current_kernel_stack_top(stack_top: *mut u8) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_kernel_stack_top.get() = stack_top };
+/// Get the current thread user stack base.
+/// Returns `None` if the current thread has not yet been installed (early init) or
+/// if the current thread is not a user thread
+pub(crate) fn current_user_stack_base() -> Option<NonNull<u8>> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }
+        .expect("current thread should be installed")
+        .user_stack_base
 }
-
-/// Get the current thread user stack base
-pub fn current_user_stack_base() -> Option<*mut u8> {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_user_stack_base.get() }
-}
-/// Set the current thread user stack base
-pub fn set_current_user_stack_base(stack_base: Option<*mut u8>) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_user_stack_base.get() = stack_base };
-}
-
 /// Get the current thread QoS
-pub fn current_qos() -> Qos {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_qos.get() }
+/// Returns `None` if the current thread has not yet been installed (early init)
+pub(crate) fn current_qos() -> Option<Qos> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }.map(|c| c.qos)
 }
-/// Set the current thread QoS
-pub fn set_current_qos(qos: Qos) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().current_qos.get() = qos };
+/// Take the resume context details
+///
+/// Returns `None` if the details were not present
+pub(crate) fn take_resume_context() -> Option<ResumeContext> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes or reads it
+    unsafe { (*this_hart().resume_context.get()).take() }
 }
-
-/// Get the resume stack pointer
-pub fn resume_sp() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_sp.get() }
+/// Set the resume context details
+/// Overwrites existing resume context (if any)
+pub(crate) fn set_resume_context(resume_context: ResumeContext) {
+    // Safety: this is this hart's PerCpu instance; no other hart writes or reads it
+    unsafe { *this_hart().resume_context.get() = Some(resume_context) }
 }
-
-/// Set the resume stack pointer
-pub fn set_resume_sp(sp: usize) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_sp.get() = sp };
+/// Get the switching-from thread handle.
+/// Returns `None` if there is no switched from thread.
+pub fn switching_from_thread() -> Option<thread::Handle> {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().switching_from_thread.get() }
 }
-
-/// Get the switching thread index
-#[allow(dead_code)]
-pub fn switching_from_thread_idx() -> Option<usize> {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().switching_from_thread_idx.get() }.map(|i| i as usize)
-}
-
-// Tracing thread behaviour requires reading cross-Hart PerCpu details
+/// Returns the other hart's switching-from thread handle if there is
+/// a switching thread, otherwise returns `None`. Called with the scheduler
+/// lock held to ensure no concurrent write.
 #[cfg(feature = "trace")]
-pub fn other_switching_from_thread_idx() -> Option<usize> {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *that_hart().switching_from_thread_idx.get() }.map(|i| i as usize)
+pub(crate) fn other_switching_from_thread(_sched: &SchedInner) -> Option<thread::Handle> {
+    // Safety: the scheduler lock ensures there are no concurrent writes
+    unsafe { *that_hart().switching_from_thread.get() }
 }
-
-/// Set the switching thread index
-pub fn set_switching_from_thread_idx(thread_idx: Option<usize>) {
-    let idx = thread_idx.map(|i| {
-        assert!(
-            i < THREADS_MAX,
-            "Setting switching thread index outside of THREADS_MAX"
-        );
-        i as u8
-    });
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().switching_from_thread_idx.get() = idx };
+/// Set the switching thread handle
+/// Requres proof of holding a scheduler lock to prevent concurrent writes with reads.
+/// Note also that the lock around SchedInner provides memory ordering.
+pub fn set_switching_from_thread(_sched: &SchedInner, handle: Option<thread::Handle>) {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently as
+    // we are holding the scheduler lock, so no data race
+    unsafe { *this_hart().switching_from_thread.get() = handle };
 }
-
-/// Take the switching thread index
-pub fn take_switching_from_thread_idx() -> Option<usize> {
-    let hart = this_hart();
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    let thread_idx: Option<u8>;
-    unsafe {
-        thread_idx = *hart.switching_from_thread_idx.get();
-        *hart.switching_from_thread_idx.get() = None;
-    }
-    thread_idx.map(|i| i as usize)
+/// Take the switching-from thread handle.
+/// Takes a `&SchedInner` token to ensure the scheduler lock is held.
+pub fn take_switching_from_thread(_sched: &SchedInner) -> Option<thread::Handle> {
+    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently as
+    // we are holding the scheduler lock, so no data race
+    unsafe { (*this_hart().switching_from_thread.get()).take() }
 }
-
-/// Check the needs_reschedule state of this thread
+/// Check the needs_reschedule state of this HART
 pub fn needs_reschedule() -> bool {
-    this_hart().needs_reschedule.load(Ordering::Acquire)
+    // Memory ordering: Relaxed as this is just a flag, the IPI mailbox handles actual ordering
+    this_hart().needs_reschedule.load(Ordering::Relaxed)
 }
-
-// Tracing thread behaviour requires reading cross-Hart PerCpu details
+/// Check if the other HART is flagged for needing a reschedule.
+/// Tracing thread behaviour requires reading cross-Hart PerCpu details.
 #[cfg(feature = "trace")]
 pub fn other_needs_reschedule() -> bool {
-    that_hart().needs_reschedule.load(Ordering::Acquire)
+    // Memory ordering: Relaxed as this is purely a flag; actual ordering handled by the
+    // IPI mailbox.
+    that_hart().needs_reschedule.load(Ordering::Relaxed)
 }
-
-/// Check if this thread needs to be rescheduled
-/// Sets the reschedule flag to false on read
+/// Check if this HART needs to call the scheduler.
+/// Sets the reschedule flag to false on read.
 pub fn take_needs_reschedule() -> bool {
-    this_hart().needs_reschedule.swap(false, Ordering::Acquire)
+    // Memory ordering: Relaxed as this is purely a flag; actual ordering handled by the
+    // IPI mailbox.
+    this_hart().needs_reschedule.swap(false, Ordering::Relaxed)
 }
-
 /// Set the reschedule request flag
 pub fn set_needs_reschedule() {
-    this_hart().needs_reschedule.store(true, Ordering::Release);
-}
-
-/// Get the resume_work state of this thread
-pub fn resume_work() -> Work {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_work.get() }
-}
-
-/// Set the resume_work state of this thread
-pub fn set_resume_work(work: Work) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_work.get() = work }
-}
-
-/// Get the resume_mepc state of this thread
-pub fn resume_mepc() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_mepc.get() }
-}
-
-/// Set the resume_mepc state of this thread
-pub fn set_resume_mepc(mepc: usize) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_mepc.get() = mepc }
-}
-
-/// Get the resume_mstatus state of this thread
-pub fn resume_mstatus() -> usize {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_mstatus.get() }
-}
-
-/// Set the resume_mstatus state of this thread
-pub fn set_resume_mstatus(mstatus: usize) {
-    // Safety: this is this hart's PerCpu instance; no other hart reads or writes it concurrently, so no data race
-    unsafe { *this_hart().resume_mstatus.get() = mstatus }
+    // Memory ordering: Relaxed as this is purely a flag; actual ordering handled by the
+    // IPI mailbox.
+    this_hart().needs_reschedule.store(true, Ordering::Relaxed);
 }

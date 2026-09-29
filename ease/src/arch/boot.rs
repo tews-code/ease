@@ -21,6 +21,7 @@ unsafe extern "C" {
     static __sram8_text_start: u8;
     static __sram8_text_end: u8;
     static __sram8_text_lma: u8;
+    static __sram8_percpu_lma: u8;
 
     static __hart0_irq_stack_base: u8;
     static __hart0_irq_stack_top: u8;
@@ -32,6 +33,7 @@ unsafe extern "C" {
     static __sram9_text_start: u8;
     static __sram9_text_end: u8;
     static __sram9_text_lma: u8;
+    static __sram9_percpu_lma: u8;
 
     static __hart1_irq_stack_base: u8;
     static __hart1_irq_stack_top: u8;
@@ -210,14 +212,18 @@ extern "C" fn _start() -> ! {
             la a1, {scratch_ram_pmp_size}
             call {protect_sram_text}
 
-            # Zero PerCpu
-            la a0, {hart0_percpu_start}
-            la a1, {hart0_percpu_end}
-            call {zero_region}
+            # Copy PerCpu from LMA to VMA
+            # Copy for HART0
+            la a0, {sram8_percpu_lma}
+            la a1, {sram8_percpu_start}
+            la a2, {sram8_percpu_end}
+            call {copy_region}
 
-            la a0, {hart1_percpu_start}
-            la a1, {hart1_percpu_end}
-            call {zero_region}
+            # Copy for HART1
+            la a0, {sram9_percpu_lma}
+            la a1, {sram9_percpu_start}
+            la a2, {sram9_percpu_end}
+            call {copy_region}
 
             # Store the IRQ stack top in mscratch
             la t0, {hart0_irq_stack_top}
@@ -322,23 +328,27 @@ extern "C" fn _start() -> ! {
         sram8_text_start = sym __sram8_text_start,
         sram8_text_end = sym __sram8_text_end,
 
+        sram8_percpu_lma = sym __sram8_percpu_lma,
+        sram8_percpu_start = sym __hart0_percpu_start,
+        sram8_percpu_end = sym __hart0_percpu_end,
+
         hart0_irq_stack_base = sym __hart0_irq_stack_base,
         hart0_irq_stack_top = sym __hart0_irq_stack_top,
         hart0_idle_stack_base = sym __hart0_idle_stack_base,
         hart0_idle_stack_top = sym __hart0_idle_stack_top,
-        hart0_percpu_start = sym __hart0_percpu_start,
-        hart0_percpu_end = sym __hart0_percpu_end,
+
+        sram9_text_lma = sym __sram9_text_lma,
+        sram9_text_start = sym __sram9_text_start,
+        sram9_text_end = sym __sram9_text_end,
+
+        sram9_percpu_start = sym __hart1_percpu_start,
+        sram9_percpu_end = sym __hart1_percpu_end,
+        sram9_percpu_lma = sym __sram9_percpu_lma,
 
         hart1_irq_stack_base = sym __hart1_irq_stack_base,
         hart1_irq_stack_top = sym __hart1_irq_stack_top,
         hart1_idle_stack_base = sym __hart1_idle_stack_base,
         hart1_idle_stack_top = sym __hart1_idle_stack_top,
-        hart1_percpu_start = sym __hart1_percpu_start,
-        hart1_percpu_end = sym __hart1_percpu_end,
-
-        sram9_text_lma = sym __sram9_text_lma,
-        sram9_text_start = sym __sram9_text_start,
-        sram9_text_end = sym __sram9_text_end,
 
         launch_mailbox = sym LAUNCH_MAILBOX,
         clint_hart1_msip = const crate::drivers::clint::clint_msip_addr(1),

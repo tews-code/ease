@@ -1,6 +1,9 @@
 //! Minimal bitmap
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    ops::Deref,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 const BITS_PER_WORD: usize = u32::BITS as usize; // Use u32 on our 32 bit system
 
@@ -90,11 +93,54 @@ impl<const BITS: usize, const WORDS: usize> Bitmap<BITS, WORDS> {
         self.bits[word_index] ^= bit_mask;
         (self.bits[word_index] & bit_mask) != 0
     }
-
+    /// Drain all the bits and return them as a (Copy) Bitmap
+    pub(crate) fn drain(&mut self) -> Bitmap<BITS, WORDS> {
+        let bits = self.bits;
+        self.bits = [0u32; WORDS];
+        Bitmap { bits }
+    }
+    /// Implement the iterator for Bitmap, which will use the Iter struct below
+    pub(crate) fn iter(&self) -> Iter<WORDS> {
+        Iter {
+            words: self.bits,
+            i: 0,
+        }
+    }
     /// Create a new bitmap from backing storage words
     #[inline]
     pub const fn from_words(words: [u32; WORDS]) -> Self {
         Self { bits: words }
+    }
+}
+
+/// Iterator struct for Bitmap, which provides an array of set indices
+pub(crate) struct Iter<const WORDS: usize> {
+    words: [u32; WORDS],
+    i: usize,
+}
+/// Implement the iterator
+impl<const WORDS: usize> Iterator for Iter<WORDS> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.i < WORDS {
+            let w = &mut self.words[self.i];
+            if *w != 0 {
+                let bit = w.trailing_zeros() as usize;
+                *w &= *w - 1; // Clear lowest set bit
+                return Some(self.i * 32 + bit);
+            }
+            self.i += 1;
+        }
+        None
+    }
+}
+/// Debug prints which bits are set in the format: {0, 2} for bits 0 and 2 set
+impl<const BITS: usize, const WORDS: usize> core::fmt::Debug for Bitmap<BITS, WORDS> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_set()
+            .entries((0..BITS).filter(|&i| self.get(i)))
+            .finish()
     }
 }
 
@@ -209,6 +255,15 @@ impl<const BITS: usize, const WORDS: usize> AtomicBitmap<BITS, WORDS> {
     #[expect(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.bits.iter().all(|b| b.load(Ordering::Relaxed) == 0)
+    }
+}
+
+/// Debug prints which bits are set in the format: {0, 2} for bits 0 and 2 set
+impl<const BITS: usize, const WORDS: usize> core::fmt::Debug for AtomicBitmap<BITS, WORDS> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_set()
+            .entries((0..BITS).filter(|&i| self.get(i)))
+            .finish()
     }
 }
 

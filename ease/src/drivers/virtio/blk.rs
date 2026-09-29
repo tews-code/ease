@@ -11,6 +11,7 @@ use super::queue::{
 use super::{ack_interrupt, check_virtio, reset_and_handshake, set_driver_ok};
 use crate::arch::mmio;
 use crate::board::virtio::blk;
+use crate::kernel::percpu;
 use crate::kernel::sched::Deadline;
 use crate::kernel::sync::IrqSpinLock;
 use crate::kernel::sync::{Completion, Mutex, TimedOut};
@@ -269,7 +270,8 @@ pub fn write_block(block: u32, buf: &[u8; blk::BLOCK_SIZE]) -> Result<(), BlkErr
 
 // Check for completion of a VirtIO block
 fn wait_for_completion() -> Result<(), BlkError> {
-    let deadline = Deadline::after_ms_with_system_leeway(IO_TIMEOUT_MS);
+    let qos = percpu::current_qos().expect("current thread should be installed in percpu");
+    let deadline = Deadline::after_ms_with_system_leeway(IO_TIMEOUT_MS, qos);
     match VIRTIO_COMPLETE.wait_with_deadline(deadline) {
         Ok(_) => Ok(()),
         Err(TimedOut) => {

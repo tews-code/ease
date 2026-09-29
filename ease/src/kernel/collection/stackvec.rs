@@ -2,7 +2,6 @@
 
 use core::fmt::Write;
 use core::mem::MaybeUninit;
-use core::ops::{Index, IndexMut};
 
 /// Collection of N elements
 ///
@@ -10,8 +9,8 @@ use core::ops::{Index, IndexMut};
 /// All elements are held on the stack.
 #[derive(Clone, Copy, Debug)]
 pub struct StackVec<T: Copy, const N: usize> {
-    len: usize,
     buf: [MaybeUninit<T>; N],
+    len: usize,
 }
 
 impl<T: Copy, const N: usize> StackVec<T, N> {
@@ -29,7 +28,6 @@ impl<T: Copy, const N: usize> StackVec<T, N> {
     /// Append to end of collection
     ///
     /// Will return the element on failure
-    #[allow(dead_code)]
     pub fn push(&mut self, element: T) -> Result<(), T> {
         if self.len < N {
             self.buf[self.len].write(element);
@@ -94,20 +92,9 @@ impl<T: Copy, const N: usize> StackVec<T, N> {
         Some(element)
     }
 
-    /// Length of data in the collection
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
     /// Collection is full
     pub fn is_full(&self) -> bool {
         self.len == N
-    }
-
-    /// Collection is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
     }
 
     /// Clear the collection
@@ -117,7 +104,27 @@ impl<T: Copy, const N: usize> StackVec<T, N> {
 
     /// Returns a slice of the collection
     pub fn as_slice(&self) -> &[T] {
+        // Safety: data is non-null and valid for reads of len * size_of::<T>() bytes.
+        // Data is aligned as created through safe Rust. There are len number of
+        // initialised `T` and data is len consecutive initialised values of type `T`.
+        // The total size len * size_of::<T>() is less than isize::MAX because
+        // the compiler bounds the size of [MaybeUninit<T>; N] and len is never bigger
+        // than N.
+        // Takes &self, so no other user can mutate in parallel.
         unsafe { core::slice::from_raw_parts(self.buf.as_ptr() as *const T, self.len) }
+    }
+
+    /// Returns a mutable slice of the collection
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        // Safety: data is non-null and valid for reads and writes
+        // of len * size_of::<T>() bytes.
+        // Data is aligned as created through safe Rust. There are len number of
+        // initialised `T` and data is len consecutive initialised values of type `T`.
+        // The total size len * size_of::<T>() is less than isize::MAX because
+        // the compiler bounds the size of [MaybeUninit<T>; N] and len is never bigger
+        // than N.
+        // Takes &mut self, so only one owner ensures no other mutation.
+        unsafe { core::slice::from_raw_parts_mut(self.buf.as_mut_ptr() as *mut T, self.len) }
     }
 }
 
@@ -138,20 +145,19 @@ impl<const N: usize> StackVec<u8, N> {
         }
     }
 }
-
-impl<T: Copy, const N: usize> Index<usize> for StackVec<T, N> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        assert!(index < self.len, "index out of bounds");
-        unsafe { self.buf[index].assume_init_ref() }
+/// Deref the StackVec into a slice. This allows us to inherit all the slice
+/// methods.
+impl<T: Copy, const N: usize> core::ops::Deref for StackVec<T, N> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
     }
 }
-
-impl<T: Copy, const N: usize> IndexMut<usize> for StackVec<T, N> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        assert!(index < self.len, "index out of bounds");
-        unsafe { self.buf[index].assume_init_mut() }
+/// Deref the StackVec into a mut slice. This allows us to inherit all the slice
+/// methods.
+impl<T: Copy, const N: usize> core::ops::DerefMut for StackVec<T, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
     }
 }
 
@@ -194,11 +200,12 @@ mod host_tests {
     // StackVec
     //
     // The Miri-relevant invariant is MaybeUninit safety: every
-    // `assume_init_*` call inside push/pop/insert/remove/index/as_slice
-    // must access a slot that was previously written. Each test below
-    // exercises one or more of those unsafe paths and asserts the
-    // expected values; Miri additionally verifies that no read sees
-    // uninit memory.
+    // `assume_init_*` call inside push/pop/insert/remove, and the
+    // pointer casts in as_slice/as_mut_slice (which back Deref/DerefMut,
+    // and so indexing and every slice method), must only cover slots
+    // that were previously written. Each test below exercises one or
+    // more of those unsafe paths and asserts the expected values; Miri
+    // additionally verifies that no read sees uninit memory.
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
@@ -305,10 +312,70 @@ mod host_tests {
         let _ = v.push(10);
         let _ = v.push(20);
         let _ = v.push(30);
-        // Index calls assume_init_ref on each slot.
+        // Indexing resolves through Deref to the slice's Index impl.
         assert_eq!(v[0], 10);
         assert_eq!(v[1], 20);
         assert_eq!(v[2], 30);
+        // Range indexing is a slice feature Deref brings for free.
+        assert_eq!(&v[1..3], &[20, 30]);
+    }
+
+    // Deref<Target = [T]>: slice methods and coercion arrive without
+    // the type implementing any of them itself.
+    #[test]
+    fn stackvec_derefs_to_slice() {
+        fn takes_slice(s: &[u32]) -> usize {
+            s.len()
+        }
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        for i in [3, 1, 2] {
+            let _ = v.push(i);
+        }
+        assert_eq!(takes_slice(&v), 3); // &StackVec coerces to &[T]
+        assert_eq!(v.iter().sum::<u32>(), 6);
+        assert!(v.contains(&1));
+        assert_eq!(v.first(), Some(&3));
+        assert_eq!(v.last(), Some(&2));
+        // NB: `for x in &v` needs an explicit `IntoIterator for &StackVec`;
+        // Deref only supplies methods and coercions, not trait impls.
+        let mut seen = 0;
+        for &x in v.iter() {
+            seen += x;
+        }
+        assert_eq!(seen, 6);
+    }
+
+    // DerefMut: writes through the slice land in the buffer, so a
+    // later pop() observes them. Miri checks the &mut slice only spans
+    // initialised slots.
+    #[test]
+    fn stackvec_deref_mut_writes_through() {
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        for i in [1, 2, 3] {
+            let _ = v.push(i);
+        }
+        v[1] = 20;
+        for x in v.iter_mut() {
+            *x += 100;
+        }
+        v.as_mut_slice().reverse();
+        assert_eq!(v.as_slice(), &[103, 120, 101]);
+        assert_eq!(v.pop(), Some(101));
+        assert_eq!(v.len(), 2);
+    }
+
+    // Both slice views of an empty StackVec are empty: from_raw_parts
+    // with len 0 over an all-uninit buffer must not be a read of any
+    // slot.
+    #[test]
+    fn stackvec_empty_derefs_to_empty_slices() {
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        assert!(v.as_slice().is_empty());
+        assert!(v.as_mut_slice().is_empty());
+        assert_eq!(v.iter().count(), 0);
+        for _ in v.iter_mut() {
+            panic!("no elements to visit");
+        }
     }
 }
 
@@ -516,5 +583,20 @@ mod tests {
         v.push(2).unwrap();
         v[1] = 99;
         assert_eq!(v[1], 99);
+    }
+
+    #[test_case]
+    fn test_deref_slice_methods() {
+        let mut v: StackVec<u32, 4> = StackVec::new();
+        v.push(1).unwrap();
+        v.push(2).unwrap();
+        v.push(3).unwrap();
+        assert!(v.contains(&2));
+        assert_eq!(v.iter().sum::<u32>(), 6);
+        assert_eq!(&v[1..], &[2, 3]);
+        for x in v.iter_mut() {
+            *x *= 2;
+        }
+        assert_eq!(v.as_slice(), &[2, 4, 6]);
     }
 }

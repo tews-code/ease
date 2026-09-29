@@ -41,7 +41,8 @@ use core::ptr::NonNull;
 
 use crate::arch::{interrupts, per_hart};
 use crate::kernel::alloc::MemRegion;
-use crate::kernel::sched::{self, ExitReason};
+use crate::kernel::sched;
+use crate::kernel::sched::thread;
 use crate::kernel::stack;
 
 // Context switch asm
@@ -230,5 +231,5 @@ extern "C" fn kernel_thread_closure_runner<F: FnOnce() + Send + 'static>(entry_p
     let body = unsafe { Box::from_raw(entry_ptr as *mut F) };
     body(); // runs the closure exactly once and consumes both the closure and the Box.
     // Call the scheduler for a clean exit
-    sched::exit_kernel_thread(ExitReason::Exit);
+    sched::exit_kernel_thread(thread::ExitReason::Exit);
 }

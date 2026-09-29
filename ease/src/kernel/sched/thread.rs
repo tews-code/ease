@@ -1,35 +1,30 @@
 //! Threads
 
-use alloc::fmt::Debug;
-
+use core::fmt::Debug;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicU16, Ordering};
 
 use super::{Qos, deadline::Deadline, process, stride::PRIORITY_MIN, userloader};
 use crate::kernel::alloc::MemRegion;
+use crate::kernel::collection::Arena;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
 
-pub(crate) const THREADS_MAX: usize = 16;
+/// Alias to clearly simplify the thread handle definition
+pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
 
-static THREAD_ID_COUNTER: AtomicU16 = AtomicU16::new(0); // Wraps at 65535 but 0 isn't special
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct ThreadHandle {
-    pub(crate) idx: usize,
-    pub(crate) id: u16,
-}
-
+/// Maximum number of simultaneous threads. Includes two slots used for idle threads
+pub(crate) const MAX_COUNT: usize = 16;
+/// Thread exit reason
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum ExitReason {
     Exit,
     Fault,
 }
-const _: () = assert!(ExitReason::Exit as u8 == 0);
-const _: () = assert!(ExitReason::Fault as u8 == 1);
-
+const _: () = assert!(ExitReason::Exit as u8 == 0); // Must be zero as used in assembly
+const _: () = assert!(ExitReason::Fault as u8 == 1); // Must be one as used in assembly
+/// The state the thread will be put into in post-switch cleanup
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub(crate) enum PostSwitch {
     Blocked,
@@ -38,7 +33,7 @@ pub(crate) enum PostSwitch {
     Sleeping(Deadline),
     Dead(ExitReason),
 }
-
+/// The current thread state
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub(crate) enum State {
     Blocked,
@@ -55,31 +50,32 @@ pub(crate) enum UnblockedResult {
     Deferred,             // The thread is mid-switch
     NotBlocked,           // No action to be taken
 }
-
+/// If the thread is a user thread this context holds the user stack,
+/// entry point and the process it to which it belongs.
 pub(super) struct UserContext {
     pub(super) stack: MemRegion,
     pub(super) entry: userloader::UserEntry,
     pub(super) process_idx: u8,
 }
-
-pub(super) struct ThreadControlBlock {
-    pub(super) id: u16,
+/// Key data structure: the thread control block holds the running thread
+/// details
+pub(crate) struct ControlBlock {
     pub(super) state: State,
     pub(super) kernel_stack: MemRegion,
     pub(super) sp: NonNull<u8>,
     pub(super) qos: Qos,
-    pub(super) priority: u8,              // Lower number is higher priority
-    pub(super) affinity: Option<u8>,      // Affinity to a particular HART
-    pub(super) user: Option<UserContext>, // If is Some then this TCB is supporting a user thread
-    pub(super) pass: u64,                 // The next ready thread with lowest pass wins
-    pub(super) last_started_cycles: u64,  // Cycle stamp from last switch
-    pub(super) next_waiter: Option<ThreadHandle>, // Handle of next thread waiting on blocked resource
+    pub(super) priority: u8,                // Lower number is higher priority
+    pub(super) affinity: Option<u8>,        // Affinity to a particular HART
+    pub(super) user: Option<UserContext>,   // If is Some then this TCB is supporting a user thread
+    pub(super) pass: u64,                   // The next ready thread with lowest pass wins
+    pub(super) last_started_cycles: u64,    // Cycle stamp from last switch
+    pub(super) next_waiter: Option<Handle>, // Handle of next thread waiting on blocked resource
     pub(super) resources_released: bool, // If set then thread no longer uses any resources (e.g. file descriptors) except for cleanup
     #[cfg(feature = "trace")]
     pub(super) ready_since: u64, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
 }
-
-pub(super) struct ThreadControlBlockSpec {
+/// Specification struct for clean creation of new TCBs
+pub(super) struct ControlBlockSpec {
     pub(super) kernel_stack: MemRegion,
     pub(super) qos: Qos,
     pub(super) priority: u8,              // Lower number is higher priority
@@ -87,7 +83,7 @@ pub(super) struct ThreadControlBlockSpec {
     pub(super) user: Option<UserContext>, // If is Some then this TCB is supporting a user thread
 }
 
-impl ThreadControlBlock {
+impl ControlBlock {
     // Stride forward by ran_cycles weighted by priority.
     //
     // `ran_cycles` is in CLINT cycles (mtime units) so `pass` is the same
@@ -133,9 +129,8 @@ impl ThreadControlBlock {
     }
 }
 
-impl Debug for ThreadControlBlock {
+impl Debug for ControlBlock {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        writeln!(f, "id: {}", self.id)?;
         writeln!(f, "state: {:?}", self.state)?;
         writeln!(f, "QoS: {:?}", self.qos)?;
         writeln!(f, "priority: {}", self.priority)?;
@@ -149,21 +144,26 @@ impl Debug for ThreadControlBlock {
         Ok(())
     }
 }
-
+/// The threads are held in an arena.
+/// There is an additional `maybe_sleeping` bitmap for efficiency - allowing the scheduler to avoid
+/// a full thread arena scan on sleeping threads.
 #[derive(Debug)]
-pub(super) struct Threads(pub(super) [Option<ThreadControlBlock>; THREADS_MAX]);
+pub(super) struct Threads {
+    pub(super) tcbs: Arena<ControlBlock, MAX_COUNT>,
+}
 
 impl Threads {
     // Acquire a free slot and set up a valid thread control block
     pub(super) fn acquire(
         &mut self,
         forge_stack: impl FnOnce(&mut MemRegion) -> NonNull<u8>,
-        spec: ThreadControlBlockSpec,
-    ) -> Option<ThreadHandle> {
-        let idx = self.0.iter().position(|tcb| tcb.is_none())?;
+        spec: ControlBlockSpec,
+    ) -> Option<Handle> {
+        if self.tcbs.is_full() {
+            return None;
+        }
         let pass_baseline = self.pass_baseline();
-        let id = THREAD_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let ThreadControlBlockSpec {
+        let ControlBlockSpec {
             qos,
             priority,
             mut kernel_stack,
@@ -172,8 +172,7 @@ impl Threads {
         } = spec;
         let sp = forge_stack(&mut kernel_stack);
         let now = timer::elapsed();
-        self.0[idx] = Some(ThreadControlBlock {
-            id,
+        self.tcbs.add(ControlBlock {
             state: State::Ready,
             kernel_stack,
             sp,
@@ -187,40 +186,24 @@ impl Threads {
             resources_released: false,
             #[cfg(feature = "trace")]
             ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
-        });
-        Some(ThreadHandle { idx, id })
+        })
     }
     /// Release a TCB slot based on the given thread handle
     ///
     /// # Panics #
     /// Panics if the slot is already released.
-    pub(super) fn release(&mut self, thread: &ThreadHandle) {
-        if self.0[thread.idx]
-            .as_ref()
-            .is_some_and(|tcb| tcb.id == thread.id)
-        {
-            self.0[thread.idx] = None;
-        } else {
-            panic!(
-                "could not release thread id={} at index={}",
-                thread.id, thread.idx
-            );
-        }
+    pub(super) fn release(&mut self, handle: Handle) {
+        self.tcbs.take(handle).expect("could not release thread");
     }
-    /// Make a blocked thread ready, returning the HART affinity if unblocked.
+    /// Make a blocked thread ready, returning the `UnblockedResult`.
     /// Works for threads that are currently blocked or switching to blocked.
-    /// If the thread is not blocked no action is taken.
+    /// If the thread is not blocked no action is taken and returns
+    /// [UnblockedResult::NotBlocked].
     ///
     /// # Panics #
-    /// Panics if
-    /// - the thread index is greater than THREADS_MAX
-    /// - the given index does not index a valid TCB
-    pub(super) fn make_blocked_ready(&mut self, idx: usize) -> UnblockedResult {
-        assert!(idx < THREADS_MAX);
-        let tcb = self.0[idx].as_mut().unwrap_or_else(|| {
-            dprintln!("the thread index must be for a valid TCB at index {}", idx);
-            panic!("invalid TCB");
-        });
+    /// Panics if the thread handle is stale
+    pub(super) fn make_blocked_ready(&mut self, handle: Handle) -> UnblockedResult {
+        let tcb = self.tcbs.get_mut(handle).expect("should be a valid handle");
         match tcb.state {
             State::Blocked | State::BlockedUntil(_) => {
                 tcb.state = State::Ready;
@@ -240,28 +223,28 @@ impl Threads {
     }
     /// Find the minimum current pass value among active, non-idle threads.
     ///
-    /// PRI_MIN threads (the idle bootstrap on non-main harts) accumulate
+    /// PRI_MIN threads (the idle bootstrap on non-main harts) accummulate
     /// very little stride — they mostly WFI and never switch out — so
     /// including them in the baseline calculation would give every newly
     /// spawned thread a pass of 0, letting it dominate pick_next until its
     /// pass naturally catches up to the rest of the system.
     pub(super) fn pass_baseline(&self) -> u64 {
-        self.0
+        self.tcbs
             .iter()
-            .flatten()
             .filter(|tcb| tcb.state == State::Ready || tcb.state == State::Running)
             .filter(|tcb| tcb.priority != PRIORITY_MIN)
             .map(|tcb| tcb.pass)
             .min()
             .unwrap_or(0)
     }
-    /// Wakes a sleeping TCB and catches up its pass
+    /// Wakes a sleeping thread and catches up its pass.
     ///
-    /// Returns a tuple containing the TCB's
+    /// If the thread is not sleeping returns `None`, otherwise
+    /// returns a tuple containing the TCB's
     /// (pass, deadline, affinity)
     pub(super) fn wake_if_due(
         &mut self,
-        idx: usize,
+        handle: Handle,
         now: u64,
         pass_baseline: &mut Option<u64>,
         bonus: u64,
@@ -270,17 +253,13 @@ impl Threads {
         // slot to see whether any work is due, (2) shared borrow of the whole
         // array for the lazy pass baseline, (3) mutable borrow of the slot to
         // apply the wake.
-        let at_cycles = if let Some(tcb) = &self.0[idx] {
-            match tcb.state {
-                State::Sleeping(deadline) | State::BlockedUntil(deadline) => Some(deadline.at()),
-                _ => None,
-            }
-        } else {
-            None
+        let at_cycles = match self.tcbs.get(handle)?.state {
+            State::Sleeping(deadline) | State::BlockedUntil(deadline) => Some(deadline.at()),
+            _ => None,
         }?;
         if at_cycles <= now {
             let baseline = *pass_baseline.get_or_insert_with(|| self.pass_baseline());
-            let tcb = self.0[idx].as_mut().unwrap();
+            let tcb = self.tcbs.get_mut(handle).unwrap();
             tcb.state = State::Ready;
             tcb.pass = tcb.pass.max(baseline.saturating_sub(bonus));
             #[cfg(feature = "trace")]
@@ -295,18 +274,13 @@ impl Threads {
     /// Gets the soonest wake deadline (including leeway) including threads busy switching
     /// Returns None if no threads are sleeping
     pub(super) fn next_wake_due(&self) -> Option<u64> {
-        self.0
-            .iter()
-            .flatten()
-            .filter_map(|tcb| tcb.must_wake_by())
-            .min()
+        self.tcbs.iter().filter_map(|tcb| tcb.must_wake_by()).min()
     }
     /// Returns whether there are contending threads (that will need a slice switch)
     pub(super) fn is_under_contention(&self) -> bool {
-        self.0.iter().flatten().any(|tcb| tcb.state == State::Ready)
+        self.tcbs.iter().any(|tcb| tcb.state == State::Ready)
     }
-
-    // Get the next earliest wakeup including any coalescing
+    /// Get the next earliest wakeup including any coalescing
     pub(super) fn next_timer_deadline(&mut self, slice: u64, now: u64) -> u64 {
         let slice_end = if self.is_under_contention() {
             slice + now
@@ -314,32 +288,29 @@ impl Threads {
             u64::MAX
         };
         let next_wake = self.next_wake_due();
-        let wake = next_wake.inspect(|&coalesce_deadline_cycles| {
-            for slot in &mut self.0 {
-                if let Some(tcb) = slot
-                    && let State::Sleeping(deadline)
+        let wake =
+            next_wake.inspect(|&coalesce_deadline_cycles| {
+                for tcb in self.tcbs.iter_mut() {
+                    if let State::Sleeping(deadline)
                     | State::Switching(PostSwitch::Sleeping(deadline)) = &mut tcb.state
-                {
-                    // For threads with system-derived leeway, this will recalculate the leeway
-                    // which will become smaller as the deadline nears.
-                    if deadline.contains(coalesce_deadline_cycles) {
+                        && deadline.contains(coalesce_deadline_cycles)
+                    {
                         deadline.coalesce_to(coalesce_deadline_cycles);
                     }
                 }
-            }
-        });
+            });
         slice_end.min(wake.unwrap_or(u64::MAX))
     }
 
     // Debug - print the painted stack depth for running threads
     #[cfg(feature = "paint-stack")]
     pub(super) fn stacks(&self) {
-        for tcb in self.0.iter().flatten() {
+        for (handle, tcb) in self.tcbs.iter_with_handles() {
             // Print kernel stack
             unsafe {
                 print_watermark(
                     "thread",
-                    tcb.id as usize,
+                    handle.id(),
                     "kernel",
                     tcb.kernel_stack.base_addr(),
                     tcb.kernel_stack.top().as_ptr().addr(),
@@ -350,7 +321,7 @@ impl Threads {
                 unsafe {
                     print_watermark(
                         "thread",
-                        tcb.id as usize,
+                        handle.id(),
                         "user",
                         uc.stack.base_addr(),
                         uc.stack.top().as_ptr().addr(),
@@ -359,30 +330,25 @@ impl Threads {
             }
         }
     }
-    /// Get the process index of a given thread index
+    /// Get the process index of a given thread handle
     ///
-    /// Returns an option on the process index: None if not a user thread or the slot index is not set up
-    /// # Panics #
-    /// Panics if `thread_idx >= THREADS_MAX`
-    pub(super) fn process_idx_of(&self, thread_idx: usize) -> Option<u8> {
-        self.0[thread_idx]
-            .as_ref()
-            .and_then(|tcb| tcb.process_idx())
+    /// Returns `None` if:
+    /// - not a user thread
+    /// - handle is stale
+    pub(super) fn process_idx_of(&self, handle: Handle) -> Option<u8> {
+        self.tcbs.get(handle).and_then(|tcb| tcb.process_idx())
     }
-    ///
     /// Determines if any threads are resource holders for process with `process_idx`
     ///
     /// # Panics #
     /// Panics if `process_idx >= PROCS_MAX`
     pub(super) fn any_resource_holders(&self, process_idx: u8) -> bool {
         assert!((process_idx as usize) < process::MAX);
-        self.0.iter().any(|tcb| {
-            tcb.as_ref().is_some_and(|t| {
-                t.user
-                    .as_ref()
-                    .is_some_and(|uc| uc.process_idx == process_idx)
-                    && !t.resources_released
-            })
+        self.tcbs.iter().any(|tcb| {
+            tcb.user
+                .as_ref()
+                .is_some_and(|uc| uc.process_idx == process_idx)
+                && !tcb.resources_released
         })
     }
 }

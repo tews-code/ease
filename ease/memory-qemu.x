@@ -194,12 +194,13 @@ SECTIONS {
         __hart0_irq_stack_top = .;
     } > SRAM8
 
-    .sram8_percpu (NOLOAD) : ALIGN(4) {
+    .sram8_percpu : ALIGN(4) {
         __hart0_percpu_start = .;
         *(.sram8_percpu .sram8_percpu.*)
-        . = ALIGN(4);   /* Zero region in boot assembly requires 4 byte alignment */
+        . = ALIGN(4);   /* Copy region in boot assembly requires 4 byte alignment */
         __hart0_percpu_end = .;
-    } > SRAM8
+    } > SRAM8 AT > FLASH
+    __sram8_percpu_lma = LOADADDR(.sram8_percpu);
 
     /* SRAM9 */
 
@@ -220,12 +221,13 @@ SECTIONS {
         __hart1_irq_stack_top = .;
     } > SRAM9
 
-    .sram9_percpu (NOLOAD) : ALIGN(4) {
+    .sram9_percpu : ALIGN(4) {
         __hart1_percpu_start = .;
         *(.sram9_percpu .sram9_percpu.*)
-        . = ALIGN(4);   /* Zero region in boot assembly requires 4 byte alignment */
+        . = ALIGN(4);   /* Copy region in boot assembly requires 4 byte alignment */
         __hart1_percpu_end = .;
-    } > SRAM9
+    } > SRAM9 AT > FLASH
+    __sram9_percpu_lma = LOADADDR(.sram9_percpu);
 
     /* PSRAM */
 

@@ -6,17 +6,17 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
-use super::threads::PostSwitch;
+use super::thread;
 use super::userloader;
 use super::usermem;
-use super::{ExitReason, State, THREADS_MAX, clear_wakeup_signal, set_needs_wakeup};
+use crate::kernel::collection::StackVec;
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
-use crate::kernel::sched::threads::UnblockedResult;
+use crate::kernel::sched;
 use crate::kernel::sync::IrqSpinLockGuard;
 
-pub(crate) const MAX: usize = THREADS_MAX - 2; // Two threads are for idle. All other processes could be single-thread
+pub(crate) const MAX: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
 const THREADS_PER_PROC_MAX: u8 = 6;
 
 static PID_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -49,7 +49,7 @@ pub(crate) struct ControlBlock {
     pub(crate) fds: fd::Table,
     thread_count: u8,
     pub(super) entry_ra: usize, // Inserted into the 'ra' register slot in the forged trap return
-    pub(super) teardown_thread: Option<usize>, // Index of the thread that performs the resource release for the entire process
+    pub(super) teardown_thread: Option<thread::Handle>, // Handle of the thread that performs the resource release for the entire process
 }
 
 impl ControlBlock {
@@ -95,9 +95,9 @@ impl ControlBlock {
     // Sets the teardown thread
     //
     // Returns `true` on success or `false` if the teardown thread is already set
-    pub(super) fn set_teardown_thread(&mut self, thread_idx: usize) -> bool {
+    pub(super) fn set_teardown_thread(&mut self, handle: thread::Handle) -> bool {
         if self.teardown_thread.is_none() {
-            self.teardown_thread = Some(thread_idx);
+            self.teardown_thread = Some(handle);
             true
         } else {
             false
@@ -135,14 +135,15 @@ impl SchedInner {
     pub(super) fn claim_fds(
         &mut self,
         process_idx: u8,
-        thread_idx: usize,
+        thread_handle: thread::Handle,
     ) -> Option<[Option<fd::Kind>; fd::MAX]> {
         // Set this thread to no longer use resources
-        self.thread_blocks.0[thread_idx]
-            .as_mut()
+        self.threads
+            .tcbs
+            .get_mut(thread_handle)
             .expect("current thread must have a valid TCB set up")
             .resources_released = true;
-        if !self.thread_blocks.any_resource_holders(process_idx) {
+        if !self.threads.any_resource_holders(process_idx) {
             Some(
                 self.process_blocks.0[process_idx as usize]
                     .as_mut()
@@ -164,11 +165,11 @@ impl SchedInner {
     /// Panics if:
     /// - the given process_idx >= MAX
     /// - the process_idx doesn't correspond to a valid PCB
-    pub(super) fn claim_teardown_role(&mut self, process_idx: u8, thread_idx: usize) -> bool {
+    pub(super) fn claim_teardown_role(&mut self, process_idx: u8, handle: thread::Handle) -> bool {
         self.process_blocks.0[process_idx as usize]
             .as_mut()
             .expect("should be a valid process")
-            .set_teardown_thread(thread_idx)
+            .set_teardown_thread(handle)
     }
     /// Get the current thread count of the given process index
     ///
@@ -199,20 +200,20 @@ impl Scheduler {
         &self,
         sched: &mut IrqSpinLockGuard<SchedInner>,
         process_idx: u8,
-        thread_idx: usize,
+        handle: thread::Handle,
     ) {
-        clear_wakeup_signal(thread_idx);
+        sched::clear_wakeup_signal(handle);
         let thread_count = sched.process_blocks.0[process_idx as usize]
             .as_mut()
             .expect("should only be decrementing thread count on a valid process control block")
             .dec_thread_count();
         // Check if there is a declared teardown claimant and wake them in case they need to get going - but skip ourselves
-        if let Some(teardown_thread_idx) = sched.process_blocks.0[process_idx as usize]
+        if let Some(teardown_thread_handle) = sched.process_blocks.0[process_idx as usize]
             .as_ref()
             .and_then(|pcb| pcb.teardown_thread)
-            && teardown_thread_idx != thread_idx
+            && teardown_thread_handle != handle
         {
-            set_needs_wakeup(teardown_thread_idx);
+            sched::set_needs_wakeup(teardown_thread_handle);
             // NOTE - we do not call percpu::set_needs_reschedule as we can happily wait on the next switch
         }
         if thread_count == 0 {
@@ -232,53 +233,64 @@ impl Scheduler {
     pub(super) fn evict_sibling_threads(
         &self,
         sched: &mut IrqSpinLockGuard<SchedInner>,
-        exit_reason: ExitReason,
+        exit_reason: thread::ExitReason,
         process_idx: u8,
-        surviving_thread_idx: usize,
+        surviving_thread_handle: thread::Handle,
     ) {
-        for idx in 0..THREADS_MAX {
-            let mut release = false;
-            if idx == surviving_thread_idx {
+        let mut sibling_handles: StackVec<thread::Handle, { thread::MAX_COUNT - 1 }> =
+            StackVec::new();
+        for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
+            if handle == surviving_thread_handle {
                 continue;
             }
-            if sched.thread_blocks.process_idx_of(idx) == Some(process_idx) {
-                let tcb = sched.thread_blocks.0[idx].as_mut().unwrap();
-                match tcb.state {
-                    State::Blocked | State::BlockedUntil(_) => {
-                        // Set marked for exit
-                        self.needs_user_exit.set(idx);
-                        // Now set to Ready
-                        match sched.thread_blocks.make_blocked_ready(idx) {
-                            UnblockedResult::NotBlocked | UnblockedResult::Deferred => {
-                                panic!("did not unpark blocked user thread")
-                            }
-                            UnblockedResult::Unparked(affinity) => {
-                                if let Some(hart) = affinity
-                                    && hart as usize != crate::arch::hart_id()
-                                {
-                                    // This is for the other HART
-                                    ipi::send(ipi::RESCHEDULE);
-                                } else {
-                                    // This is for us
-                                    percpu::set_needs_reschedule();
-                                }
+            if tcb
+                .user
+                .as_ref()
+                .is_some_and(|uc| uc.process_idx == process_idx)
+            {
+                sibling_handles
+                    .push(handle)
+                    .expect("should be enough space on the StackVec");
+            }
+        }
+        for handle in sibling_handles.iter() {
+            let mut release = false;
+            match sched.threads.tcbs.get(*handle).unwrap().state {
+                thread::State::Blocked | thread::State::BlockedUntil(_) => {
+                    // Set marked for exit
+                    self.needs_user_exit.set(handle.idx());
+                    // Now set to Ready
+                    match sched.threads.make_blocked_ready(*handle) {
+                        thread::UnblockedResult::NotBlocked | thread::UnblockedResult::Deferred => {
+                            panic!("did not unpark blocked user thread")
+                        }
+                        thread::UnblockedResult::Unparked(affinity) => {
+                            if let Some(hart) = affinity
+                                && hart as usize != crate::arch::hart_id()
+                            {
+                                // This is for the other HART
+                                ipi::send(ipi::RESCHEDULE);
+                            } else {
+                                // This is for us
+                                percpu::set_needs_reschedule();
                             }
                         }
                     }
-                    State::Ready | State::Sleeping(_) => release = true,
-                    State::Running => {
-                        // If it is running, it must be on the other HART so send an IPI
-                        self.needs_user_exit.set(idx);
-                        ipi::send(ipi::RESCHEDULE);
-                    }
-                    State::Switching(_) => {
-                        tcb.state = State::Switching(PostSwitch::Dead(exit_reason))
-                    }
+                }
+                thread::State::Ready | thread::State::Sleeping(_) => release = true,
+                thread::State::Running => {
+                    // If it is running, it must be on the other HART so send an IPI
+                    self.needs_user_exit.set(handle.idx());
+                    ipi::send(ipi::RESCHEDULE);
+                }
+                thread::State::Switching(_) => {
+                    sched.threads.tcbs.get_mut(*handle).unwrap().state =
+                        thread::State::Switching(thread::PostSwitch::Dead(exit_reason))
                 }
             }
             if release {
-                sched.thread_blocks.0[idx] = None;
-                self.release_process_thread(sched, process_idx, idx)
+                sched.threads.release(*handle);
+                self.release_process_thread(sched, process_idx, *handle)
             }
         }
     }
@@ -289,22 +301,23 @@ impl Scheduler {
     /// # Panics #
     /// Panics if
     /// - called on a kernel thread
-    pub(super) fn exit_user_thread(&self, reason: ExitReason) -> ! {
+    pub(super) fn exit_user_thread(&self, reason: thread::ExitReason) -> ! {
         // Set multiple 100's of milliseconds as some tests show a long tail (over 200ms) of threads waiting to be scheduled under heavy load
         // Also set to < 2_000 which is the individual test timeout
         const CLAIM_ROLE_TIMEOUT_MS: u64 = 1_500;
 
-        let current_thread_idx = percpu::current_thread_idx();
+        let current_thread_handle =
+            percpu::current_thread().expect("current thread should be installed");
         let mut sched = self.sched.lock();
         let process_idx = sched
-            .thread_blocks
-            .process_idx_of(current_thread_idx)
+            .threads
+            .process_idx_of(current_thread_handle)
             .expect("the current thread must be a user thread which is part of a process");
         // Set this thread to be the teardown thread for the entire process, if that role isn't already taken
-        let claimed_role = reason == ExitReason::Fault
-            && sched.claim_teardown_role(process_idx, current_thread_idx);
+        let claimed_role = reason == thread::ExitReason::Fault
+            && sched.claim_teardown_role(process_idx, current_thread_handle);
         if claimed_role {
-            self.evict_sibling_threads(&mut sched, reason, process_idx, current_thread_idx);
+            self.evict_sibling_threads(&mut sched, reason, process_idx, current_thread_handle);
         }
         drop(sched);
         // If I am the teardown thread, firstly loop waiting for other threads to finish their exits
@@ -318,28 +331,33 @@ impl Scheduler {
                 }
                 if deadline.has_passed() {
                     dprintln!(
-                        "User thread {} timed out waiting for siblings to exit for process {}",
-                        current_thread_idx,
+                        "User thread {:?} timed out waiting for siblings to exit for process {}",
+                        current_thread_handle,
                         process_idx
                     );
                     dprintln!("TCB Table:");
-                    for tcb in sched.thread_blocks.0.iter() {
+                    for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
                         dprintln!("--------------");
-                        dprintln!("{:?}", tcb);
+                        dprintln!("{:?} - {:?}\n", handle, tcb);
                     }
                     drop(sched);
                     panic!("Unable to exit faulting user process");
                 }
-                sched.thread_blocks.0[current_thread_idx]
-                    .as_mut()
+                sched
+                    .threads
+                    .tcbs
+                    .get_mut(current_thread_handle)
                     .expect("current thread must have a valid TCB")
-                    .state = State::BlockedUntil(deadline);
+                    .state = thread::State::BlockedUntil(deadline);
                 drop(sched);
                 self.park_if_blocked_until(deadline);
             }
         }
         // Mark this thread as no longer using resources
-        let fds = self.sched.lock().claim_fds(process_idx, current_thread_idx);
+        let fds = self
+            .sched
+            .lock()
+            .claim_fds(process_idx, current_thread_handle);
         if let Some(fds) = fds {
             fd::Table::close_all(fds);
         }

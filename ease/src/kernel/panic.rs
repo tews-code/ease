@@ -113,19 +113,28 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             core::hint::spin_loop();
         }
         // Now go ahead with panic info dump
-        // Check that the stack canary has been set up
-        // Note that percpu::current_kernel_stack_base is set up immediately after boot and is safe to read
-        // Safety: stack base is set in percpu from an aligned stack address either from the linker (for idle) or from buddy allocation
-        let stack_ok = unsafe { check_canary(percpu::current_kernel_stack_base().addr()) };
-
         dprintln!("PANIC: {info}");
-        dprintln!(
-            "Stack canary: {}",
-            match stack_ok {
-                Ok(_) => "intact",
-                Err(_) => "corrupted",
+        // Check that the stack canary has been set up
+        let kernel_stack_status = percpu::current_kernel_stack_base()
+            .map(|base| unsafe { check_canary(base.addr().into()) });
+        dprint!("Kernel stack canary: ");
+        if let Some(status) = kernel_stack_status {
+            match status {
+                Ok(_) => dprintln!("intact"),
+                Err(b) => dprintln!("corrupted: read {b:x}"),
             }
-        );
+        } else {
+            dprintln!("None");
+        }
+        let user_stack_status = percpu::current_user_stack_base()
+            .map(|base| unsafe { check_canary(base.addr().into()) });
+        if let Some(status) = user_stack_status {
+            dprint!("User stack canary: ");
+            match status {
+                Ok(_) => dprintln!("intact"),
+                Err(b) => dprintln!("corrupted: read {b:x}"),
+            }
+        };
 
         #[cfg(feature = "paint-stack")]
         crate::kernel::stack::print_irq_idle_stacks();
@@ -134,14 +143,30 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
         let _ = write!(console, "PANIC: {info}");
-        let _ = writeln!(
-            console,
-            "Stack canary: {}",
-            match stack_ok {
-                Ok(_) => "intact",
-                Err(_) => "corrupted",
+        let _ = write!(console, "Kernel stack canary: ");
+        if let Some(status) = kernel_stack_status {
+            match status {
+                Ok(_) => {
+                    let _ = write!(console, "intact");
+                }
+                Err(b) => {
+                    let _ = write!(console, "corrupted: read {b:x}");
+                }
             }
-        );
+        } else {
+            let _ = write!(console, "None");
+        }
+        if let Some(status) = user_stack_status {
+            let _ = write!(console, "User stack canary: ");
+            match status {
+                Ok(_) => {
+                    let _ = write!(console, "intact");
+                }
+                Err(b) => {
+                    let _ = write!(console, "corrupted: read {b:x}");
+                }
+            }
+        }
     }
     // Dump the trace before any path that exits/loops, so it appears in
     // both the test build (which exit_failure()s below) and normal runs.

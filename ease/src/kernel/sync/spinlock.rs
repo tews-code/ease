@@ -14,6 +14,7 @@
 //! the next lock holder and uses a single atomic boolean for the lock.
 
 use core::cell::UnsafeCell;
+use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -67,6 +68,7 @@ impl<T> IrqSpinLock<T> {
             site: Location::caller(),
             #[cfg(feature = "irqsoff")]
             acquired,
+            _marker: PhantomData,
         }
     }
 
@@ -102,6 +104,7 @@ impl<T> IrqSpinLock<T> {
             site: Location::caller(),
             #[cfg(feature = "irqsoff")]
             acquired: crate::kernel::timer::elapsed(),
+            _marker: PhantomData,
         })
     }
 }
@@ -117,6 +120,7 @@ pub struct IrqSpinLockGuard<'a, T> {
     /// When the lock was acquired, so `Drop` can report the hold time
     #[cfg(feature = "irqsoff")]
     acquired: u64,
+    _marker: PhantomData<*const ()>, // Not Send
 }
 
 impl<'a, T> Deref for IrqSpinLockGuard<'a, T> {

@@ -37,7 +37,9 @@
 //! another thread, and that thread's guard drop closes. The accounting is per
 //! hart, so this is exactly right — it is the hart, not the thread, that has
 //! interrupts off — and the report shows both ends, with the thread index on
-//! each side so a switch (or the absence of one) is visible.
+//! each side so a switch (or the absence of one) is visible. Sections that
+//! open or close before `sched::bootstrap` has installed a current thread
+//! show `-` in that column.
 //!
 //! Each section also records its `mtime` start and the `cycle` counter delta.
 //! The start lets the two harts' longest sections be compared: the same
@@ -171,8 +173,8 @@ impl fmt::Display for Section {
             self.start / CYCLES_PER_MS,
             self.open,
             self.close,
-            self.open_thread,
-            self.close_thread
+            ThreadCol(self.open_thread),
+            ThreadCol(self.close_thread)
         )
     }
 }
@@ -277,7 +279,7 @@ impl fmt::Display for LockEvent {
             self.cycles / CYCLES_PER_US,
             self.site.file(),
             self.site.line(),
-            self.thread
+            ThreadCol(self.thread)
         )
     }
 }
@@ -320,8 +322,30 @@ fn this_hart() -> &'static Hart {
     &HARTS[hart_id()]
 }
 
+/// Thread column value for hooks that fire before this hart's scheduler
+/// bootstrap: the allocator, timer and PLIC init all take spinlocks before
+/// `sched::bootstrap` installs a current thread. Rendered as `-`.
+const NO_THREAD: u8 = u8::MAX;
+
+/// The current thread's slot index for the report, or `NO_THREAD` before
+/// bootstrap. (Before the arena migration this read the zero-filled percpu
+/// byte and silently reported thread 0.)
 fn current_thread() -> u8 {
-    percpu::current_thread_idx() as u8
+    percpu::current_thread().map_or(NO_THREAD, |h| h.idx() as u8)
+}
+
+/// Thread column: the slot index, or `-` for `NO_THREAD`. Honours the
+/// caller's width so the report columns stay aligned.
+struct ThreadCol(u8);
+
+impl fmt::Display for ThreadCol {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0 == NO_THREAD {
+            f.pad("-")
+        } else {
+            fmt::Display::fmt(&self.0, f)
+        }
+    }
 }
 
 /// Stamp a hook call at `site` and track the largest gap since the previous
@@ -550,8 +574,8 @@ pub(crate) fn write_report(w: &mut impl Write) -> fmt::Result {
                 l.insns / 1000,
                 stats.total / CYCLES_PER_US,
                 stats.count,
-                l.open_thread,
-                l.close_thread,
+                ThreadCol(l.open_thread),
+                ThreadCol(l.close_thread),
                 stats.site,
                 l.close,
             )?;

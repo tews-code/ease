@@ -10,7 +10,7 @@ mod stride;
 pub(crate) mod test_support;
 #[cfg(all(test, feature = "test-sched"))]
 mod tests;
-mod threads;
+pub(crate) mod thread;
 #[cfg(feature = "trace")]
 pub mod trace;
 pub(crate) mod userloader;
@@ -25,13 +25,11 @@ use crate::user;
 pub(crate) use deadline::Deadline;
 use stride::SCHEDULER;
 #[expect(unused_imports)]
-pub use stride::{PRIORITY_DEFAULT, PRIORITY_MIN};
-pub(crate) use threads::{ExitReason, State, THREADS_MAX, ThreadHandle};
+pub(crate) use stride::{PRIORITY_DEFAULT, PRIORITY_MIN, SchedInner};
 
 #[derive(Debug, Copy, Clone)]
-#[repr(u8)]
 pub enum Qos {
-    High, // Default (0 option) - needed as percpu initiated with this value
+    High,
     Low,
 }
 
@@ -76,7 +74,7 @@ impl Builder {
         self
     }
 
-    pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<ThreadHandle> {
+    pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<thread::Handle> {
         SCHEDULER.spawn_kernel_thread_with(
             entry,
             self.priority,
@@ -106,7 +104,7 @@ pub fn idle_thread() -> ! {
 
 /// Spawn a new kernel thread with the provided closure
 #[allow(dead_code)]
-pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<ThreadHandle> {
+pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<thread::Handle> {
     Builder::new().spawn(entry)
 }
 
@@ -120,7 +118,6 @@ pub fn yield_now() {
     SCHEDULER.yield_now();
 }
 /// Get cycles of running thread
-#[allow(dead_code)]
 pub fn get_current_cycles(tcb_idx: usize) -> u64 {
     SCHEDULER.get_current_cycles(tcb_idx)
 }
@@ -131,18 +128,22 @@ pub fn post_switch_cleanup() {
 
 // SLEEP
 
-/// Blocks until the timer has passed the absolute deadline.
+/// Blocks the current thread until the timer has passed the absolute deadline.
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep_until(deadline_ms: u64) {
-    let deadline = Deadline::from_ms_with_system_leeway(deadline_ms);
+    let qos = percpu::current_qos()
+        .expect("there must be a current thread installed to be able to sleep");
+    let deadline = Deadline::from_ms_with_system_leeway(deadline_ms, qos);
     SCHEDULER.sleep_until(deadline);
 }
 /// Blocks for `duration`
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep(duration_ms: u64) {
-    let deadline = Deadline::after_ms_with_system_leeway(duration_ms);
+    let qos = percpu::current_qos()
+        .expect("there must be a current thread installed to be able to sleep");
+    let deadline = Deadline::after_ms_with_system_leeway(duration_ms, qos);
     SCHEDULER.sleep_until(deadline);
 }
 /// Blocks for `duration` in milliseconds given a leeway in milliseconds
@@ -155,11 +156,11 @@ pub fn sleep_with_leeway_ms(duration_ms: u64, leeway_ms: u64) {
 // THREAD EXIT
 
 /// Voluntarily terminate the current kernel thread. Doesn't return.
-pub(crate) fn exit_kernel_thread(reason: ExitReason) -> ! {
+pub(crate) fn exit_kernel_thread(reason: thread::ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
 /// Voluntarily terminate the current user thread. Doesn't return
-pub(crate) fn exit_user_thread(reason: ExitReason) -> ! {
+pub(crate) fn exit_user_thread(reason: thread::ExitReason) -> ! {
     SCHEDULER.exit_user_thread(reason);
 }
 /// Lock-free check: has the current user thread been condemned by a
@@ -171,7 +172,11 @@ pub(crate) fn exit_user_thread(reason: ExitReason) -> ! {
 /// releasing everything it holds on the way — dying only once the
 /// stack has unwound to the syscall boundary.
 pub(crate) fn current_user_thread_needs_exit() -> bool {
-    SCHEDULER.needs_user_exit.get(percpu::current_thread_idx())
+    SCHEDULER.needs_user_exit.get(
+        percpu::current_thread()
+            .expect("current thread should be installed")
+            .idx(),
+    )
 }
 /// Exit the current user thread now if it has been condemned;
 /// otherwise return normally. Like `park_if_blocked`, the `if` in the
@@ -191,7 +196,7 @@ pub(crate) fn current_user_thread_needs_exit() -> bool {
 /// process-scoped, like the marking itself — not in this bitmap.
 pub(crate) fn exit_user_thread_if_needs_exit() {
     if current_user_thread_needs_exit() {
-        SCHEDULER.exit_user_thread(ExitReason::Fault);
+        SCHEDULER.exit_user_thread(thread::ExitReason::Fault);
     }
 }
 
@@ -211,29 +216,23 @@ pub fn park_if_blocked() {
 }
 
 /// Unpark the current thread by thread handle
-pub fn unpark(handle: &ThreadHandle) {
+pub fn unpark(handle: thread::Handle) {
     SCHEDULER.unpark(handle);
 }
-
-/// Get a handle to the thread
-pub fn current_thread() -> ThreadHandle {
-    SCHEDULER.current_thread()
-}
-
 /// Set the waiter tcb index
-pub fn set_next_waiter(handle: &ThreadHandle, next: Option<ThreadHandle>) {
+pub fn set_next_waiter(handle: thread::Handle, next: Option<thread::Handle>) {
     SCHEDULER.set_next_waiter(handle, next);
 }
 
 /// Get waiter tcb index
-pub fn get_next_waiter(handle: &ThreadHandle) -> Option<ThreadHandle> {
+pub fn get_next_waiter(handle: thread::Handle) -> Option<thread::Handle> {
     SCHEDULER.get_next_waiter(handle)
 }
 
 /// Unpark using TCB index instead of thread handle
 #[allow(dead_code)]
-pub fn unpark_by_index(idx: usize) {
-    SCHEDULER.unpark_by_index(idx);
+pub fn unpark_by_handle(handle: thread::Handle) {
+    SCHEDULER.unpark_by_handle(handle);
 }
 
 /// Set this thread to blocked state without rescheduling
@@ -298,7 +297,10 @@ pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::Spa
 
 /// Spawn a user thread
 #[allow(dead_code)]
-pub fn spawn_user(process: &process::Handle, entry: userloader::UserEntry) -> Option<ThreadHandle> {
+pub fn spawn_user(
+    process: &process::Handle,
+    entry: userloader::UserEntry,
+) -> Option<thread::Handle> {
     SCHEDULER.spawn_user_thread(
         process,
         entry,
@@ -315,16 +317,12 @@ pub fn spawn_user(process: &process::Handle, entry: userloader::UserEntry) -> Op
 //
 
 /// Set the wake up flag for a thread by index
-pub fn set_needs_wakeup(idx: usize) {
-    if idx < THREADS_MAX {
-        SCHEDULER.set_wakeup_flag(idx);
-    }
+pub fn set_needs_wakeup(handle: thread::Handle) {
+    SCHEDULER.set_wakeup_flag(handle);
 }
 /// Clear the wake up flag for a thread by index
-pub fn clear_wakeup_signal(idx: usize) {
-    if idx < THREADS_MAX {
-        SCHEDULER.clear_wakeup_flag(idx);
-    }
+pub fn clear_wakeup_signal(handle: thread::Handle) {
+    SCHEDULER.clear_wakeup_flag(handle);
 }
 
 /// Prints the running thread kernel stack high watermarks

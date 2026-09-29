@@ -4,14 +4,14 @@
 use ease_macros::profile;
 
 use super::{Interrupted, TimedOut};
-use crate::kernel::sched::{
-    self, Deadline, ThreadHandle, current_thread, park_if_blocked, set_self_blocked,
-};
+use crate::kernel::percpu;
+use crate::kernel::sched::thread;
+use crate::kernel::sched::{self, Deadline, park_if_blocked, set_self_blocked};
 use crate::kernel::sync::IrqSpinLock;
 
 struct CompletionInner {
-    pending: bool,                // Flag that gets set if signal() fires before any wait().
-    waiter: Option<ThreadHandle>, // The single thread parked on this completion, if any.
+    pending: bool, // Flag that gets set if signal() fires before any wait().
+    waiter: Option<thread::Handle>, // The single thread parked on this completion, if any.
 }
 
 pub struct Completion {
@@ -40,7 +40,7 @@ impl Completion {
         let handle = inner.waiter.take();
         drop(inner);
         if let Some(handle) = handle {
-            sched::unpark(&handle); // Checks for staleness before waking the thread
+            sched::unpark(handle); // Checks for staleness before waking the thread
         }
     }
     /// Set a thread to block until the completion is signalled
@@ -60,7 +60,8 @@ impl Completion {
                 drop(inner);
                 return; // Early
             } else {
-                inner.waiter = Some(current_thread());
+                inner.waiter =
+                    Some(percpu::current_thread().expect("current thread should be installed"));
                 set_self_blocked();
                 drop(inner);
                 park_if_blocked();
@@ -83,7 +84,8 @@ impl Completion {
                 if deadline.has_passed() {
                     return Err(TimedOut);
                 } else {
-                    inner.waiter = Some(current_thread());
+                    inner.waiter =
+                        Some(percpu::current_thread().expect("current thread should be installed"));
                     sched::set_self_blocked_until(deadline);
                     drop(inner);
                     sched::park_if_blocked_until(deadline);
@@ -109,7 +111,8 @@ impl Completion {
                 return Ok(());
             }
             // We are (re)setting up the completion - it needs to know which thread is waiting
-            inner.waiter = Some(current_thread());
+            inner.waiter =
+                Some(percpu::current_thread().expect("current thread should be installed"));
             sched::set_self_blocked(); // Set the thread status to blocked (takes sched lock while holding the completion lock)
             drop(inner);
             sched::park_if_blocked(); // Reschedule the current thread to reach it's Blocked state. Takes sched lock, hence dropping inner first.

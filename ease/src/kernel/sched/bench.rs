@@ -9,7 +9,7 @@
 use crate::arch::csr::rdcycles;
 use crate::bench;
 use crate::kernel::alloc::Order;
-use crate::kernel::sched::{self, Builder};
+use crate::kernel::sched::{self, Builder, thread};
 use crate::kernel::sync::with_interrupts_disabled;
 use crate::kernel::timer;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -92,12 +92,12 @@ fn unit_costs() {
 /// itself is private to the scheduler and is not separable from here;
 /// it is the remainder once these are subtracted.
 fn reschedule_parts() {
-    let idx = crate::kernel::percpu::current_thread_idx();
+    let handle = crate::kernel::percpu::current_thread();
 
     let se = per_call(RUNS, M, || {
         let mut sched = super::SCHEDULER.sched.lock();
         let now = timer::elapsed();
-        let tcb = sched.thread_blocks.0[idx].as_mut().unwrap();
+        let tcb = sched.threads.tcbs.get_mut(handle.unwrap()).unwrap();
         core::hint::black_box(tcb.slice_ended(now));
     });
     println!("  lock + elapsed + slice_ended: wall min={se:>6} cycles/call");
@@ -111,11 +111,7 @@ fn reschedule_parts() {
     let nd = per_call(RUNS, M, || {
         let mut sched = super::SCHEDULER.sched.lock();
         let now = timer::elapsed();
-        core::hint::black_box(
-            sched
-                .thread_blocks
-                .next_timer_deadline(super::stride::SLICE, now),
-        );
+        core::hint::black_box(sched.threads.next_timer_deadline(super::stride::SLICE, now));
     });
     println!("  lock + elapsed + next_timer_deadline: wall min={nd:>6} cycles/call");
 
@@ -123,10 +119,7 @@ fn reschedule_parts() {
     // take, lock, elapsed, slice_ended, wake_sleeping_threads, then the
     // precondition check fails (we are Running, not Blocked) and it returns.
     let pre = per_call(RUNS, M, || {
-        super::SCHEDULER.reschedule(
-            Some(super::State::Blocked),
-            super::threads::PostSwitch::Ready,
-        );
+        super::SCHEDULER.reschedule(Some(thread::State::Blocked), thread::PostSwitch::Ready);
     });
     println!("  reschedule up to the pick (precondition bail): wall min={pre:>6} cycles/call");
 
@@ -137,17 +130,14 @@ fn reschedule_parts() {
         let this_hart = crate::arch::hart_id() as u8;
         let mut best_idx = None;
         let mut best_pass = u64::MAX;
-        for (i, slot) in sched.thread_blocks.0.iter().enumerate() {
-            if let Some(tcb) = slot {
-                let candidate = tcb.state == super::State::Ready;
-                let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
-                let not_stealing = !crate::kernel::percpu::other_scheduler_online()
-                    || i != crate::kernel::percpu::other_current_thread_idx();
-                let pri_ok = tcb.priority != super::stride::PRIORITY_MIN;
-                if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
-                    best_pass = tcb.pass;
-                    best_idx = Some(i);
-                }
+        for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
+            let candidate = tcb.state == thread::State::Ready;
+            let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
+            let not_stealing = Some(handle) != crate::kernel::percpu::other_current_thread(&sched);
+            let pri_ok = tcb.priority != super::stride::PRIORITY_MIN;
+            if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
+                best_pass = tcb.pass;
+                best_idx = Some(handle.idx());
             }
         }
         core::hint::black_box(best_idx);

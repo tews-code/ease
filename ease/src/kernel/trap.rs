@@ -8,7 +8,7 @@ use crate::arch::umode::EcallResult;
 use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
-use crate::kernel::sched::{ExitReason, userloader};
+use crate::kernel::sched::{thread, userloader};
 use crate::kernel::{ipi, panic, percpu, sched, stack};
 
 #[cfg(feature = "profile")]
@@ -38,11 +38,14 @@ pub(crate) extern "C" fn trap_handler_h1(frame: &mut trap::Frame) {
 }
 /// Helper function for divert work to the kernel
 pub(crate) fn divert_work_to_kernel(frame: &mut trap::Frame, mepc: usize, work: Work) {
-    // Stash this current thread's details in percpu
-    percpu::set_resume_mepc(mepc);
-    percpu::set_resume_mstatus(frame.mstatus);
-    percpu::set_resume_sp(frame.sp);
-    percpu::set_resume_work(work);
+    // Stash this current thread's resume work context details in percpu
+    let resume_context = percpu::ResumeContext {
+        work,
+        mepc, // Note we take mepc from the parameter, not the frame
+        mstatus: frame.mstatus,
+        sp: frame.sp,
+    };
+    percpu::set_resume_context(resume_context);
     frame.set_up_for_divert_to_kernel(if hart_id() == 0 {
         trap::resume_trampoline_h0 as *const () as usize
     } else {
@@ -83,13 +86,17 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         irq_panic();
     }
     // Check if kernel stack canary is in place
-    // Note that percpu::current_kernel_stack_base is set up immediately after boot and is safe to read
-    if let Err(val) = unsafe { stack::check_canary(percpu::current_kernel_stack_base().addr()) } {
+    if let Some(kernel_stack_base) = percpu::current_kernel_stack_base()
+        // Safety: the kernel stack base is aligned and valid for read
+        && let Err(val) = unsafe { stack::check_canary(kernel_stack_base.addr().into()) }
+    {
         panic!(
             "kernel stack canary corrupted in thread at index {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
-            percpu::current_thread_idx(),
+            percpu::current_thread()
+                .expect("there must be a current thread installed")
+                .idx(),
             frame.sp,
-            percpu::current_kernel_stack_base().addr(),
+            kernel_stack_base.addr(),
             val,
             stack::CANARY
         );
@@ -139,19 +146,20 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         if unsafe {
             stack::check_canary(
                 percpu::current_user_stack_base()
-                    .expect("the frame is from user so there must be a user stack")
-                    .addr(),
+                    .expect("the frame is from user so there must be a current thread with a user stack")
+                    .addr()
+                    .into() ,
             )
         }
         .is_err()
         {
-            frame.a0 = ExitReason::Fault as usize;
+            frame.a0 = thread::ExitReason::Fault as usize;
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             return;
         }
         // Check if this user thread should be exited
         if sched::current_user_thread_needs_exit() {
-            divert_work_to_kernel(frame, frame.mepc, Work::Exit(ExitReason::Fault));
+            divert_work_to_kernel(frame, frame.mepc, Work::Exit(thread::ExitReason::Fault));
             return;
         }
     }
@@ -171,12 +179,10 @@ pub(crate) extern "C" fn first_run_trap_return(frame: &mut trap::Frame) {
 }
 /// The kind of work that the thread should do on resume
 #[derive(Clone, Copy)]
-#[repr(u8)]
 pub(crate) enum Work {
-    // Preempt must remain the first variant — NOLOAD percpu zero-fill depends on it.
     Preempt,
     Syscall(usize),
-    Exit(ExitReason),
+    Exit(thread::ExitReason),
 }
 /// Examines the percpu resume work field and dispatches to resume that work
 /// This function is `extern "C"` so it can be called from asm!.
@@ -184,11 +190,17 @@ pub(crate) enum Work {
 /// The caller *must* use [percpu::set_resume_work] before this is called, otherwise
 /// the stale value will be used.
 pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
-    match percpu::resume_work() {
+    let resume_context = percpu::take_resume_context()
+        .expect("should not be resuming work if no deferred work is stashed in percpu");
+    match resume_context.work {
         Work::Preempt => sched::schedule(),
         Work::Syscall(syscall) => umode::user_thread_block(frame, syscall),
         Work::Exit(reason) => sched::exit_user_thread(reason),
     }
+    // Put the resume context into the frame
+    frame.sp = resume_context.sp;
+    frame.mepc = resume_context.mepc;
+    frame.mstatus = resume_context.mstatus;
     // The resume trampoline tails into trap_return from here, bypassing the
     // trap handler, so this is the other place a frame is final before its
     // `mret`. If the work above switched threads, the section was already
@@ -233,7 +245,7 @@ fn handle_exception(frame: &mut trap::Frame, code: usize) {
             ),
         }
         // User threads are immediately exited with ExitReason::Fault
-        frame.a0 = ExitReason::Fault as usize;
+        frame.a0 = thread::ExitReason::Fault as usize;
         frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
     } else {
         match code {

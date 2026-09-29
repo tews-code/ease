@@ -16,14 +16,14 @@ use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::ExitReason;
 use super::deadline::Deadline;
 use super::stride::{PRIORITY_MIN, SchedInner};
-use super::threads::{PostSwitch, ThreadControlBlock};
+use super::thread;
 use crate::arch::hart_id;
 use crate::board::HARTS_MAX;
+use crate::kernel::collection::Arena;
 use crate::kernel::percpu;
-use crate::kernel::sched::{Qos, SCHEDULER, State, THREADS_MAX};
+use crate::kernel::sched::{Qos, SCHEDULER};
 use crate::kernel::timer;
 
 // 512 fits the PSRAM `.psram_buf` slot once per-thread records grew
@@ -34,18 +34,18 @@ static TRACE_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug)]
 struct PerCpuTracePoint {
-    idle_thread_idx: usize,
-    current_thread_idx: usize,
-    switching_from_thread_idx: Option<usize>,
+    idle_thread_handle: Option<thread::Handle>,
+    current_thread_handle: Option<thread::Handle>,
+    switching_from_thread_handle: Option<Option<thread::Handle>>,
     needs_reschedule: bool,
 }
 
 impl PerCpuTracePoint {
     const fn new() -> Self {
         Self {
-            idle_thread_idx: 0,
-            current_thread_idx: 0,
-            switching_from_thread_idx: None,
+            idle_thread_handle: None,
+            current_thread_handle: None,
+            switching_from_thread_handle: None,
             needs_reschedule: false,
         }
     }
@@ -54,28 +54,27 @@ impl PerCpuTracePoint {
 #[derive(Debug)]
 #[allow(dead_code)]
 struct ThreadControlBlockTracePoint {
-    state: State,
-    id: u16,
+    id: u32,
+    state: thread::State,
     qos: Qos,
     priority: u8,
     pass: u64,
     last_started_cycles: u64,
-    next_waiter: Option<usize>,
+    next_waiter: Option<thread::Handle>,
     affinity: Option<u8>,
     user_thread: bool,
     needs_user_exit: bool,
     ready_since: u64,
 }
-
 /// Why a Ready thread wasn't given a CPU, computed at a `ready-stall`
 /// snapshot from the live state. `blocker_*` name the thread it out-ranks on
 /// an eligible hart (the smoking gun for a missed preemption); zero when none.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub(crate) struct PickMiss {
-    starved_id: u16,
+    starved_id: u32,
     ready_ms: u64,
-    blocker_id: u16,
+    blocker_id: u32,
     blocker_hart: u8,
     // True if the out-ranked runner is on the hart that DETECTED the stall —
     // that hart should have preempted locally (a local pick/reschedule bug);
@@ -84,14 +83,13 @@ pub(crate) struct PickMiss {
     local: bool,
     reason: &'static str,
 }
-
 #[derive(Debug)]
 struct TracePoint {
     time_stamp: u64,
     label: &'static str,
     per_cpu: [PerCpuTracePoint; HARTS_MAX],
-    threads: [Option<ThreadControlBlockTracePoint>; THREADS_MAX],
-    wake_overshoot: [u64; THREADS_MAX],
+    threads: [Option<ThreadControlBlockTracePoint>; thread::MAX_COUNT],
+    wake_overshoot: [u64; thread::MAX_COUNT],
     pick_miss: Option<PickMiss>,
     // A "light" point was recorded when take_snapshot could NOT lock the
     // scheduler (the lock was hot). It carries only lock-free percpu data
@@ -107,8 +105,8 @@ impl TracePoint {
             time_stamp: 0,
             label: "",
             per_cpu: [const { PerCpuTracePoint::new() }; HARTS_MAX],
-            threads: [const { None }; THREADS_MAX],
-            wake_overshoot: [0; THREADS_MAX],
+            threads: [const { None }; thread::MAX_COUNT],
+            wake_overshoot: [0; thread::MAX_COUNT],
             pick_miss: None,
             light: false,
         }
@@ -122,49 +120,56 @@ struct TraceBuf([UnsafeCell<TracePoint>; TRACE_BUFFER_SIZE]);
 unsafe impl Sync for TraceBuf {}
 
 // Safety: The caller must provide a valid pointer to a TracePoint
-unsafe fn stash_percpu(tp: *mut TracePoint) {
+unsafe fn stash_this_hart_percpu(tp: *mut TracePoint) {
+    let hart = hart_id();
     // Safety: Caller has provided valid pointer to a TracePoint
     unsafe {
-        for hart in 0..HARTS_MAX {
-            if hart == hart_id() {
-                (*tp).per_cpu[hart].idle_thread_idx = percpu::idle_thread_idx();
-                (*tp).per_cpu[hart].current_thread_idx = percpu::current_thread_idx();
-                (*tp).per_cpu[hart].switching_from_thread_idx = percpu::switching_from_thread_idx();
-                (*tp).per_cpu[hart].needs_reschedule = percpu::needs_reschedule();
-            } else {
-                // Use cross-Hart methods
-                (*tp).per_cpu[hart].idle_thread_idx = percpu::other_idle_thread_idx();
-                (*tp).per_cpu[hart].current_thread_idx = percpu::other_current_thread_idx();
-                (*tp).per_cpu[hart].switching_from_thread_idx =
-                    percpu::other_switching_from_thread_idx();
-                (*tp).per_cpu[hart].needs_reschedule = percpu::other_needs_reschedule();
-            }
-        }
+        (*tp).per_cpu[hart].idle_thread_handle = Some(percpu::idle_thread().unwrap());
+        (*tp).per_cpu[hart].current_thread_handle = Some(percpu::current_thread().unwrap());
+        (*tp).per_cpu[hart].switching_from_thread_handle = Some(percpu::switching_from_thread());
+        (*tp).per_cpu[hart].needs_reschedule = percpu::needs_reschedule();
+    }
+}
+
+// Safety: The caller must provide a valid pointer to a TracePoint.
+// `sched` is the proof that the scheduler lock is held, which the other hart's
+// percpu reads require; it must NOT be re-acquired here (not reentrant).
+unsafe fn stash_percpu(tp: *mut TracePoint, sched: &SchedInner) {
+    let other = percpu::that_hart_id();
+    // Safety: Caller has provided valid pointer to a TracePoint
+    unsafe {
+        stash_this_hart_percpu(tp);
+        (*tp).per_cpu[other].idle_thread_handle = percpu::other_idle_thread(sched);
+        (*tp).per_cpu[other].current_thread_handle = percpu::other_current_thread(sched);
+        (*tp).per_cpu[other].switching_from_thread_handle =
+            Some(percpu::other_switching_from_thread(sched));
+        (*tp).per_cpu[other].needs_reschedule = percpu::other_needs_reschedule();
     }
 }
 
 // Safety: Caller must provide a valid pointer to a TracePoint
-unsafe fn stash_tcbs(tp: *mut TracePoint, tcbs: &[Option<ThreadControlBlock>]) {
+unsafe fn stash_tcbs(
+    tp: *mut TracePoint,
+    tcbs: &Arena<thread::ControlBlock, { thread::MAX_COUNT }>,
+) {
     unsafe {
-        for (idx, tcb_array) in tcbs.iter().enumerate().take(THREADS_MAX) {
-            if let Some(tcb) = tcb_array {
-                let tcbtp = ThreadControlBlockTracePoint {
-                    state: tcb.state,
-                    id: tcb.id,
-                    qos: tcb.qos,
-                    priority: tcb.priority,
-                    pass: tcb.pass,
-                    last_started_cycles: tcb.last_started_cycles,
-                    next_waiter: tcb.next_waiter.map(|handle| handle.idx),
-                    affinity: tcb.affinity,
-                    user_thread: tcb.user.is_some(),
-                    needs_user_exit: SCHEDULER.needs_user_exit.get(idx),
-                    ready_since: tcb.ready_since,
-                };
-                (*tp).threads[idx] = Some(tcbtp); // copy
-            }
+        for (handle, tcb) in tcbs.iter_with_handles() {
+            let tcbtp = ThreadControlBlockTracePoint {
+                id: handle.id(),
+                state: tcb.state,
+                qos: tcb.qos,
+                priority: tcb.priority,
+                pass: tcb.pass,
+                last_started_cycles: tcb.last_started_cycles,
+                next_waiter: tcb.next_waiter,
+                affinity: tcb.affinity,
+                user_thread: tcb.user.is_some(),
+                needs_user_exit: SCHEDULER.needs_user_exit.get(handle.idx()),
+                ready_since: tcb.ready_since,
+            };
+            (*tp).threads[handle.idx()] = Some(tcbtp); // copy
         }
-    };
+    }
 }
 
 #[unsafe(link_section = ".psram_buf")]
@@ -178,8 +183,8 @@ impl SchedInner {
         unsafe {
             (*tp).label = label;
             (*tp).time_stamp = timer::elapsed();
-            stash_percpu(tp);
-            stash_tcbs(tp, &self.thread_blocks.0);
+            stash_percpu(tp, self);
+            stash_tcbs(tp, &self.threads.tcbs);
             (*tp).wake_overshoot = self.wake_overshoot;
             (*tp).pick_miss = None;
         }
@@ -196,28 +201,30 @@ impl SchedInner {
 
     // Snapshot annotated with WHY a stalled Ready thread isn't running.
     #[allow(dead_code)]
-    pub(crate) fn snapshot_ready_stall(&self, stalled_idx: usize) {
+    pub(crate) fn snapshot_ready_stall(&self, stalled_handle: thread::Handle) {
         let idx = TRACE_SEQ.fetch_add(1, Ordering::Relaxed) % TRACE_BUFFER_SIZE;
         let tp = TRACE_BUF.0[idx].get();
         // Safety: distinct ring slot; dump runs single-threaded from panic.
         unsafe {
             self.write_snapshot(tp, "ready-stall");
-            (*tp).pick_miss = Some(self.compute_pick_miss(stalled_idx));
+            (*tp).pick_miss = Some(self.compute_pick_miss(stalled_handle));
         }
     }
 
     // Reconstruct the reason a Ready thread is being passed over, from the
     // live state: does it out-rank (lower pass) a thread currently running on
     // a hart it's allowed to use? If so that's a missed preemption.
-    fn compute_pick_miss(&self, stalled_idx: usize) -> PickMiss {
-        let stalled = &self.thread_blocks.0[stalled_idx]
-            .as_ref()
+    fn compute_pick_miss(&self, stalled_handle: thread::Handle) -> PickMiss {
+        let stalled = &self
+            .threads
+            .tcbs
+            .get(stalled_handle)
             .expect("should be a valid thread");
         let now = timer::elapsed();
         let ready_ms = now.saturating_sub(stalled.ready_since) / timer::CYCLES_PER_MS;
         let this = hart_id();
         let mut pm = PickMiss {
-            starved_id: stalled.id,
+            starved_id: stalled_handle.id(),
             ready_ms,
             blocker_id: 0,
             blocker_hart: 0,
@@ -228,17 +235,20 @@ impl SchedInner {
         // runner locally?), then the other hart (does it need a kick?). The
         // first out-ranked, eligible runner wins. (2-hart system: other = this ^ 1.)
         for &hart in &[this, this ^ 1] {
-            let cur_idx = if hart == this {
-                percpu::current_thread_idx()
+            let cur_handle = if hart == this {
+                percpu::current_thread()
             } else {
-                percpu::other_current_thread_idx()
-            };
-            let runner = &self.thread_blocks.0[cur_idx]
-                .as_ref()
+                percpu::other_current_thread(self)
+            }
+            .unwrap();
+            let runner = &self
+                .threads
+                .tcbs
+                .get(cur_handle)
                 .expect("should be valid thread");
             let affinity_ok = stalled.affinity.is_none_or(|h| h as usize == hart);
             if affinity_ok && stalled.pass < runner.pass {
-                pm.blocker_id = runner.id;
+                pm.blocker_id = cur_handle.id();
                 pm.blocker_hart = hart as u8;
                 pm.local = hart == this;
                 pm.reason = if pm.local {
@@ -271,24 +281,32 @@ pub(crate) fn take_snapshot(label: &'static str) {
     }
 }
 
-// Lock-free snapshot: percpu only, taken when the scheduler lock could not be
-// acquired. `stash_percpu` reads the same per-hart fields the full snapshot
-// does (owned per-hart, no new race); `thread_blocks` is skipped because it is
-// the lock-protected part. Marked `light` so the dump renders it compactly.
+// Lock-free snapshot: this hart's percpu only, taken when the scheduler lock
+// could not be acquired. The other hart's handle fields need the lock (they are
+// plain cells written by that hart under it), so they are recorded as unknown;
+// its `needs_reschedule` is atomic and is read as-is. `thread_blocks` is skipped
+// because it is the lock-protected part. Marked `light` so the dump renders it
+// compactly.
 fn take_light_snapshot(label: &'static str) {
     let idx = TRACE_SEQ.fetch_add(1, Ordering::Relaxed) % TRACE_BUFFER_SIZE;
     let tp = TRACE_BUF.0[idx].get();
-    // Safety: distinct ring slot; percpu reads are lock-free; the slot may hold
-    // a stale full snapshot from a previous wrap, so clear the TCB/derived
-    // fields to keep the light point honest.
+    let other = percpu::that_hart_id();
+    // Safety: distinct ring slot; this hart's percpu reads are lock-free; the
+    // slot may hold a stale full snapshot from a previous wrap, so clear the
+    // TCB/derived fields and the other hart's roster to keep the light point
+    // honest.
     unsafe {
         (*tp).label = label;
         (*tp).time_stamp = timer::elapsed();
         (*tp).light = true;
-        (*tp).threads = [const { None }; THREADS_MAX];
-        (*tp).wake_overshoot = [0; THREADS_MAX];
+        (*tp).threads = [const { None }; thread::MAX_COUNT];
+        (*tp).wake_overshoot = [0; thread::MAX_COUNT];
         (*tp).pick_miss = None;
-        stash_percpu(tp);
+        stash_this_hart_percpu(tp);
+        (*tp).per_cpu[other].idle_thread_handle = None;
+        (*tp).per_cpu[other].current_thread_handle = None;
+        (*tp).per_cpu[other].switching_from_thread_handle = None;
+        (*tp).per_cpu[other].needs_reschedule = percpu::other_needs_reschedule();
     }
 }
 
@@ -318,21 +336,21 @@ pub(crate) fn report_live(label: &'static str) {
     //    the rest of the test output, so it stays FIFO-ordered instead of
     //    racing ahead via the direct writer (the old `dprint!` garble).
     // State is Copy, so we can snapshot (id, state) into a local array.
-    let mut entries: [Option<(u16, State)>; THREADS_MAX] = [None; THREADS_MAX];
+    let mut entries: [Option<(u32, thread::State)>; thread::MAX_COUNT] = [None; thread::MAX_COUNT];
     let mut n = 0;
     let mut runnable = 0usize;
     let mut live = 0usize;
     {
         let sched = SCHEDULER.sched.lock();
-        for tcb in sched.thread_blocks.0.iter().as_ref().iter().flatten() {
+        for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
             if tcb.priority == PRIORITY_MIN {
                 continue;
             }
             live += 1;
-            if matches!(tcb.state, State::Ready | State::Running) {
+            if matches!(tcb.state, thread::State::Ready | thread::State::Running) {
                 runnable += 1;
             }
-            entries[n] = Some((tcb.id, tcb.state));
+            entries[n] = Some((handle.id(), tcb.state));
             n += 1;
         }
     }
@@ -400,28 +418,28 @@ fn write_deadline(w: &mut impl Write, tag: &str, d: &Deadline) {
     }
 }
 
-fn write_post_switch(w: &mut impl Write, ps: &PostSwitch) {
+fn write_post_switch(w: &mut impl Write, ps: &thread::PostSwitch) {
     match ps {
-        PostSwitch::Blocked => drop(write!(w, "Blk")),
-        PostSwitch::BlockedUntil(d) => write_deadline(w, "BlkU", d),
-        PostSwitch::Ready => drop(write!(w, "Rdy")),
-        PostSwitch::Sleeping(d) => write_deadline(w, "Slp", d),
-        PostSwitch::Dead(ExitReason::Exit) => drop(write!(w, "Dead")),
-        PostSwitch::Dead(ExitReason::Fault) => drop(write!(w, "Fault")),
+        thread::PostSwitch::Blocked => drop(write!(w, "Blk")),
+        thread::PostSwitch::BlockedUntil(d) => write_deadline(w, "BlkU", d),
+        thread::PostSwitch::Ready => drop(write!(w, "Rdy")),
+        thread::PostSwitch::Sleeping(d) => write_deadline(w, "Slp", d),
+        thread::PostSwitch::Dead(thread::ExitReason::Exit) => drop(write!(w, "Dead")),
+        thread::PostSwitch::Dead(thread::ExitReason::Fault) => drop(write!(w, "Fault")),
     }
 }
 
 /// Compact, fixed-vocabulary rendering of a thread state, kept short so the
 /// per-thread columns stay aligned. Sleep/block deadlines collapse to a wake
 /// time in ms (see `write_deadline`).
-fn write_state(w: &mut impl Write, s: &State) {
+fn write_state(w: &mut impl Write, s: &thread::State) {
     match s {
-        State::Blocked => drop(write!(w, "Blk")),
-        State::BlockedUntil(d) => write_deadline(w, "BlkU", d),
-        State::Ready => drop(write!(w, "Rdy")),
-        State::Running => drop(write!(w, "Run")),
-        State::Sleeping(d) => write_deadline(w, "Slp", d),
-        State::Switching(ps) => {
+        thread::State::Blocked => drop(write!(w, "Blk")),
+        thread::State::BlockedUntil(d) => write_deadline(w, "BlkU", d),
+        thread::State::Ready => drop(write!(w, "Rdy")),
+        thread::State::Running => drop(write!(w, "Run")),
+        thread::State::Sleeping(d) => write_deadline(w, "Slp", d),
+        thread::State::Switching(ps) => {
             let _ = write!(w, "Sw>");
             write_post_switch(w, ps);
         }
@@ -460,7 +478,9 @@ pub(crate) fn dump_trace() {
         // dense run of these lines, then move on.
         if unsafe { (**tp).light } {
             for h in 0..HARTS_MAX {
-                let cur = unsafe { (**tp).per_cpu[h].current_thread_idx };
+                let cur = unsafe { (**tp).per_cpu[h].current_thread_handle }
+                    .unwrap()
+                    .idx();
                 let nr = unsafe { (**tp).per_cpu[h].needs_reschedule };
                 dprint!(" H{h}:cur{cur}{} |", if nr { "*" } else { "" });
             }
@@ -473,7 +493,7 @@ pub(crate) fn dump_trace() {
         // floor (p0) — which is what stops a woken thread from preempting — is
         // obvious at a glance.
         let mut floor = u64::MAX;
-        for j in 0..THREADS_MAX {
+        for j in 0..thread::MAX_COUNT {
             if let Some(tcb) = unsafe { &(**tp).threads[j] }
                 && tcb.priority != PRIORITY_MIN
             {
@@ -481,13 +501,13 @@ pub(crate) fn dump_trace() {
             }
         }
         let floor = if floor == u64::MAX { 0 } else { floor };
-        for i in 0..THREADS_MAX {
+        for i in 0..thread::MAX_COUNT {
             let tcb_tp = unsafe { &(**tp).threads[i] };
             if let Some(tcb) = tcb_tp {
                 // Which hart, if any, has this slot as its current thread?
                 let mut on_hart = "  ";
                 for h in 0..HARTS_MAX {
-                    if unsafe { (**tp).per_cpu[h].current_thread_idx } == i {
+                    if unsafe { (**tp).per_cpu[h].current_thread_handle.unwrap().idx() } == i {
                         on_hart = match h {
                             0 => "H0",
                             1 => "H1",
@@ -508,7 +528,7 @@ pub(crate) fn dump_trace() {
                 }
                 // For a Ready thread, show how long it's been waiting for a CPU
                 // (`wNms`). A growing value across rows is the starvation signal.
-                if matches!(tcb.state, State::Ready) {
+                if matches!(tcb.state, thread::State::Ready) {
                     let waited = unsafe { (**tp).time_stamp }.saturating_sub(tcb.ready_since)
                         / timer::CYCLES_PER_MS;
                     if waited >= 1 {

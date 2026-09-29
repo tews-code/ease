@@ -85,7 +85,7 @@ pub(crate) unsafe fn stack_high_watermark(base_addr: usize, top_addr: usize) -> 
 #[cfg(feature = "paint-stack")]
 pub(crate) unsafe fn print_watermark(
     name: &'static str,
-    id: usize,
+    id: u32,
     stack_type: &'static str,
     base_addr: usize,
     top_addr: usize,
@@ -110,7 +110,7 @@ pub(crate) unsafe fn print_watermark(
     dprintln!(
         "==== {}{} Stack High Watermark Check Complete ====",
         name,
-        id
+        id,
     );
 }
 

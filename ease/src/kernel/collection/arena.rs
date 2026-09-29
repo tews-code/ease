@@ -14,7 +14,18 @@ use core::{fmt, marker::PhantomData};
 pub(crate) struct Handle<T> {
     index: usize,
     generation: u32,
-    _marker: PhantomData<T>,
+    _marker: PhantomData<fn() -> T>, // This is a function that returns a T. As a result, it is Send and Sync but specific to T; could be "unsafe impl Send for Handle {}, but this lets the compiler do that for us.
+}
+
+impl<T> Handle<T> {
+    /// Get the index of a handle
+    pub(crate) fn idx(&self) -> usize {
+        self.index
+    }
+    /// Get the generation id of a handle
+    pub(crate) fn id(&self) -> u32 {
+        self.generation
+    }
 }
 
 /// Implement rather than derive as we do not want to apply to T itself
@@ -42,6 +53,7 @@ impl<T> fmt::Debug for Handle<T> {
 /// Each slot holds an (optional) `T` and a counter. u32 only wraps
 /// after 2^32 uses of the slot so stale handles will not match.
 /// Internal fields are private: all access via Arena methods.
+#[derive(Debug)]
 struct Slot<T> {
     entry: Option<T>,
     generation: u32,
@@ -65,6 +77,7 @@ impl<T> Slot<T> {
 }
 
 /// The arena struct with an array of size `N` each holding an Entry
+#[derive(Debug)]
 pub(crate) struct Arena<T, const N: usize> {
     array: [Slot<T>; N],
 }
@@ -95,6 +108,10 @@ impl<T, const N: usize> Arena<T, N> {
             }
         }
         None
+    }
+    /// Confirm a handle is present in the arena at the time of this call
+    pub(crate) fn contains(&self, handle: Handle<T>) -> bool {
+        self.array[handle.idx()].generation == handle.generation
     }
     /// Get a reference to a `T` from a `Handle`.
     /// Returns `None` if the handle is stale or invalid
@@ -138,9 +155,44 @@ impl<T, const N: usize> Arena<T, N> {
         slot.generation = slot.generation.wrapping_add(1);
         Some(entry)
     }
-    /// Provides an iterator over the values present
+    /// Returns whether the arena is full i.e. no `None` slots left
+    pub(crate) fn is_full(&self) -> bool {
+        self.array.iter().all(|s| s.entry.is_some())
+    }
+    /// Returns the handle of an arena array slot by index.
+    /// Returns `None` if the index is invalid.
+    pub(crate) fn handle_of(&self, idx: usize) -> Option<Handle<T>> {
+        self.array
+            .get(idx)
+            .filter(|slot| slot.entry.is_some())
+            .map(|slot| Handle {
+                index: idx,
+                generation: slot.generation,
+                _marker: PhantomData,
+            })
+    }
+    /// Provides an iterator over the values present (ignoring None)
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.array.iter().filter_map(|slot| slot.entry.as_ref())
+    }
+    /// Provides an iterator over the &mut values present (ignoring None)
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.array.iter_mut().filter_map(|slot| slot.entry.as_mut())
+    }
+    /// Provides an iterator with handles over the &values present (ignoring None)
+    pub fn iter_with_handles(&self) -> impl Iterator<Item = (Handle<T>, &T)> {
+        self.array.iter().enumerate().filter_map(|(index, slot)| {
+            slot.entry.as_ref().map(|entry| {
+                (
+                    Handle {
+                        index,
+                        generation: slot.generation,
+                        _marker: PhantomData,
+                    },
+                    entry,
+                )
+            })
+        })
     }
 }
 

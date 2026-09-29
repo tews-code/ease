@@ -148,7 +148,10 @@ impl Frame {
     pub(crate) fn set_up_for_divert_to_kernel(&mut self, mepc: usize) {
         // If we are diverting from u-mode to m-mode, then we need to swap in the kernel stack top as the sp
         if self.is_from_user() {
-            self.sp = percpu::current_kernel_stack_top() as usize
+            self.sp = percpu::current_kernel_stack_top()
+                .expect("current thread must be installed")
+                .addr()
+                .into()
         }
         // Set up frame for trampoline
         self.mepc = mepc;
@@ -337,14 +340,6 @@ per_hart::naked_asm_function!(
         "sw s10, 4 * 28(sp)",
         "sw s11, 4 * 29(sp)",
 
-        // Get stored mepc, mstatus and sp and stash
-        "call {resume_mepc}",
-        "sw a0,  4 * 30(sp)",
-        "call {resume_mstatus}",
-        "sw a0,  4 * 31(sp)",
-        "call {resume_sp}",
-        "sw a0, 4 * 32(sp)",
-
         // Call the scheduler
         "mv a0, sp",
         "call {run_resume_work}",
@@ -359,9 +354,6 @@ per_hart::naked_asm_function!(
         "1:",
         "tail {trap_return_h1}",
         num_slots = const Frame::NUM_SLOTS,
-        resume_mepc = sym percpu::resume_mepc,
-        resume_mstatus = sym percpu::resume_mstatus,
-        resume_sp = sym percpu::resume_sp,
         run_resume_work = sym run_resume_work,
         trap_return_h0 = sym trap_return_h0,
         trap_return_h1 = sym trap_return_h1,
