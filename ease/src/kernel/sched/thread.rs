@@ -10,7 +10,7 @@ use crate::kernel::collection::Arena;
 use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
 
-/// Alias to clearly simplify the thread handle definition
+/// Alias to simplify the thread handle definition
 pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
 
 /// Maximum number of simultaneous threads. Includes two slots used for idle threads
@@ -55,7 +55,7 @@ pub(crate) enum UnblockedResult {
 pub(super) struct UserContext {
     pub(super) stack: MemRegion,
     pub(super) entry: userloader::UserEntry,
-    pub(super) process_idx: u8,
+    pub(super) process: process::Handle,
 }
 /// Key data structure: the thread control block holds the running thread
 /// details
@@ -113,11 +113,11 @@ impl ControlBlock {
             _ => None,
         }
     }
-    /// Get the process index of this thread control block
+    /// Get the process handle of this thread control block
     ///
-    /// Returns the process index or None if not a user thread
-    fn process_idx(&self) -> Option<u8> {
-        self.user.as_ref().map(|uc| uc.process_idx)
+    /// Returns the process handle or None if not a user thread
+    fn process(&self) -> Option<process::Handle> {
+        self.user.as_ref().map(|uc| uc.process)
     }
     /// Helper function shared by `schedule` (preempt called from trap handler) and `reschedule` (voluntary) scheduler calls
     /// Performs common cycle count bookkeeping and updates stride for the current thread.
@@ -330,25 +330,18 @@ impl Threads {
             }
         }
     }
-    /// Get the process index of a given thread handle
+    /// Get the process handle of a given thread handle
     ///
     /// Returns `None` if:
     /// - not a user thread
     /// - handle is stale
-    pub(super) fn process_idx_of(&self, handle: Handle) -> Option<u8> {
-        self.tcbs.get(handle).and_then(|tcb| tcb.process_idx())
+    pub(super) fn process_handle_of(&self, thread: Handle) -> Option<process::Handle> {
+        self.tcbs.get(thread).and_then(|tcb| tcb.process())
     }
-    /// Determines if any threads are resource holders for process with `process_idx`
-    ///
-    /// # Panics #
-    /// Panics if `process_idx >= PROCS_MAX`
-    pub(super) fn any_resource_holders(&self, process_idx: u8) -> bool {
-        assert!((process_idx as usize) < process::MAX);
+    /// Determines if any threads are resource holders for a process
+    pub(super) fn any_resource_holders(&self, process: process::Handle) -> bool {
         self.tcbs.iter().any(|tcb| {
-            tcb.user
-                .as_ref()
-                .is_some_and(|uc| uc.process_idx == process_idx)
-                && !tcb.resources_released
+            tcb.user.as_ref().is_some_and(|uc| uc.process == process) && !tcb.resources_released
         })
     }
 }

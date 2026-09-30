@@ -158,8 +158,8 @@ pub(crate) fn exit_kernel_thread(reason: thread::ExitReason) -> ! {
     SCHEDULER.exit(reason);
 }
 /// Voluntarily terminate the current user thread. Doesn't return
-pub(crate) fn exit_user_thread(reason: thread::ExitReason) -> ! {
-    SCHEDULER.exit_user_thread(reason);
+pub(crate) fn exit_current_user_thread(reason: thread::ExitReason) -> ! {
+    SCHEDULER.exit_current_user_thread(reason);
 }
 /// Lock-free check: has the current user thread been condemned by a
 /// process kill? (Reads the `needs_user_exit` bitmap.)
@@ -192,7 +192,7 @@ pub(crate) fn current_user_thread_needs_exit() -> bool {
 /// process-scoped, like the marking itself — not in this bitmap.
 pub(crate) fn exit_user_thread_if_needs_exit() {
     if current_user_thread_needs_exit() {
-        SCHEDULER.exit_user_thread(thread::ExitReason::Fault);
+        SCHEDULER.exit_current_user_thread(thread::ExitReason::Fault);
     }
 }
 
@@ -294,7 +294,7 @@ pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::Spa
 /// Spawn a user thread
 #[allow(dead_code)]
 pub fn spawn_user(
-    process: &process::Handle,
+    process: process::Handle,
     entry: userloader::UserEntry,
 ) -> Option<thread::Handle> {
     SCHEDULER.spawn_user_thread(

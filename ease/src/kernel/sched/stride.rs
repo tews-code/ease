@@ -57,7 +57,7 @@ pub(super) static SCHEDULER: Scheduler = Scheduler::new();
 
 pub(crate) struct SchedInner {
     pub(super) threads: thread::Threads,
-    pub(super) process_blocks: super::process::Procs, // Two thread control blocks are taken up by idle so can't be used for a process
+    pub(super) processes: super::process::Processes, // Two thread control blocks are taken up by idle so can't be used for a process
     #[cfg(feature = "trace")]
     pub(super) wake_overshoot: [u64; thread::MAX_COUNT],
     _private: (), // We use &SchedInner as a token to prove holding the Scheduler IrqSpinLock, so we use this private field to prevent it be created other than in stride.
@@ -193,8 +193,10 @@ impl SchedInner {
         percpu::set_switching_from_thread(self, switching_from_thread);
         if let Some(user_context) = &tcb.user {
             // For user thread merge the thread's stack and set pmp
-            let pmp_config = self.process_blocks.0[user_context.process_idx as usize]
-                .as_ref()
+            let pmp_config = self
+                .processes
+                .pcbs
+                .get(user_context.process)
                 .expect("process should be configured before this thread is scheduled")
                 .mem_map
                 .to_pmp(&user_context.stack);
@@ -235,7 +237,7 @@ impl Scheduler {
         Self {
             sched: IrqSpinLock::new(SchedInner {
                 threads: thread::Threads { tcbs: Arena::new() },
-                process_blocks: process::Procs([const { None }; process::MAX]),
+                processes: process::Processes { pcbs: Arena::new() },
                 #[cfg(feature = "trace")]
                 wake_overshoot: [0; thread::MAX_COUNT],
                 _private: (),
@@ -386,8 +388,8 @@ impl Scheduler {
             }
             // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
             // Set the dead thread to None and return early
-            if let Some(process_idx) = sched.threads.process_idx_of(switched_from_thread) {
-                self.release_process_thread(&mut sched, process_idx, switched_from_thread);
+            if let Some(process) = sched.threads.process_handle_of(switched_from_thread) {
+                self.release_process_thread(&mut sched, process, switched_from_thread);
             }
             sched.threads.tcbs.take(switched_from_thread);
             self.clear_thread_flags(switched_from_thread); // Make sure we also clear the flags of the TCB that has been removed
@@ -864,19 +866,21 @@ impl Scheduler {
     /// Run a closure on the current process's file descriptors
     ///
     /// # Panics #
-    /// Panics if the thread is not a user thread
+    /// Panics if the thread is not a user thread or holds a stale process handle
     fn with_current_process_fds<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut fd::Table) -> R,
     {
         let mut sched = self.sched.lock();
-        let process_idx = sched
+        let process = sched
             .threads
-            .process_idx_of(percpu::current_thread())
-            .expect("the current thread should always have a valid TCB set up");
-        f(&mut sched.process_blocks.0[process_idx as usize]
-            .as_mut()
-            .unwrap()
+            .process_handle_of(percpu::current_thread())
+            .expect("the current thread must be a user thread with a valid PCB handle");
+        f(&mut sched
+            .processes
+            .pcbs
+            .get_mut(process)
+            .expect("the current thread's PCB should not be stale")
             .fds)
     }
 

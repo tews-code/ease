@@ -213,7 +213,7 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
         1 => thread::ExitReason::Fault,
         _ => panic!("unknown user thread exit reason"),
     };
-    sched::exit_user_thread(exit_reason);
+    sched::exit_current_user_thread(exit_reason);
 }
 /// Handles blocking system calls for user threads.
 /// Checks if the user thread should be exited and performs exit call.
@@ -239,7 +239,9 @@ pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
             );
             match result {
                 Ok(guard) => drop(guard),
-                Err(sync::Interrupted) => sched::exit_user_thread(thread::ExitReason::Fault),
+                Err(sync::Interrupted) => {
+                    sched::exit_current_user_thread(thread::ExitReason::Fault)
+                }
             }
             // Return the key in the frame's value field
             frame.a0 = 0;
@@ -262,7 +264,7 @@ pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
                 }
                 // Err(Interrupted): fall out of the scope, dropping _guard.
             }
-            sched::exit_user_thread(thread::ExitReason::Fault);
+            sched::exit_current_user_thread(thread::ExitReason::Fault);
         }
         _ => panic!("unexpected blocking syscall: {}", syscall),
     }

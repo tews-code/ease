@@ -4,6 +4,7 @@ use crate::arch::{context, umode};
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::ipi;
 use crate::kernel::percpu;
+use crate::kernel::sched::process::SpawnError;
 use crate::kernel::sync::IrqSpinLockGuard;
 use crate::kernel::timer;
 
@@ -77,7 +78,7 @@ impl Scheduler {
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_user_thread(
         &self,
-        process: &process::Handle,
+        process: process::Handle,
         entry: userloader::UserEntry,
         priority: u8,
         kernel_stack_order: Order,
@@ -93,9 +94,11 @@ impl Scheduler {
         // Now lock the scheduler
         let mut sched = self.sched.lock();
         // We should have a process control block already set up
-        let Some(pcb) = sched.process_blocks.0[process.idx]
-            .as_ref()
-            .filter(|pcb| pcb.pid == process.pid)
+        // and it should not already be in the process of being torn down
+        let Some(pcb) = sched
+            .processes
+            .pcbs
+            .get(process)
             .filter(|pcb| pcb.teardown_thread.is_none())
         else {
             drop(sched);
@@ -122,17 +125,20 @@ impl Scheduler {
                 user: Some(thread::UserContext {
                     stack: user_stack,
                     entry,
-                    process_idx: process.idx as u8,
+                    process,
                 }),
             },
         )?;
         // Increment this process's thread count
-        if sched.process_blocks.0[process.idx]
-            .as_mut()
+        if sched
+            .processes
+            .pcbs
+            .get_mut(process)
             .expect("still holding the lock and verified this is Some above")
             .add_thread_count()
             .is_err()
         {
+            // Too many threads requested, need to exit
             sched.threads.release(thread_handle);
             drop(sched);
             return None;
@@ -158,13 +164,14 @@ impl Scheduler {
         qos: Qos,
         affinity: Option<u8>,
     ) -> Result<process::Handle, process::SpawnError> {
+        // Load the program before locking; wasteful but safe if there aren't sufficient process resources
         let userloader::LoadedImage {
             user_mem_map,
             entry,
             entry_ra,
         } = loaded_image;
-        let mut pcb = process::ControlBlock::new(name, user_mem_map, entry_ra);
-        // Allocate stacks before locking
+        // Allocate stacks before locking; this is wasteful if there aren't enough other resources
+        // but we don't want to do this under the scheduler lock
         let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
                 .ok_or(process::SpawnError::NotEnoughMemory)?;
@@ -173,49 +180,53 @@ impl Scheduler {
                 .ok_or(process::SpawnError::NotEnoughMemory)?;
         // Take the lock
         let mut sched = self.sched.lock();
-        // Get a process slot
-        let user_stack_top = user_stack.top();
+        // Start with the process control block as we need the handle for the thread
+        let process = sched
+            .processes
+            .pcbs
+            .add(process::ControlBlock::new(name, user_mem_map, entry_ra))
+            .ok_or(SpawnError::NotEnoughProcessSlots)?;
+        // Create the thread
         let user_stack_base = user_stack.base();
-        let pcb_idx = sched
-            .process_blocks
-            .find_process_slot()
-            .ok_or(process::SpawnError::TooManyProcesses)?;
-        let thread_handle = sched
-            .threads
-            .acquire(
-                |kernel_stack| unsafe {
-                    umode::init_stack_for_user_thread(
-                        kernel_stack,
-                        user_stack_base,
-                        user_stack_top,
-                        entry,
-                        entry_ra,
-                    )
-                },
-                thread::ControlBlockSpec {
+        let user_stack_top = user_stack.top();
+        let Some(thread) = sched.threads.acquire(
+            |kernel_stack| unsafe {
+                umode::init_stack_for_user_thread(
                     kernel_stack,
-                    qos,
-                    priority,
-                    affinity,
-                    user: Some(thread::UserContext {
-                        stack: user_stack,
-                        entry,
-                        process_idx: pcb_idx as u8,
-                    }),
-                },
-            )
-            .ok_or(process::SpawnError::NotEnoughThreads)?;
+                    user_stack_base,
+                    user_stack_top,
+                    entry,
+                    entry_ra,
+                )
+            },
+            thread::ControlBlockSpec {
+                kernel_stack,
+                qos,
+                priority,
+                affinity,
+                user: Some(thread::UserContext {
+                    stack: user_stack,
+                    entry,
+                    process,
+                }),
+            },
+        ) else {
+            // Not enough thread slots, need to remove the process and return
+            sched.processes.pcbs.take(process);
+            return Err(SpawnError::NotEnoughThreadSlots);
+        };
         // Clear all stale flags
-        self.clear_thread_flags(thread_handle);
-        // Install
+        self.clear_thread_flags(thread);
+        // Update the process control block with the thread count and file descriptor
+        let pcb = sched
+            .processes
+            .pcbs
+            .get_mut(process)
+            .expect("just installed and still hold the lock");
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
-        // Set up file descriptor table
         pcb.fds.new_process();
-        let process_handle = sched
-            .process_blocks
-            .install_process_control_block(pcb_idx, pcb);
         self.finish_spawn(sched, affinity);
-        Ok(process_handle)
+        Ok(process)
     }
 }

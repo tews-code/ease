@@ -195,7 +195,7 @@ pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
     match resume_context.work {
         Work::Preempt => sched::schedule(),
         Work::Syscall(syscall) => umode::user_thread_block(frame, syscall),
-        Work::Exit(reason) => sched::exit_user_thread(reason),
+        Work::Exit(reason) => sched::exit_current_user_thread(reason),
     }
     // Put the resume context into the frame
     frame.sp = resume_context.sp;

@@ -2,33 +2,29 @@
 //!
 //! Ease uses kernel scheduling for threads within a process
 
-use core::sync::atomic::{AtomicU32, Ordering};
-
 use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
 use super::userloader;
 use super::usermem;
-use crate::kernel::collection::StackVec;
+use crate::kernel::collection::{Arena, StackVec};
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
 use crate::kernel::sched;
 use crate::kernel::sync::IrqSpinLockGuard;
 
-pub(crate) const MAX: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
-const THREADS_PER_PROC_MAX: u8 = 6;
-
-static PID_COUNTER: AtomicU32 = AtomicU32::new(0);
+pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
+const MAX_THREADS_PER_PROC: u8 = 6;
 
 /// Process spawn errors
 #[derive(Debug)]
 pub(crate) enum SpawnError {
     Load(userloader::Error),
     NotEnoughMemory,
-    NotEnoughThreads,
+    NotEnoughThreadSlots,
+    NotEnoughProcessSlots,
     NotFound,
-    TooManyProcesses,
 }
 
 impl From<userloader::Error> for SpawnError {
@@ -36,17 +32,11 @@ impl From<userloader::Error> for SpawnError {
         SpawnError::Load(value)
     }
 }
-
-pub(crate) struct Handle {
-    pub(super) pid: u32,
-    pub(super) idx: usize,
-}
-
+/// The process control block
 pub(crate) struct ControlBlock {
-    pub(super) pid: u32,
     _name: &'static str,
     pub(super) mem_map: usermem::Map,
-    pub(crate) fds: fd::Table,
+    pub(super) fds: fd::Table,
     thread_count: u8,
     pub(super) entry_ra: usize, // Inserted into the 'ra' register slot in the forged trap return
     pub(super) teardown_thread: Option<thread::Handle>, // Handle of the thread that performs the resource release for the entire process
@@ -55,7 +45,6 @@ pub(crate) struct ControlBlock {
 impl ControlBlock {
     pub(super) fn new(_name: &'static str, mem_map: usermem::Map, entry_ra: usize) -> Self {
         Self {
-            pid: PID_COUNTER.fetch_add(1, Ordering::Relaxed),
             _name,
             mem_map,
             fds: fd::Table::new(),
@@ -64,37 +53,37 @@ impl ControlBlock {
             teardown_thread: None,
         }
     }
-
-    // Get the thread count
+    /// Get the thread count of this process.
     pub(super) fn thread_count(&self) -> u8 {
         self.thread_count
     }
-
-    // Adds to the thread count and returns the new value if not above the cap
-    //
-    // Errors if the process can't have any more threads
-    pub(super) fn add_thread_count(&mut self) -> Result<u8, ()> {
-        if self.thread_count < THREADS_PER_PROC_MAX {
+    /// Adds to the thread count and returns the new value if not above the cap
+    ///
+    /// Errors if the process can't have any more threads
+    pub(super) fn add_thread_count(&mut self) -> Result<u8, SpawnError> {
+        if self.thread_count < MAX_THREADS_PER_PROC {
             self.thread_count += 1;
             Ok(self.thread_count)
         } else {
-            Err(())
+            Err(SpawnError::NotEnoughThreadSlots)
         }
     }
-
-    // Decrements the process thread count, returns new count.
+    /// Decrements the process thread count, returns new count.
+    ///
+    /// # Panics
+    /// Panics if there are zero threads left
     fn dec_thread_count(&mut self) -> u8 {
         assert!(
             self.thread_count > 0,
-            "process has zero threads so cannot remove another"
+            "releasing a thread from a process with zero threads"
         );
         self.thread_count -= 1;
         self.thread_count
     }
-
-    // Sets the teardown thread
-    //
-    // Returns `true` on success or `false` if the teardown thread is already set
+    /// Sets the process teardown thread. This thread takes responsbility for
+    /// releasing any shared process resource. There can be only one.
+    ///
+    /// Returns `true` on success or `false` if the teardown thread is already set
     pub(super) fn set_teardown_thread(&mut self, handle: thread::Handle) -> bool {
         if self.teardown_thread.is_none() {
             self.teardown_thread = Some(handle);
@@ -105,81 +94,60 @@ impl ControlBlock {
     }
 }
 
-pub(super) struct Procs(pub(super) [Option<ControlBlock>; MAX]);
-
-impl Procs {
-    pub(super) fn find_process_slot(&self) -> Option<usize> {
-        self.0.iter().position(|pcb| pcb.is_none())
-    }
-    /// Installs a new process control block `pcb` into a slot at index `idx`
-    ///
-    /// The existing slot is always empty
-    pub(super) fn install_process_control_block(
-        &mut self,
-        idx: usize,
-        pcb: ControlBlock,
-    ) -> Handle {
-        let pid = pcb.pid;
-        assert!(self.0[idx].is_none());
-        self.0[idx] = Some(pcb);
-        Handle { pid, idx }
-    }
+pub(super) struct Processes {
+    pub(super) pcbs: Arena<ControlBlock, MAX_COUNT>,
 }
+
+/// Alias to simplify the process handle definition
+pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
 
 impl SchedInner {
     /// Claim the file descriptor table of a process from the last (cleanup) thread
     ///
     /// Returns None if another thread has not yet released its resources.
     /// # Panics #
-    /// Panics if called on a kernel thread
+    /// Panics if the thread handle is stale.
     pub(super) fn claim_fds(
         &mut self,
-        process_idx: u8,
-        thread_handle: thread::Handle,
+        process: Handle,
+        thread: thread::Handle,
     ) -> Option<[Option<fd::Kind>; fd::MAX]> {
         // Set this thread to no longer use resources
         self.threads
             .tcbs
-            .get_mut(thread_handle)
+            .get_mut(thread)
             .expect("current thread must have a valid TCB set up")
             .resources_released = true;
-        if !self.threads.any_resource_holders(process_idx) {
-            Some(
-                self.process_blocks.0[process_idx as usize]
-                    .as_mut()
-                    .unwrap()
-                    .fds
-                    .take_all(),
-            )
+        // Take the file descriptors from this process
+        if !self.threads.any_resource_holders(process) {
+            Some(self.processes.pcbs.get_mut(process).unwrap().fds.take_all())
         } else {
             None
         }
     }
-    /// Attempt to claim the resource freeing role as the first exiting thread in a faulting process.
-    /// This method does not check the validitiy of the given thread index
+    /// Attempt to claim the resource freeing role as a thread in a faulting process.
+    /// This method does not check the validitiy of the given thread handle.
     ///
     /// Returns `true` if the role was claimed, otherwise `false` if the role has already been claimed
     /// by another thread.
     ///
     /// # Panics #
-    /// Panics if:
-    /// - the given process_idx >= MAX
-    /// - the process_idx doesn't correspond to a valid PCB
-    pub(super) fn claim_teardown_role(&mut self, process_idx: u8, handle: thread::Handle) -> bool {
-        self.process_blocks.0[process_idx as usize]
-            .as_mut()
+    /// Panics if the process handle is stale or invalid.
+    pub(super) fn claim_teardown_role(&mut self, process: Handle, thread: thread::Handle) -> bool {
+        self.processes
+            .pcbs
+            .get_mut(process)
             .expect("should be a valid process")
-            .set_teardown_thread(handle)
+            .set_teardown_thread(thread)
     }
     /// Get the current thread count of the given process index
     ///
     /// # Panics #
-    /// Panics if:
-    /// - the given process_idx >= MAX
-    /// - the process_idx doesn't correspond to a valid PCB
-    pub(super) fn thread_count(&self, process_idx: u8) -> u8 {
-        self.process_blocks.0[process_idx as usize]
-            .as_ref()
+    /// Panics if the process handle is stale or invalid
+    pub(super) fn thread_count(&self, process: Handle) -> u8 {
+        self.processes
+            .pcbs
+            .get(process)
             .expect("process index must index a valid PCB slot")
             .thread_count()
     }
@@ -192,41 +160,35 @@ impl Scheduler {
     ///
     /// # Panics #
     /// Panics if
-    /// - the process id >= MAX
-    /// - process id does not correspond to a valid PCB
-    /// - decrementing the number of processes when there are none left
+    /// - decrementing the number of threads when there are none left
     /// - the file descriptor table is not empty
     pub(super) fn release_process_thread(
         &self,
         sched: &mut IrqSpinLockGuard<SchedInner>,
-        process_idx: u8,
-        handle: thread::Handle,
+        process: Handle,
+        thread: thread::Handle,
     ) {
-        sched::clear_wakeup_signal(handle);
-        let thread_count = sched.process_blocks.0[process_idx as usize]
-            .as_mut()
-            .expect("should only be decrementing thread count on a valid process control block")
-            .dec_thread_count();
-        // Check if there is a declared teardown claimant and wake them in case they need to get going - but skip ourselves
-        if let Some(teardown_thread_handle) = sched.process_blocks.0[process_idx as usize]
-            .as_ref()
-            .and_then(|pcb| pcb.teardown_thread)
-            && teardown_thread_handle != handle
+        sched::clear_wakeup_signal(thread);
+        let process_control_block = sched
+            .processes
+            .pcbs
+            .get_mut(process)
+            .expect("PCB should be valid for this process handle");
+        let new_thread_count = process_control_block.dec_thread_count();
+        // Check if there is a declared teardown claimant and wake them in case they need to get going - but skip if it happens to be the given thread
+        if let Some(teardown_thread) = process_control_block.teardown_thread
+            && teardown_thread != thread
         {
-            sched::set_needs_wakeup(teardown_thread_handle);
+            sched::set_needs_wakeup(teardown_thread);
             // NOTE - we do not call percpu::set_needs_reschedule as we can happily wait on the next switch
         }
-        if thread_count == 0 {
+        if new_thread_count == 0 {
             // Make sure the file descriptors have been cleaned up before emptying the slot
             assert!(
-                sched.process_blocks.0[process_idx as usize]
-                    .as_mut()
-                    .unwrap()
-                    .fds
-                    .is_empty(),
+                process_control_block.fds.is_empty(),
                 "process control block has no threads but still has open file descriptors"
             );
-            sched.process_blocks.0[process_idx as usize] = None;
+            let _ = sched.processes.pcbs.take(process);
         }
     }
     /// Evict sibling threads for a faulting multi-thread user process
@@ -234,33 +196,29 @@ impl Scheduler {
         &self,
         sched: &mut IrqSpinLockGuard<SchedInner>,
         exit_reason: thread::ExitReason,
-        process_idx: u8,
-        surviving_thread_handle: thread::Handle,
+        process: Handle,
+        surviving_thread: thread::Handle,
     ) {
-        let mut sibling_handles: StackVec<thread::Handle, { thread::MAX_COUNT - 1 }> =
-            StackVec::new();
-        for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
-            if handle == surviving_thread_handle {
+        let mut sibling_threads: StackVec<thread::Handle, { thread::MAX_COUNT - 3 }> =
+            StackVec::new(); // Exclude 2 idle threads and ourselves = 3 threads
+        for (thread, tcb) in sched.threads.tcbs.iter_with_handles() {
+            if thread == surviving_thread {
                 continue;
             }
-            if tcb
-                .user
-                .as_ref()
-                .is_some_and(|uc| uc.process_idx == process_idx)
-            {
-                sibling_handles
-                    .push(handle)
+            if tcb.user.as_ref().is_some_and(|uc| uc.process == process) {
+                sibling_threads
+                    .push(thread)
                     .expect("should be enough space on the StackVec");
             }
         }
-        for handle in sibling_handles.iter() {
+        for thread in sibling_threads.iter() {
             let mut release = false;
-            match sched.threads.tcbs.get(*handle).unwrap().state {
+            match sched.threads.tcbs.get(*thread).unwrap().state {
                 thread::State::Blocked | thread::State::BlockedUntil(_) => {
                     // Set marked for exit
-                    self.needs_user_exit.set(handle.idx());
+                    self.needs_user_exit.set(thread.idx());
                     // Now set to Ready
-                    match sched.threads.make_blocked_ready(*handle) {
+                    match sched.threads.make_blocked_ready(*thread) {
                         thread::UnblockedResult::NotBlocked | thread::UnblockedResult::Deferred => {
                             panic!("did not unpark blocked user thread")
                         }
@@ -280,43 +238,42 @@ impl Scheduler {
                 thread::State::Ready | thread::State::Sleeping(_) => release = true,
                 thread::State::Running => {
                     // If it is running, it must be on the other HART so send an IPI
-                    self.needs_user_exit.set(handle.idx());
+                    self.needs_user_exit.set(thread.idx());
                     ipi::send(ipi::RESCHEDULE);
                 }
                 thread::State::Switching(_) => {
-                    sched.threads.tcbs.get_mut(*handle).unwrap().state =
+                    sched.threads.tcbs.get_mut(*thread).unwrap().state =
                         thread::State::Switching(thread::PostSwitch::Dead(exit_reason))
                 }
             }
             if release {
-                sched.threads.release(*handle);
-                self.release_process_thread(sched, process_idx, *handle)
+                sched.threads.release(*thread);
+                self.release_process_thread(sched, process, *thread)
             }
         }
     }
-    /// Exits a user thread. If the thread is faulting it will attempt to take responsibility
+    /// Exits the current user thread. If the thread is faulting it will attempt to take responsibility
     /// for releasing process resources. If it is a normal exit the last thread in the process will
     /// do the same.
     ///
     /// # Panics #
-    /// Panics if
-    /// - called on a kernel thread
-    pub(super) fn exit_user_thread(&self, reason: thread::ExitReason) -> ! {
+    /// Panics if called on a kernel thread
+    pub(super) fn exit_current_user_thread(&self, reason: thread::ExitReason) -> ! {
         // Set multiple 100's of milliseconds as some tests show a long tail (over 200ms) of threads waiting to be scheduled under heavy load
         // Also set to < 2_000 which is the individual test timeout
         const CLAIM_ROLE_TIMEOUT_MS: u64 = 1_500;
 
-        let current_thread_handle = percpu::current_thread();
+        let current_thread = percpu::current_thread();
         let mut sched = self.sched.lock();
-        let process_idx = sched
+        let process = sched
             .threads
-            .process_idx_of(current_thread_handle)
+            .process_handle_of(current_thread)
             .expect("the current thread must be a user thread which is part of a process");
         // Set this thread to be the teardown thread for the entire process, if that role isn't already taken
         let claimed_role = reason == thread::ExitReason::Fault
-            && sched.claim_teardown_role(process_idx, current_thread_handle);
+            && sched.claim_teardown_role(process, current_thread);
         if claimed_role {
-            self.evict_sibling_threads(&mut sched, reason, process_idx, current_thread_handle);
+            self.evict_sibling_threads(&mut sched, reason, process, current_thread);
         }
         drop(sched);
         // If I am the teardown thread, firstly loop waiting for other threads to finish their exits
@@ -325,14 +282,14 @@ impl Scheduler {
             let deadline = Deadline::after_ms(CLAIM_ROLE_TIMEOUT_MS, 0);
             loop {
                 let mut sched = self.sched.lock();
-                if sched.thread_count(process_idx) == 1 {
+                if sched.thread_count(process) == 1 {
                     break;
                 }
                 if deadline.has_passed() {
                     dprintln!(
-                        "User thread {:?} timed out waiting for siblings to exit for process {}",
-                        current_thread_handle,
-                        process_idx
+                        "User thread {:?} timed out waiting for siblings to exit for process {:?}",
+                        current_thread,
+                        process
                     );
                     dprintln!("TCB Table:");
                     for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
@@ -345,7 +302,7 @@ impl Scheduler {
                 sched
                     .threads
                     .tcbs
-                    .get_mut(current_thread_handle)
+                    .get_mut(current_thread)
                     .expect("current thread must have a valid TCB")
                     .state = thread::State::BlockedUntil(deadline);
                 drop(sched);
@@ -353,10 +310,7 @@ impl Scheduler {
             }
         }
         // Mark this thread as no longer using resources
-        let fds = self
-            .sched
-            .lock()
-            .claim_fds(process_idx, current_thread_handle);
+        let fds = self.sched.lock().claim_fds(process, current_thread);
         if let Some(fds) = fds {
             fd::Table::close_all(fds);
         }
