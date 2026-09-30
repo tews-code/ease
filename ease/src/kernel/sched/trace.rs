@@ -125,7 +125,7 @@ unsafe fn stash_this_hart_percpu(tp: *mut TracePoint) {
     // Safety: Caller has provided valid pointer to a TracePoint
     unsafe {
         (*tp).per_cpu[hart].idle_thread_handle = Some(percpu::idle_thread().unwrap());
-        (*tp).per_cpu[hart].current_thread_handle = Some(percpu::current_thread().unwrap());
+        (*tp).per_cpu[hart].current_thread_handle = Some(percpu::current_thread());
         (*tp).per_cpu[hart].switching_from_thread_handle = Some(percpu::switching_from_thread());
         (*tp).per_cpu[hart].needs_reschedule = percpu::needs_reschedule();
     }
@@ -140,7 +140,7 @@ unsafe fn stash_percpu(tp: *mut TracePoint, sched: &SchedInner) {
     unsafe {
         stash_this_hart_percpu(tp);
         (*tp).per_cpu[other].idle_thread_handle = percpu::other_idle_thread(sched);
-        (*tp).per_cpu[other].current_thread_handle = percpu::other_current_thread(sched);
+        (*tp).per_cpu[other].current_thread_handle = percpu::try_other_current_thread(sched);
         (*tp).per_cpu[other].switching_from_thread_handle =
             Some(percpu::other_switching_from_thread(sched));
         (*tp).per_cpu[other].needs_reschedule = percpu::other_needs_reschedule();
@@ -237,10 +237,12 @@ impl SchedInner {
         for &hart in &[this, this ^ 1] {
             let cur_handle = if hart == this {
                 percpu::current_thread()
+            } else if let Some(handle) = percpu::try_other_current_thread(self) {
+                handle
             } else {
-                percpu::other_current_thread(self)
-            }
-            .unwrap();
+                // The other hart has not bootstrapped yet, so it has no runner to blame
+                continue;
+            };
             let runner = &self
                 .threads
                 .tcbs

@@ -79,7 +79,7 @@ impl SchedInner {
         thread::Handle,
     )> {
         // Get current handle
-        let curr_handle = percpu::current_thread().expect("current thread should be installed");
+        let curr_handle = percpu::current_thread();
         let this_hart = crate::arch::hart_id() as u8;
         let mut best_handle = None;
         let mut best_pass = u64::MAX;
@@ -88,9 +88,8 @@ impl SchedInner {
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
             // Don't pick the thread the OTHER hart is currently running (that
             // would run it on two harts → corruption). Only applies when the
-            // other hart is online: during boot it isn't, and its (zeroed)
-            // current_thread_handle would otherwise wrongly exclude slot 0.
-            let not_stealing = percpu::other_current_thread(self).is_none_or(|h| h != handle);
+            // other hart is online: during boot it isn't, and it is `None`.
+            let not_stealing = percpu::try_other_current_thread(self).is_none_or(|h| h != handle);
             let pri_ok = tcb.priority != PRIORITY_MIN;
             if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                 best_pass = tcb.pass;
@@ -121,8 +120,7 @@ impl SchedInner {
         &mut thread::ControlBlock,
         thread::Handle,
     )> {
-        // Get current handle
-        let curr_handle = percpu::current_thread().expect("current thread should be installed");
+        let curr_handle = percpu::current_thread();
         let this_hart = hart_id() as u8;
         let mut best_handle = None;
         let mut best_pass = u64::MAX;
@@ -138,9 +136,8 @@ impl SchedInner {
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
             // Don't pick the thread the OTHER hart is currently running (that
             // would run it on two harts → corruption). Only applies when the
-            // other hart is online: during boot it isn't, and its (zeroed)
-            // current_thread_idx would otherwise wrongly exclude slot 0.
-            let not_stealing = percpu::other_current_thread(self).is_none_or(|h| h != handle);
+            // other hart is online: during boot it isn't, and it is `None`
+            let not_stealing = percpu::try_other_current_thread(self).is_none_or(|h| h != handle);
             let pri_ok = tcb.priority != PRIORITY_MIN;
             let pass_gap_greater_than_hysteresis = (handle == curr_handle)
                 || (tcb.pass + (HYSTERESIS_CYCLES * tcb.priority as u64) < current_pass);
@@ -304,8 +301,8 @@ impl Scheduler {
     /// Returns a count of the ready threads
     pub(super) fn wake_sleeping_threads(&self, sched: &mut IrqSpinLockGuard<SchedInner>) -> bool {
         let now = timer::elapsed();
-        let current_thread = percpu::current_thread().expect("current thread must be installed");
-        let other_current_thread = percpu::other_current_thread(sched); // Note - could be `None` if other hart not yet installed
+        let current_thread = percpu::current_thread();
+        let other_current_thread = percpu::try_other_current_thread(sched); // Note - could be `None` if other hart not yet installed
         let mut pass_baseline: Option<u64> = None; // This will be calculated by the Threads wake_if_due method if needed
         let threads_mut = &mut sched.threads;
         for idx in 0..thread::MAX_COUNT {
@@ -345,8 +342,7 @@ impl Scheduler {
         let switched_from_thread = percpu::take_switching_from_thread(&sched)
             .expect("should have a Switching thread in post switch cleanup");
         debug_assert!(
-            switched_from_thread
-                != percpu::current_thread().expect("current thread must be installed"),
+            switched_from_thread != percpu::current_thread(),
             "post_switch_cleanup marking working on the live thread control block: idx={switched_from_thread:?}"
         );
         // If the thread is dead then clean up and end the routine
@@ -412,7 +408,7 @@ impl Scheduler {
             thread::State::Switching(thread::PostSwitch::Sleeping(d)) => thread::State::Sleeping(d),
             _ => panic!(
                 "post switch switched_from={switched_from_thread:?} current={:?} state={:?}",
-                percpu::current_thread().expect("current thread should be installed"),
+                percpu::current_thread(),
                 tcb.state
             ),
         };
@@ -446,9 +442,13 @@ impl Scheduler {
                     .affinity
                     .is_none_or(|hart| hart as usize != crate::arch::hart_id())
             {
-                let other_handle = percpu::other_current_thread(&sched)
-                    .expect("current thread should be installed");
-                let other = sched.threads.tcbs.get(other_handle).unwrap();
+                let other_handle = percpu::try_other_current_thread(&sched)
+                    .expect("other hart should have current installed");
+                let other = sched
+                    .threads
+                    .tcbs
+                    .get(other_handle)
+                    .expect("current thread handle should not be stale");
                 let now = timer::elapsed();
                 let other_effective_pass = other.pass.saturating_add(
                     now.saturating_sub(other.last_started_cycles)
@@ -482,8 +482,7 @@ impl Scheduler {
             // across the switch and block other harts/threads from rescheduling.
             let mut sched = self.sched.lock();
             let now_cycles = timer::elapsed();
-            let current_thread =
-                percpu::current_thread().expect("current thread should be installed");
+            let current_thread = percpu::current_thread();
             {
                 let curr_tcb = sched
                     .threads
@@ -606,8 +605,7 @@ impl Scheduler {
             with_interrupts_disabled(|_cs| {
                 let mut sched = self.sched.lock();
                 let now_cycles = timer::elapsed();
-                let curr_handle =
-                    percpu::current_thread().expect("current thread should be installed");
+                let curr_handle = percpu::current_thread();
                 let curr_tcb = sched
                     .threads
                     .tcbs
@@ -696,9 +694,7 @@ impl Scheduler {
     #[allow(dead_code)] // used only by test probes
     pub(super) fn current_wake_overshoot(&self) -> u64 {
         let sched = self.sched.lock();
-        sched.wake_overshoot[percpu::current_thread()
-            .expect("current thread should be installed")
-            .idx()]
+        sched.wake_overshoot[percpu::current_thread().idx()]
     }
 
     // THREAD EXIT
@@ -715,7 +711,7 @@ impl Scheduler {
             percpu::idle_thread_handle is {:?}
             {:?}",
             hart_id(),
-            percpu::current_thread().expect("current thread should be installed"),
+            percpu::current_thread(),
             percpu::idle_thread().expect("idle thread should be installed"),
             self.sched.lock().threads
         );
@@ -838,33 +834,21 @@ impl Scheduler {
     /// Set current thread to blocked state without rescheduling
     pub fn set_self_blocked(&self) {
         let mut sched = self.sched.lock();
-        if let Some(tcb) = sched
-            .threads
-            .tcbs
-            .get_mut(percpu::current_thread().expect("current thread should be installed"))
-        {
+        if let Some(tcb) = sched.threads.tcbs.get_mut(percpu::current_thread()) {
             tcb.state = thread::State::Blocked;
         }
     }
     /// Set current thread to blocked state without rescheduling with a wake up deadline
     pub fn set_self_blocked_until(&self, deadline: Deadline) {
         let mut sched = self.sched.lock();
-        if let Some(tcb) = sched
-            .threads
-            .tcbs
-            .get_mut(percpu::current_thread().expect("current thread should be installed"))
-        {
+        if let Some(tcb) = sched.threads.tcbs.get_mut(percpu::current_thread()) {
             tcb.state = thread::State::BlockedUntil(deadline);
         }
     }
     /// Set current thread to Running state without rescheduling
     pub fn set_self_running(&self) {
         let mut sched = self.sched.lock();
-        if let Some(tcb) = sched
-            .threads
-            .tcbs
-            .get_mut(percpu::current_thread().expect("current thread should be installed"))
-        {
+        if let Some(tcb) = sched.threads.tcbs.get_mut(percpu::current_thread()) {
             tcb.state = thread::State::Running;
         }
     }
@@ -888,7 +872,7 @@ impl Scheduler {
         let mut sched = self.sched.lock();
         let process_idx = sched
             .threads
-            .process_idx_of(percpu::current_thread().expect("current thread should be installed"))
+            .process_idx_of(percpu::current_thread())
             .expect("the current thread should always have a valid TCB set up");
         f(&mut sched.process_blocks.0[process_idx as usize]
             .as_mut()

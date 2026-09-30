@@ -141,7 +141,7 @@ impl<T> Mutex<T> {
         }
         // Now block
         // Enqueue self at the head of the waiter list
-        let curr_handle = percpu::current_thread().expect("current thread should be installed");
+        let curr_handle = percpu::current_thread();
         crate::kernel::sched::set_next_waiter(curr_handle, *head);
         *head = Some(curr_handle);
 

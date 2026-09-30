@@ -97,7 +97,7 @@ fn reschedule_parts() {
     let se = per_call(RUNS, M, || {
         let mut sched = super::SCHEDULER.sched.lock();
         let now = timer::elapsed();
-        let tcb = sched.threads.tcbs.get_mut(handle.unwrap()).unwrap();
+        let tcb = sched.threads.tcbs.get_mut(handle).unwrap();
         core::hint::black_box(tcb.slice_ended(now));
     });
     println!("  lock + elapsed + slice_ended: wall min={se:>6} cycles/call");
@@ -133,7 +133,8 @@ fn reschedule_parts() {
         for (handle, tcb) in sched.threads.tcbs.iter_with_handles() {
             let candidate = tcb.state == thread::State::Ready;
             let affinity_ok = tcb.affinity.is_none_or(|h| h == this_hart);
-            let not_stealing = Some(handle) != crate::kernel::percpu::other_current_thread(&sched);
+            let not_stealing =
+                Some(handle) != crate::kernel::percpu::try_other_current_thread(&sched);
             let pri_ok = tcb.priority != super::stride::PRIORITY_MIN;
             if candidate && not_stealing && affinity_ok && pri_ok && tcb.pass < best_pass {
                 best_pass = tcb.pass;

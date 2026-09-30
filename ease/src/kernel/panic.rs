@@ -2,15 +2,23 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::arch::hart_id;
 use crate::arch::interrupts::wait_for_interrupt;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
-use crate::kernel::stack::check_canary;
+use crate::kernel::stack;
 #[cfg(test)]
 use crate::qemu;
 
 pub(super) static STOP: AtomicBool = AtomicBool::new(false);
 pub(super) static PARKED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" {
+    static __hart0_idle_stack_base: u8;
+    static __hart1_idle_stack_base: u8;
+    static __hart0_irq_stack_base: u8;
+    static __hart1_irq_stack_base: u8;
+}
 
 mod fb_panic_writer {
     unsafe extern "C" {
@@ -112,61 +120,98 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             counter += 1;
             core::hint::spin_loop();
         }
-        // Now go ahead with panic info dump
-        dprintln!("PANIC: {info}");
-        // Check that the stack canary has been set up
-        let kernel_stack_status = percpu::current_kernel_stack_base()
-            .map(|base| unsafe { check_canary(base.addr().into()) });
-        dprint!("Kernel stack canary: ");
-        if let Some(status) = kernel_stack_status {
-            match status {
-                Ok(_) => dprintln!("intact"),
-                Err(b) => dprintln!("corrupted: read {b:x}"),
-            }
-        } else {
-            dprintln!("None");
-        }
-        let user_stack_status = percpu::current_user_stack_base()
-            .map(|base| unsafe { check_canary(base.addr().into()) });
-        if let Some(status) = user_stack_status {
-            dprint!("User stack canary: ");
-            match status {
-                Ok(_) => dprintln!("intact"),
-                Err(b) => dprintln!("corrupted: read {b:x}"),
-            }
-        };
-
-        #[cfg(feature = "paint-stack")]
-        crate::kernel::stack::print_irq_idle_stacks();
 
         use core::fmt::Write;
 
         let mut console = DirectConsoleWriter { x: 0, y: 0 };
+
+        // Now go ahead with panic info dump
+        dprintln!("PANIC: {info}");
         let _ = write!(console, "PANIC: {info}");
-        let _ = write!(console, "Kernel stack canary: ");
-        if let Some(status) = kernel_stack_status {
-            match status {
+
+        // Check the stack canaries
+        let this_hart_idle_stack_base = match hart_id() {
+            0 => &raw const __hart0_idle_stack_base,
+            1 => &raw const __hart1_idle_stack_base,
+            _ => unreachable!("only have two harts"),
+        };
+        dprint!("This HART's idle stack canary: ");
+        let _ = write!(console, "This HART's idle stack canary: ");
+        // Safety: The idle/boot stack base is set by the linker script to be aligned and is valid for reads
+        let idle_stack_status = unsafe { stack::check_canary(this_hart_idle_stack_base.addr()) };
+        match idle_stack_status {
+            Ok(_) => {
+                dprintln!("intact");
+                let _ = write!(console, "intact");
+            }
+            Err(b) => {
+                dprintln!("corrupted: read {b:x}");
+                let _ = write!(console, "corrupted: read {b:x}");
+            }
+        }
+        // Check the stack canaries
+        let this_hart_irq_stack_base = match hart_id() {
+            0 => &raw const __hart0_irq_stack_base,
+            1 => &raw const __hart1_irq_stack_base,
+            _ => unreachable!("only have two harts"),
+        };
+        dprint!("This HART's IRQ stack canary: ");
+        let _ = write!(console, "This HART's IRQ stack canary: ");
+        // Safety: The IRQ stack base is set by the linker script to be aligned and is valid for reads
+        let idle_stack_status = unsafe { stack::check_canary(this_hart_irq_stack_base.addr()) };
+        match idle_stack_status {
+            Ok(_) => {
+                dprintln!("intact");
+                let _ = write!(console, "intact");
+            }
+            Err(b) => {
+                dprintln!("corrupted: read {b:x}");
+                let _ = write!(console, "corrupted: read {b:x}");
+            }
+        }
+        if percpu::try_current_thread().is_some() {
+            // Check the stack canaries
+            dprint!("Kernel stack canary: ");
+            let _ = write!(console, "Kernel stack canary: ");
+            // Safety: The kernel stack base is set by the linker script or buddy to be aligned and valid for reads
+            let kernel_stack_status =
+                unsafe { stack::check_canary(percpu::current_kernel_stack_base().addr().into()) };
+            match kernel_stack_status {
                 Ok(_) => {
+                    dprintln!("intact");
                     let _ = write!(console, "intact");
                 }
                 Err(b) => {
+                    dprintln!("corrupted: read {b:x}");
                     let _ = write!(console, "corrupted: read {b:x}");
                 }
+            }
+            dprint!("User stack canary: ");
+            let _ = write!(console, "User stack canary: ");
+            if let Some(user_stack_status) = percpu::current_user_stack_base()
+                .map(|base| unsafe { stack::check_canary(base.addr().into()) })
+            {
+                match user_stack_status {
+                    Ok(_) => {
+                        dprintln!("intact");
+                        let _ = write!(console, "intact");
+                    }
+                    Err(b) => {
+                        dprintln!("corrupted: read {b:x}");
+                        let _ = write!(console, "corrupted: read {b:x}");
+                    }
+                }
+            } else {
+                dprintln!("Not a user thread");
+                let _ = write!(console, "Not a user thread");
             }
         } else {
-            let _ = write!(console, "None");
+            dprintln!("Current thread not installed");
+            let _ = write!(console, "Current thread not installed");
         }
-        if let Some(status) = user_stack_status {
-            let _ = write!(console, "User stack canary: ");
-            match status {
-                Ok(_) => {
-                    let _ = write!(console, "intact");
-                }
-                Err(b) => {
-                    let _ = write!(console, "corrupted: read {b:x}");
-                }
-            }
-        }
+
+        #[cfg(feature = "paint-stack")]
+        crate::kernel::stack::print_irq_idle_stacks();
     }
     // Dump the trace before any path that exits/loops, so it appears in
     // both the test build (which exit_failure()s below) and normal runs.

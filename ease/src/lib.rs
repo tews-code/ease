@@ -199,8 +199,8 @@ mod kernel {
         pub fn lock_released(_site: &'static core::panic::Location<'static>, _acquired: u64) {}
     }
     pub mod percpu {
-        pub fn current_thread() -> Option<super::sched::thread::Handle> {
-            Some(super::sched::thread::Handle { idx: 0 })
+        pub fn current_thread() -> super::sched::thread::Handle {
+            super::sched::thread::Handle { idx: 0 }
         }
 
         pub fn set_needs_reschedule() {}

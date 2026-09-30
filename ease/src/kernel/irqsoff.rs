@@ -331,7 +331,7 @@ const NO_THREAD: u8 = u8::MAX;
 /// bootstrap. (Before the arena migration this read the zero-filled percpu
 /// byte and silently reported thread 0.)
 fn current_thread() -> u8 {
-    percpu::current_thread().map_or(NO_THREAD, |h| h.idx() as u8)
+    percpu::try_current_thread().map_or(NO_THREAD, |h| h.idx() as u8)
 }
 
 /// Thread column: the slot index, or `-` for `NO_THREAD`. Honours the

@@ -122,20 +122,32 @@ pub(crate) fn other_idle_thread(_sched: &SchedInner) -> Option<thread::Handle> {
 /// Note also that the lock around SchedInner provides memory ordering.
 pub(crate) fn set_idle_thread(_sched: &SchedInner, handle: thread::Handle) {
     // Safety: can only be called with the scheduler lock held so
-    // no other hart writes it concurrently, so no data race
+    // no other hart reads it concurrently with this write, so no data race
     unsafe { *this_hart().idle_thread.get() = Some(handle) }
 }
 /// Get the current thread handle, or `None` before this hart's scheduler
 /// bootstrap has installed one.
-pub(crate) fn current_thread() -> Option<thread::Handle> {
+pub(crate) fn try_current_thread() -> Option<thread::Handle> {
     // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
     unsafe { *this_hart().current_thread.get() }.map(|c| c.handle)
+}
+/// Get the current thread handle.
+///
+/// # Panics
+/// Panics if the current thread has not yet been installed. Use [try_current_thread]
+/// to access if uncertain whether the thread has been installed or not.
+#[track_caller]
+pub(crate) fn current_thread() -> thread::Handle {
+    // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
+    unsafe { *this_hart().current_thread.get() }
+        .map(|c| c.handle)
+        .expect("current thread should be installed")
 }
 /// Returns the other HART's currently running thread handle if the scheduler has installed
 /// a current thread for that HART, otherwise returns `None`.
 ///
 /// Must only be called with the scheduler lock held to ensure no concurrent writes with the read
-pub(crate) fn other_current_thread(_sched: &SchedInner) -> Option<thread::Handle> {
+pub(crate) fn try_other_current_thread(_sched: &SchedInner) -> Option<thread::Handle> {
     // Safety: the scheduler lock ensures there are no concurrent writes
     unsafe { *that_hart().current_thread.get() }.map(|c| c.handle)
 }
@@ -183,20 +195,33 @@ pub(crate) unsafe fn set_current_thread_unchecked(
     unsafe { *this_hart().current_thread.get() = Some(current_thread) };
 }
 /// Get the current thread kernel stack base.
-/// Returns `None` if the current thread has not yet been installed (early init)
-pub(crate) fn current_kernel_stack_base() -> Option<NonNull<u8>> {
+///
+/// # Panics
+/// Panics if the current thread has not yet been installed
+#[track_caller]
+pub(crate) fn current_kernel_stack_base() -> NonNull<u8> {
     // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
-    unsafe { *this_hart().current_thread.get() }.map(|c| c.kernel_stack_base)
+    unsafe { *this_hart().current_thread.get() }
+        .map(|c| c.kernel_stack_base)
+        .expect("current thread should be installed")
 }
 /// Get the current thread kernel stack top
-/// Returns `None` if the current thread has not yet been installed (early init)
-pub(crate) fn current_kernel_stack_top() -> Option<NonNull<u8>> {
+///
+/// # Panics
+/// Panics if the current thread has not yet been installed
+#[track_caller]
+pub(crate) fn current_kernel_stack_top() -> NonNull<u8> {
     // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
-    unsafe { *this_hart().current_thread.get() }.map(|c| c.kernel_stack_top)
+    unsafe { *this_hart().current_thread.get() }
+        .map(|c| c.kernel_stack_top)
+        .expect("current thread should be installed")
 }
 /// Get the current thread user stack base.
-/// Returns `None` if the current thread has not yet been installed (early init) or
-/// if the current thread is not a user thread
+/// Returns `None` if the current thread is not a user thread.
+///
+/// # Panics
+/// Panics if the current thread is not installed.
+#[track_caller]
 pub(crate) fn current_user_stack_base() -> Option<NonNull<u8>> {
     // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
     unsafe { *this_hart().current_thread.get() }
@@ -204,10 +229,15 @@ pub(crate) fn current_user_stack_base() -> Option<NonNull<u8>> {
         .user_stack_base
 }
 /// Get the current thread QoS
-/// Returns `None` if the current thread has not yet been installed (early init)
-pub(crate) fn current_qos() -> Option<Qos> {
+///
+/// # Panics
+/// Panics if the current thread is not installed.
+#[track_caller]
+pub(crate) fn current_qos() -> Qos {
     // Safety: this is this hart's PerCpu instance; no other hart writes it concurrently, so no data race
-    unsafe { *this_hart().current_thread.get() }.map(|c| c.qos)
+    unsafe { *this_hart().current_thread.get() }
+        .map(|c| c.qos)
+        .expect("current thread should be installed")
 }
 /// Take the resume context details
 ///

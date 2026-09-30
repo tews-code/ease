@@ -60,8 +60,7 @@ impl Completion {
                 drop(inner);
                 return; // Early
             } else {
-                inner.waiter =
-                    Some(percpu::current_thread().expect("current thread should be installed"));
+                inner.waiter = Some(percpu::current_thread());
                 set_self_blocked();
                 drop(inner);
                 park_if_blocked();
@@ -84,8 +83,7 @@ impl Completion {
                 if deadline.has_passed() {
                     return Err(TimedOut);
                 } else {
-                    inner.waiter =
-                        Some(percpu::current_thread().expect("current thread should be installed"));
+                    inner.waiter = Some(percpu::current_thread());
                     sched::set_self_blocked_until(deadline);
                     drop(inner);
                     sched::park_if_blocked_until(deadline);
@@ -111,8 +109,7 @@ impl Completion {
                 return Ok(());
             }
             // We are (re)setting up the completion - it needs to know which thread is waiting
-            inner.waiter =
-                Some(percpu::current_thread().expect("current thread should be installed"));
+            inner.waiter = Some(percpu::current_thread());
             sched::set_self_blocked(); // Set the thread status to blocked (takes sched lock while holding the completion lock)
             drop(inner);
             sched::park_if_blocked(); // Reschedule the current thread to reach it's Blocked state. Takes sched lock, hence dropping inner first.

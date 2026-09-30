@@ -2306,10 +2306,10 @@ fn fault_kill_races_a_voluntary_exit() {
 fn spawn_user_refused_once_teardown_claimed() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    let claimed = super::SCHEDULER.sched.lock().claim_teardown_role(
-        handle.idx as u8,
-        crate::kernel::percpu::current_thread().expect("current thread should be installed"),
-    );
+    let claimed = super::SCHEDULER
+        .sched
+        .lock()
+        .claim_teardown_role(handle.idx as u8, crate::kernel::percpu::current_thread());
     assert!(claimed, "fresh process must have no teardown claimant");
     assert!(
         crate::kernel::sched::spawn_user(&handle, UserEntry::from_fn(crate::user::user_test))

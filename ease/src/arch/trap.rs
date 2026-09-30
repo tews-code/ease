@@ -148,10 +148,7 @@ impl Frame {
     pub(crate) fn set_up_for_divert_to_kernel(&mut self, mepc: usize) {
         // If we are diverting from u-mode to m-mode, then we need to swap in the kernel stack top as the sp
         if self.is_from_user() {
-            self.sp = percpu::current_kernel_stack_top()
-                .expect("current thread must be installed")
-                .addr()
-                .into()
+            self.sp = percpu::current_kernel_stack_top().addr().into()
         }
         // Set up frame for trampoline
         self.mepc = mepc;

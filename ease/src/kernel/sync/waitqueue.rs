@@ -108,8 +108,7 @@ impl WaitQueue {
         F: FnMut(&mut R) -> bool,
     {
         loop {
-            let current_handle =
-                percpu::current_thread().expect("current thread should be installed");
+            let current_handle = percpu::current_thread();
             // Take the wait queue lock to ensure next steps are never split by an interrupt
             let mut wait_queue = self.inner.lock();
             // First register this thread

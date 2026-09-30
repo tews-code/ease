@@ -132,8 +132,7 @@ pub fn post_switch_cleanup() {
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep_until(deadline_ms: u64) {
-    let qos = percpu::current_qos()
-        .expect("there must be a current thread installed to be able to sleep");
+    let qos = percpu::current_qos();
     let deadline = Deadline::from_ms_with_system_leeway(deadline_ms, qos);
     SCHEDULER.sleep_until(deadline);
 }
@@ -141,8 +140,7 @@ pub fn sleep_until(deadline_ms: u64) {
 /// Time is measured in milliseconds
 /// Uses the system default leeway (which is based on the thread's QoS)
 pub fn sleep(duration_ms: u64) {
-    let qos = percpu::current_qos()
-        .expect("there must be a current thread installed to be able to sleep");
+    let qos = percpu::current_qos();
     let deadline = Deadline::after_ms_with_system_leeway(duration_ms, qos);
     SCHEDULER.sleep_until(deadline);
 }
@@ -172,11 +170,9 @@ pub(crate) fn exit_user_thread(reason: thread::ExitReason) -> ! {
 /// releasing everything it holds on the way — dying only once the
 /// stack has unwound to the syscall boundary.
 pub(crate) fn current_user_thread_needs_exit() -> bool {
-    SCHEDULER.needs_user_exit.get(
-        percpu::current_thread()
-            .expect("current thread should be installed")
-            .idx(),
-    )
+    SCHEDULER
+        .needs_user_exit
+        .get(percpu::current_thread().idx())
 }
 /// Exit the current user thread now if it has been condemned;
 /// otherwise return normally. Like `park_if_blocked`, the `if` in the

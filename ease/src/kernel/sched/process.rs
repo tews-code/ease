@@ -306,8 +306,7 @@ impl Scheduler {
         // Also set to < 2_000 which is the individual test timeout
         const CLAIM_ROLE_TIMEOUT_MS: u64 = 1_500;
 
-        let current_thread_handle =
-            percpu::current_thread().expect("current thread should be installed");
+        let current_thread_handle = percpu::current_thread();
         let mut sched = self.sched.lock();
         let process_idx = sched
             .threads

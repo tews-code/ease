@@ -76,30 +76,29 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
     }
     // Check if IRQ stack canary is in place
     // Safety: Address is safe to read and aligned from linker script
-    let irq_stack_base = if hart_id() == 0 {
-        &raw const __hart0_irq_stack_base as *const usize
-    } else {
-        &raw const __hart1_irq_stack_base as *const usize
+    let irq_stack_base = match hart_id() {
+        0 => &raw const __hart0_irq_stack_base as *const usize,
+        1 => &raw const __hart1_irq_stack_base as *const usize,
+        _ => unreachable!("only have two harts"),
     };
     // Safety: IRQ stack base is a valid stack address from linker script
     if unsafe { stack::check_canary(irq_stack_base.addr()) }.is_err() {
         irq_panic();
     }
-    // Check if kernel stack canary is in place
-    if let Some(kernel_stack_base) = percpu::current_kernel_stack_base()
-        // Safety: the kernel stack base is aligned and valid for read
-        && let Err(val) = unsafe { stack::check_canary(kernel_stack_base.addr().into()) }
-    {
-        panic!(
-            "kernel stack canary corrupted in thread at index {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
-            percpu::current_thread()
-                .expect("there must be a current thread installed")
-                .idx(),
-            frame.sp,
-            kernel_stack_base.addr(),
-            val,
-            stack::CANARY
-        );
+    // Check if kernel stack canary is in place - if the scheduler has already installed it
+    if let Some(current_thread) = percpu::try_current_thread() {
+        let kernel_stack_base_addr = percpu::current_kernel_stack_base().addr();
+        // Safety: the kernel stack base is aligned by linker or buddy allocator and valid for read
+        if let Err(val) = unsafe { stack::check_canary(kernel_stack_base_addr.into()) } {
+            panic!(
+                "kernel stack canary corrupted in thread at index {}: sp={:?}, base={:#x}, read={:#x}, expected={:#x}",
+                current_thread.idx(),
+                frame.sp,
+                kernel_stack_base_addr,
+                val,
+                stack::CANARY
+            );
+        }
     }
     let is_from_user = frame.is_from_user();
     match mcause::read() {
