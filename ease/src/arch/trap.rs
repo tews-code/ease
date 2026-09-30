@@ -5,7 +5,7 @@
 //! return, the trap handler needs to use a trampoline to move off the IRQ stack and back onto the
 //! interrupted thread's stack (while it is suspended) in order to proceed outside of the trap
 //! handler itself.
-//! A resume trampoline (per-HART) is available to save caller-saved registers to forge a Rust function
+//! A resume trampoline (per-HART) is available to save the full trap frame to forge a Rust function
 //! call, allowing for further function calls, e.g. taking the scheduler lock and rescheduling.
 
 /*
@@ -50,40 +50,40 @@
   sp -> +-> |--ra --|                           +-> o  percpu::set_needs_reschedule();
             |-------|                       o <-o
             |-------|                       |  - If needs reschedule (which we just set!) then proceed down this path. Otherwise mret back to the original thread directly.
-            |-------|                       |  - Stash mepc and mstatus in percpu  - these are the original thread's details
+            |-------|                       |  - Stash resume work context in percpu  - these are the original thread's details
             +-base--+                       +-> o  arch::trap::set_up_for_divert_to_kernel
                                                 |  - store trampoline address in frame's mepc
                                                 |  - set frame's mstatus to previous M-mode with interrupts disabled
                                         o <-----o
                                         |  - Restore trap frame (with mepc altered to point to resume trampoline, mstatus set to ret to M-mode interrupts disabled)
-                                        |  - Swap sp back with mscratch - sp now goes back to interrupted thread's stack
-                                        o  - mret
+                                        |  - mret
+                                        o
                                                                                                                     mret automatically sets:
                                                                                                                     - pc <- mepc
                                                                                                                     - HART mode <- mstatus.MPP (11 - M-mode)
                                                                                                                     - mstatus.MIE <- mstatus.MPIE (disable interrupts)
                     Preempt Trampoline     If we need to make Rust calls, we can't be on the IRQ stack.             - mstatus.MPIE <- 1
                         M-Mode             So we move to the interrupted thread's kernel stack and use that space.  - mstatus.MPP <- 00 (always least privileged U mode)
-                 (Interrupts Disabled)     Then we forge a Rust function call by saving the caller-saved regs.
+                 (Interrupts Disabled)     Then we forge a Rust function call by saving the trap frame regs.
 
 
-             pc (from mepc) ->  o  arch::trap::resume_trampoline_h0 - Needs to forge a caller frame so that we can make a Rust call (the thread didn't ask for it)
-                                |  - store caller frame
-                                |  - fetch and store original thread's mepc and mstatus from percpu stash
+             pc (from mepc) ->  o  arch::trap::resume_trampoline_h0 - Needs to forge a trap frame so that we can make a Rust call (the thread didn't ask for it)
+                                |  - store trap frame
+                                +--o run_resume_work: take resume work context from percpu stash and add it to the frame
          Kernel Stack           |
        (for this thread)        +-> o  sched::schedule
             +--top--+               |  - takes scheduler lock
             |-------|               |  - performs reschedule
         +-> |mstatus|                   ...
         |   |--mepc-|                     Scheduler may switch, or keep current thread scheduled. On switch, interrupts may be enabled.
-     caller |--a0---|                   ...
+     trap   |--a0---|                   ...
      frame  |--t0---|               |  - scheduler re-schedules this thread
         |   |--gp---|               +-> o  sched::post_switch_cleanup
   sp -> +-> |--ra---|           + <-+
-            |-------|          |  - restore mstatus (first, to keep interrupts off as MIE is 0)
-            |-------|          |  - Now safely restore mepc - which is the original thread's interrupted instruction
-            |-------|          |  - restore caller frame
-            +-base--+          o  - mret back to the original thread
+            |-------|           |
+            |-------|           | - tail into return_to_frame which tails into trap_return which restores mstatus, mepc
+            |-------|           +--o trap_return - mret
+            +-base--+
 
 
 
@@ -92,9 +92,11 @@
 
 */
 
+use core::arch::naked_asm;
+
 use crate::arch::{csr, per_hart};
 use crate::kernel::percpu;
-use crate::kernel::trap::{run_resume_work, trap_handler_h0, trap_handler_h1};
+use crate::kernel::trap::{self, run_resume_work, trap_handler_h0, trap_handler_h1};
 
 #[repr(C, align(16))]
 #[derive(Default)]
@@ -344,15 +346,31 @@ per_hart::naked_asm_function!(
         // Return
         // Put the trap frame into the first argument (a0) of the return function
         "mv a0, sp",
+        "tail {return_to_frame}",
+        num_slots = const Frame::NUM_SLOTS,
+        run_resume_work = sym run_resume_work,
+        return_to_frame = sym return_to_frame,
+    )
+);
+/// Common return path for every _kernel_ stack frame (as opposed to IRQ stack frame).
+///
+/// `a0` holds the frame and is equal to the `sp`, interrupts are off.
+/// Tails into the HART's trap_return.
+#[unsafe(naked)]
+pub(crate) extern "C" fn return_to_frame(frame: &mut Frame) -> ! {
+    naked_asm!(
+        "call {irqsoff_trap_return}",
+        // Put the trap frame into the first argument (a0) of the return function
+        "mv a0, sp",
         // Call the per-HART trap return, ok to use temporaries as they will be restored in the return
         "csrr t0, mhartid",
         "bnez t0, 1f",
         "tail {trap_return_h0}",
         "1:",
         "tail {trap_return_h1}",
-        num_slots = const Frame::NUM_SLOTS,
-        run_resume_work = sym run_resume_work,
+        "unimp",
+        irqsoff_trap_return = sym trap::irqsoff_trap_return,
         trap_return_h0 = sym trap_return_h0,
         trap_return_h1 = sym trap_return_h1,
     )
-);
+}

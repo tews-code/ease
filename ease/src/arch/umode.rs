@@ -192,24 +192,10 @@ pub extern "C" fn user_first_run() -> ! {
     naked_asm!(
         // Like any `switched_to` thread, we first need to clean up the last thread's activity
         "call {post_switch_cleanup}",
-        // The frame we are about to mret through is final: let the irqsoff tracer
-        // close the section the scheduler left open. sp survives the call (callee-saved).
         "mv a0, sp",
-        "call {first_run_trap_return}",
-        // The trap frame is passed to the trap return in the first argument `a0`. Right now our stack pointer is pointing to the full stack
-        "mv a0, sp",
-        // Branch by HART; t0 is restored by the trap return so can be used here
-        "csrr t0, mhartid",
-        "bnez t0, 1f",
-        "tail {trap_return_h0}",
-
-        "1:",
-        "tail {trap_return_h1}",
-
+        "tail {return_to_frame}",
         post_switch_cleanup = sym post_switch_cleanup,
-        first_run_trap_return = sym crate::kernel::trap::first_run_trap_return,
-        trap_return_h0 = sym trap::trap_return_h0,
-        trap_return_h1 = sym trap::trap_return_h1,
+        return_to_frame = sym trap::return_to_frame,
     );
 }
 /// User threads that exit via this function are faulting or voluntary exit.

@@ -166,15 +166,14 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         divert_work_to_kernel(frame, frame.mepc, Work::Preempt);
     }
 }
-/// Third and last place a frame is final before its `mret`: a user thread's
-/// first run tails into trap_return straight from asm (see
-/// `umode::user_first_run`). Empty without `irqsoff`; the call costs a few
-/// cycles once per user thread.
-pub(crate) extern "C" fn first_run_trap_return(frame: &mut trap::Frame) {
+/// Helper function for irqsoff tracing
+///
+/// It tells the tracer the frame is final, and the tracer reads the frame's
+/// MPIE to see whether the mret re-enables interrupts. If irqsoff is not being
+/// used it is empty, hence `_frame`.
+pub(crate) extern "C" fn irqsoff_trap_return(_frame: &mut trap::Frame) {
     #[cfg(feature = "irqsoff")]
-    crate::kernel::irqsoff::trap_return(frame.mstatus);
-    #[cfg(not(feature = "irqsoff"))]
-    let _ = frame;
+    crate::kernel::irqsoff::trap_return(_frame.mstatus);
 }
 /// The kind of work that the thread should do on resume
 #[derive(Clone, Copy)]
@@ -186,8 +185,10 @@ pub(crate) enum Work {
 /// Examines the percpu resume work field and dispatches to resume that work
 /// This function is `extern "C"` so it can be called from asm!.
 ///
-/// The caller *must* use [percpu::set_resume_work] before this is called, otherwise
-/// the stale value will be used.
+/// The caller *must* use [percpu::set_resume_context] to avoid panic
+///
+/// # Panics
+/// Panics if the resume context is `None`
 pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
     let resume_context = percpu::take_resume_context()
         .expect("should not be resuming work if no deferred work is stashed in percpu");
@@ -200,12 +201,6 @@ pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
     frame.sp = resume_context.sp;
     frame.mepc = resume_context.mepc;
     frame.mstatus = resume_context.mstatus;
-    // The resume trampoline tails into trap_return from here, bypassing the
-    // trap handler, so this is the other place a frame is final before its
-    // `mret`. If the work above switched threads, the section was already
-    // closed by the scheduler and this finds nothing open.
-    #[cfg(feature = "irqsoff")]
-    crate::kernel::irqsoff::trap_return(frame.mstatus);
 }
 /// Handle remaining exceptions
 ///
