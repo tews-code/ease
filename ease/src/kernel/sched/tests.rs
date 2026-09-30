@@ -61,11 +61,11 @@ fn exit_runs_and_recycles_slot() {
         crate::kernel::sched::exit_kernel_thread(thread::ExitReason::Exit)
     }
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
         .with_qos(Qos::Low)
-        .spawn(marker_then_exit);
-    assert!(id.is_some(), "spawn failed (no free slot?)");
+        .spawn(marker_then_exit)
+        .expect("spawn failed");
     // Give the thread time to run, mark, and exit.
     crate::kernel::sched::sleep(50);
     assert_eq!(
@@ -219,7 +219,8 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(long_leeway_sleeper);
+            .spawn(long_leeway_sleeper)
+            .expect("long_leeway_sleeper spawn failed");
     }
     // Give the background sleeper a moment to reach its sleep_with_leeway_ms.
     crate::kernel::sched::sleep(2);
@@ -262,7 +263,8 @@ fn huge_leeway_neighbor_does_not_corrupt_wake_math() {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(huge_leeway_sleeper);
+            .spawn(huge_leeway_sleeper)
+            .expect("huge_leeway_sleeper spawn failed");
     }
     // Give the background sleeper a moment to reach its sleep call.
     crate::kernel::sched::sleep(2);
@@ -339,11 +341,13 @@ fn fair_stride_resists_wake_spammer() {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(t3_spammer);
+            .spawn(t3_spammer)
+            .expect("t3_spammer spawn failed");
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(t3_hog);
+            .spawn(t3_hog)
+            .expect("t3_hog spawn failed");
     }
     // Warmup so the contenders stabilise before we sample.
     crate::kernel::sched::sleep(50);
@@ -417,7 +421,8 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(t4_low_neighbor);
+            .spawn(t4_low_neighbor)
+            .expect("t4_low_neighbor spawn failed");
     }
     // Brief settle so the Low neighbor reaches its sleep before we
     // spawn the measurer; otherwise it's just main vs measurer.
@@ -425,7 +430,8 @@ fn qos_high_wakes_precisely_with_low_neighbor() {
 
     crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(t4_high_measurer);
+        .spawn(t4_high_measurer)
+        .expect("t4_high_measurer spawn failed");
 
     // Wait for the measurer to finish its 20 ms sleep and record. Wait is
     // sized above the bound below (residual wake-latency tail).
@@ -692,10 +698,10 @@ fn mutex_contention_counter() {
 
     ensure_partner_spawned();
     for _ in 0..WORKERS {
-        let id = crate::kernel::sched::Builder::new()
+        crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
-            .spawn(worker);
-        assert!(id.is_some(), "spawn failed (no free slot?)");
+            .spawn(worker)
+            .expect("spawn failed");
     }
 
     // Wait for all workers to finish. Generous timeout (~1s) — at ITERS=50
@@ -756,10 +762,10 @@ fn mutex_unit_serialises_critical_section() {
 
     ensure_partner_spawned();
     for _ in 0..WORKERS {
-        let id = crate::kernel::sched::Builder::new()
+        crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
-            .spawn(worker);
-        assert!(id.is_some(), "spawn failed (no free slot?)");
+            .spawn(worker)
+            .expect("spawn failed");
     }
 
     let start = crate::kernel::timer::elapsed_ms();
@@ -806,11 +812,11 @@ fn mutex_high_contention_stress() {
 
     ensure_partner_spawned();
     for _ in 0..WORKERS {
-        let id = crate::kernel::sched::Builder::new()
+        crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(worker);
-        assert!(id.is_some(), "spawn failed (no free slot?)");
+            .spawn(worker)
+            .expect("spawn failed");
     }
 
     let start = crate::kernel::timer::elapsed_ms();
@@ -933,10 +939,10 @@ fn mutex_holder_sleep_parks_contender() {
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
     );
-    let id1 = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(holder);
-    assert!(id1.is_some(), "holder spawn failed");
+        .spawn(holder)
+        .expect("holder spawn failed");
     // Wait until the holder has actually acquired the lock before spawning the
     // contender — guarantees holder-first deterministically. A bare sleep(20)
     // races under load: if the holder hasn't been scheduled to lock yet, the
@@ -953,10 +959,10 @@ fn mutex_holder_sleep_parks_contender() {
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
     );
-    let id2 = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(contender);
-    assert!(id2.is_some(), "contender spawn failed");
+        .spawn(contender)
+        .expect("contender spawn failed");
     MAIN_AFTER_SPAWN_CONTENDER_AT.store(
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
@@ -1045,10 +1051,10 @@ fn sleep_precision_dedicated_thread() {
     }
 
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(sleeper);
-    assert!(id.is_some(), "sleeper spawn failed");
+        .spawn(sleeper)
+        .expect("sleeper spawn failed");
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
@@ -1107,10 +1113,10 @@ fn spawn_to_first_instruction_latency() {
     crate::kernel::sched::sleep(10);
     let spawn_at = crate::kernel::timer::elapsed_ms();
     SPAWN_TIME.store(spawn_at as usize, Ordering::Relaxed);
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(child);
-    assert!(id.is_some(), "child spawn failed");
+        .spawn(child)
+        .expect("child spawn failed");
 
     // Wait for child to record its first instruction.
     let wait_start = crate::kernel::timer::elapsed_ms();
@@ -1228,10 +1234,10 @@ fn mutex_holder_parks_contender_with_completion() {
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
     );
-    let id1 = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(holder);
-    assert!(id1.is_some(), "holder spawn failed");
+        .spawn(holder)
+        .expect("holder spawn failed");
     // Wait until the holder confirms it has the lock and is about to
     // sleep. No 10-ms heuristic — the completion is a hard barrier.
     HOLDER_LOCKED.wait();
@@ -1239,10 +1245,10 @@ fn mutex_holder_parks_contender_with_completion() {
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
     );
-    let id2 = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(contender);
-    assert!(id2.is_some(), "contender spawn failed");
+        .spawn(contender)
+        .expect("contender spawn failed");
     MAIN_AFTER_SPAWN_AT.store(
         crate::kernel::timer::elapsed_ms() as usize,
         Ordering::Relaxed,
@@ -1352,10 +1358,10 @@ fn sleep10_wakes_promptly_under_partner_load() {
     }
 
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(sleeper);
-    assert!(id.is_some(), "sleeper spawn failed");
+        .spawn(sleeper)
+        .expect("sleeper spawn failed");
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
@@ -1442,14 +1448,14 @@ fn completion_wait_wakes_promptly_under_partner_load() {
     }
 
     ensure_partner_spawned();
-    let id1 = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(waiter);
-    assert!(id1.is_some(), "waiter spawn failed");
-    let id2 = crate::kernel::sched::Builder::new()
+        .spawn(waiter)
+        .expect("waiter spawn failed");
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(signaler);
-    assert!(id2.is_some(), "signaler spawn failed");
+        .spawn(signaler)
+        .expect("signaler spawn failed");
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
@@ -1502,10 +1508,10 @@ fn completion_signal_then_wait() {
     ensure_partner_spawned();
     // Signal BEFORE the child runs — pending should be set.
     C.signal();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(child);
-    assert!(id.is_some(), "spawn failed (no free slot?)");
+        .spawn(child)
+        .expect("spawn failed");
 
     // Give the child time to run. wait() should return immediately
     // because pending is true; CHILD_DONE should be set quickly.
@@ -1534,10 +1540,10 @@ fn completion_wait_then_signal() {
     }
 
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(child);
-    assert!(id.is_some(), "spawn failed (no free slot?)");
+        .spawn(child)
+        .expect("spawn failed");
 
     // Poll for the child to reach C.wait() and actually park; its first run can
     // tail out under partner load + QEMU jitter (see await_progress).
@@ -1579,10 +1585,10 @@ fn completion_signal_twice_is_idempotent() {
     C.signal();
     C.signal();
 
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
-        .spawn(child_two_waits);
-    assert!(id.is_some(), "spawn failed (no free slot?)");
+        .spawn(child_two_waits)
+        .expect("spawn failed");
 
     // First wait should pass through immediately (pending was set); poll for it,
     // since the child's first run can tail out under partner load + QEMU jitter
@@ -1653,11 +1659,11 @@ fn affinity_hart0_runs_on_hart0() {
     ensure_partner_spawned();
     let test_runner_hart_before = crate::arch::hart_id();
     let spawn_ms = crate::kernel::timer::elapsed_ms();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
         .with_affinity(0)
-        .spawn(pinned_hart0);
-    assert!(id.is_some(), "spawn failed");
+        .spawn(pinned_hart0)
+        .expect("spawn failed");
     let test_runner_hart_after = crate::arch::hart_id();
 
     let wait_start = crate::kernel::timer::elapsed_ms();
@@ -1715,11 +1721,11 @@ fn affinity_hart1_runs_on_hart1() {
     }
 
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
         .with_affinity(1)
-        .spawn(pinned_hart1);
-    assert!(id.is_some(), "spawn failed");
+        .spawn(pinned_hart1)
+        .expect("spawn failed");
 
     let wait_start = crate::kernel::timer::elapsed_ms();
     while DONE.load(Ordering::Relaxed) == 0 {
@@ -1767,11 +1773,11 @@ fn affinity_unpark_wakes_via_ipi() {
     }
 
     ensure_partner_spawned();
-    let id = crate::kernel::sched::Builder::new()
+    crate::kernel::sched::Builder::new()
         .with_stack_class(Order::KB2)
         .with_affinity(1)
-        .spawn(waiter_on_hart1);
-    assert!(id.is_some(), "spawn failed");
+        .spawn(waiter_on_hart1)
+        .expect("spawn failed");
 
     // Give the waiter time to actually park before we signal. (If we
     // signal before it parks, the Completion's pending flag is set and
@@ -1852,7 +1858,8 @@ fn forced_preempt_lets_sleeper_reclaim_cpu_from_hog() {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
-            .spawn(hog);
+            .spawn(hog)
+            .expect("hog spawn failed");
     }
     // Let the hog get scheduled and start spinning before we sleep.
     crate::kernel::sched::sleep(20);
@@ -1941,12 +1948,14 @@ fn forced_preempt_preserves_computation() {
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .with_affinity(0)
-            .spawn(peer);
+            .spawn(peer)
+            .expect("peer spawn failed");
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
             .with_qos(Qos::Low)
             .with_affinity(0)
-            .spawn(compute);
+            .spawn(compute)
+            .expect("compute spawn failed");
     }
 
     // Wait for compute to finish, with a generous timeout. A hang here
@@ -2002,12 +2011,13 @@ fn user_process_exits_and_releases_slot() {
         crate::kernel::sched::spawn_process("user_test").expect("process spawn should succeed");
     // Each poll that lands while the process is still alive adds one
     // more immediately-exiting thread — harmless, and the count stays
-    // far below THREADS_PER_PROC_MAX because they die within a slice.
+    // far below MAX_THREADS_PER_PROC because they die within a slice.
     let mut released = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             released = true;
             break;
         }
@@ -2030,12 +2040,13 @@ fn user_thread_plain_return_exits_via_ra_shim() {
         .expect("process spawn should succeed");
     let mut released = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(
-            handle,
-            UserEntry::from_fn(crate::user::user_return_test),
-        )
-        .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(
+                handle,
+                UserEntry::from_fn(crate::user::user_return_test),
+            ),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             released = true;
             break;
         }
@@ -2055,9 +2066,10 @@ fn process_slot_recycle_rejects_stale_handle() {
         .expect("first process spawn should succeed");
     let mut released = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             released = true;
             break;
         }
@@ -2071,14 +2083,16 @@ fn process_slot_recycle_rejects_stale_handle() {
         .expect("second process spawn should succeed");
     assert!(
         second.id() != first.id(),
-        "recycled process slot must get a fresh pid"
+        "recycled process slot must get a fresh id"
     );
 
     // The stale handle must be rejected whether its old slot is now
     // empty or holds the second process.
     assert!(
-        crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test))
-            .is_none(),
+        matches!(
+            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ),
         "stale process handle must be rejected"
     );
 
@@ -2086,9 +2100,10 @@ fn process_slot_recycle_rejects_stale_handle() {
     // doesn't inject scheduling noise into the next test.
     let mut drained = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(second, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(second, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             drained = true;
             break;
         }
@@ -2115,9 +2130,10 @@ fn fault_kills_whole_process() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2144,9 +2160,10 @@ fn illegal_instruction_fault_kills_whole_process() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2178,9 +2195,10 @@ fn fault_waits_for_running_sibling_before_release() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2211,9 +2229,10 @@ fn voluntary_exit_does_not_block_later_fault_kill() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2246,9 +2265,10 @@ fn fault_waits_for_two_running_siblings() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2281,9 +2301,10 @@ fn fault_kill_races_a_voluntary_exit() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2312,8 +2333,10 @@ fn spawn_user_refused_once_teardown_claimed() {
         .claim_teardown_role(handle, crate::kernel::percpu::current_thread());
     assert!(claimed, "fresh process must have no teardown claimant");
     assert!(
-        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none(),
+        matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ),
         "a thread joined a process whose teardown had been claimed"
     );
     assert!(
@@ -2356,7 +2379,7 @@ fn process_alive(handle: super::process::Handle) -> bool {
         .is_some()
 }
 
-// A process is capped at THREADS_PER_PROC_MAX (6) threads. Fill one to the
+// A process is capped at MAX_THREADS_PER_PROC (6) threads. Fill one to the
 // cap — four spinners plus a faulter joining last — and prove a seventh
 // thread never joins. In the common interleaving the probe is refused at
 // the cap while the process is still alive, exercising spawn_user's
@@ -2380,8 +2403,10 @@ fn seventh_thread_never_joins_a_process() {
     crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
         .expect("faulter should join as the sixth, cap-reaching thread");
     assert!(
-        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
-            .is_none(),
+        matches!(
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::TooManyThreadsInProcess)
+        ),
         "a seventh thread joined a process at the thread cap"
     );
     let mut killed = false;
@@ -2496,9 +2521,10 @@ fn process_slot_reused_after_fault_kill() {
 
     let mut killed = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             killed = true;
             break;
         }
@@ -2511,13 +2537,14 @@ fn process_slot_reused_after_fault_kill() {
         .expect("process spawn into the recycled slot should succeed");
     assert!(
         reused.id() != faulted.id(),
-        "recycled process slot must get a fresh pid"
+        "recycled process slot must get a fresh id"
     );
     let mut drained = false;
     for _ in 0..200 {
-        if crate::kernel::sched::spawn_user(reused, UserEntry::from_fn(crate::user::user_test))
-            .is_none()
-        {
+        if matches!(
+            crate::kernel::sched::spawn_user(reused, UserEntry::from_fn(crate::user::user_test)),
+            Err(super::spawn::Error::ProcessNotAvailable)
+        ) {
             drained = true;
             break;
         }

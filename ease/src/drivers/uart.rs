@@ -490,11 +490,11 @@ mod benchmarks {
 
     fn run_pinned(hart: u8) {
         DONE.store(0, Ordering::Relaxed);
-        let spawned = crate::kernel::sched::Builder::new()
+        crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB8)
             .with_affinity(hart)
-            .spawn(worker);
-        assert!(spawned.is_some(), "uart bench worker spawn failed");
+            .spawn(worker)
+            .expect("uart bench worker spawn failed");
         let start = crate::kernel::timer::elapsed_ms();
         while DONE.load(Ordering::Acquire) == 0 {
             crate::kernel::sched::sleep(10);

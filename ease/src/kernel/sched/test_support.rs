@@ -39,7 +39,8 @@ pub(super) fn ensure_partner_spawned() {
     if PARTNER_SPAWNED.swap(1, Ordering::Relaxed) == 0 {
         crate::kernel::sched::Builder::new()
             .with_stack_class(Order::KB2)
-            .spawn(partner_thread);
+            .spawn(partner_thread)
+            .expect("partner thread spawn failed");
     }
 }
 

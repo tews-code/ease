@@ -74,7 +74,10 @@ impl Builder {
         self
     }
 
-    pub fn spawn<F: FnOnce() + Send + 'static>(self, entry: F) -> Option<thread::Handle> {
+    pub fn spawn<F: FnOnce() + Send + 'static>(
+        self,
+        entry: F,
+    ) -> Result<thread::Handle, spawn::Error> {
         SCHEDULER.spawn_kernel_thread_with(
             entry,
             self.priority,
@@ -104,7 +107,7 @@ pub fn idle_thread() -> ! {
 
 /// Spawn a new kernel thread with the provided closure
 #[allow(dead_code)]
-pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Option<thread::Handle> {
+pub fn spawn<F: FnOnce() + Send + 'static>(entry: F) -> Result<thread::Handle, spawn::Error> {
     Builder::new().spawn(entry)
 }
 
@@ -272,11 +275,9 @@ pub fn current_wake_overshoot() -> u64 {
 //
 
 /// Spawn a user process
-pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::SpawnError> {
+pub fn spawn_process(name: &'static str) -> Result<process::Handle, spawn::Error> {
     // Look up this program in the table
-    let image = user::PROGRAMS
-        .find(name)
-        .ok_or(process::SpawnError::NotFound)?;
+    let image = user::PROGRAMS.find(name).ok_or(spawn::Error::NotFound)?;
     // Load the image into memory
     let loaded_image = userloader::load_user_image(image)?;
     // Spawn the process
@@ -296,7 +297,7 @@ pub fn spawn_process(name: &'static str) -> Result<process::Handle, process::Spa
 pub fn spawn_user(
     process: process::Handle,
     entry: userloader::UserEntry,
-) -> Option<thread::Handle> {
+) -> Result<thread::Handle, spawn::Error> {
     SCHEDULER.spawn_user_thread(
         process,
         entry,

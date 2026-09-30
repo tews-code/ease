@@ -5,7 +5,6 @@
 use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
-use super::userloader;
 use super::usermem;
 use crate::kernel::collection::{Arena, StackVec};
 use crate::kernel::fd;
@@ -17,21 +16,6 @@ use crate::kernel::sync::IrqSpinLockGuard;
 pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
 const MAX_THREADS_PER_PROC: u8 = 6;
 
-/// Process spawn errors
-#[derive(Debug)]
-pub(crate) enum SpawnError {
-    Load(userloader::Error),
-    NotEnoughMemory,
-    NotEnoughThreadSlots,
-    NotEnoughProcessSlots,
-    NotFound,
-}
-
-impl From<userloader::Error> for SpawnError {
-    fn from(value: userloader::Error) -> Self {
-        SpawnError::Load(value)
-    }
-}
 /// The process control block
 pub(crate) struct ControlBlock {
     _name: &'static str,
@@ -60,12 +44,12 @@ impl ControlBlock {
     /// Adds to the thread count and returns the new value if not above the cap
     ///
     /// Errors if the process can't have any more threads
-    pub(super) fn add_thread_count(&mut self) -> Result<u8, SpawnError> {
+    pub(super) fn add_thread_count(&mut self) -> Result<u8, ()> {
         if self.thread_count < MAX_THREADS_PER_PROC {
             self.thread_count += 1;
             Ok(self.thread_count)
         } else {
-            Err(SpawnError::NotEnoughThreadSlots)
+            Err(())
         }
     }
     /// Decrements the process thread count, returns new count.

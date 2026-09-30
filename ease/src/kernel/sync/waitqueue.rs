@@ -178,13 +178,10 @@ mod tests {
     }
 
     fn spawn(entry: fn()) {
-        assert!(
-            Builder::new()
-                .with_stack_class(Order::KB2)
-                .spawn(entry)
-                .is_some(),
-            "spawn failed (no free TCB?)"
-        );
+        Builder::new()
+            .with_stack_class(Order::KB2)
+            .spawn(entry)
+            .expect("waitqueue test thread spawn failed");
     }
 
     // Two waiters with different conditions on one resource. One wake_all
@@ -498,17 +495,17 @@ mod bench {
     fn waitqueue_benchmarks() {
         // The waker takes a slot first, then parks on START while the
         // waiters fill every remaining slot.
-        let w = Builder::new()
+        Builder::new()
             .with_stack_class(Order::KB4)
             .with_affinity(0)
-            .spawn(waker);
-        assert!(w.is_some(), "waker spawn failed");
+            .spawn(waker)
+            .expect("waker spawn failed");
         let mut n = 0;
         while Builder::new()
             .with_stack_class(Order::KB2)
             .with_affinity(0)
             .spawn(waiter)
-            .is_some()
+            .is_ok()
         {
             n += 1;
         }

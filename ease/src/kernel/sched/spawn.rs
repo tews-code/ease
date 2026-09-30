@@ -4,7 +4,6 @@ use crate::arch::{context, umode};
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::ipi;
 use crate::kernel::percpu;
-use crate::kernel::sched::process::SpawnError;
 use crate::kernel::sync::IrqSpinLockGuard;
 use crate::kernel::timer;
 
@@ -13,6 +12,24 @@ use super::process;
 use super::stride::{SLICE, SchedInner, Scheduler};
 use super::thread;
 use super::userloader;
+
+/// Process spawn errors
+#[derive(Debug)]
+pub(crate) enum Error {
+    Load(userloader::Error),
+    ProcessNotAvailable,
+    NotEnoughMemory,
+    NotEnoughThreadSlots,
+    NotEnoughProcessSlots,
+    NotFound,
+    TooManyThreadsInProcess,
+}
+
+impl From<userloader::Error> for Error {
+    fn from(value: userloader::Error) -> Self {
+        Error::Load(value)
+    }
+}
 
 impl Scheduler {
     // Helper function to complete the spawn
@@ -40,7 +57,7 @@ impl Scheduler {
     /// The closure is stored on the heap by the spawner, so that it can be picked
     /// up by the newly spawned thread and run.
     ///
-    /// On success a new ThreadHandle is given, on failure returns None.
+    /// On success a new ThreadHandle is given, on failure returns a [SpawnError].
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_kernel_thread_with<F: FnOnce() + Send + 'static>(
         &self,
@@ -49,28 +66,31 @@ impl Scheduler {
         stack_order: Order,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Option<thread::Handle> {
+    ) -> Result<thread::Handle, Error> {
         // Thread stack is taken from the kernel heap
-        let kernel_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
+        let kernel_stack = MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)
+            .ok_or(Error::NotEnoughMemory)?;
         // Now take the scheduler lock
         let mut sched = self.sched.lock();
         // Acquire a valid initialised thread control block slot with sp
         // pointing to a forged stack.
-        let handle = sched.threads.acquire(
-            |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
-            thread::ControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: None,
-            },
-        )?;
+        let thread = sched
+            .threads
+            .acquire(
+                |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
+                thread::ControlBlockSpec {
+                    kernel_stack,
+                    qos,
+                    priority,
+                    affinity,
+                    user: None,
+                },
+            )
+            .ok_or(Error::NotEnoughThreadSlots)?;
         // Make sure threads don't launch with stale flags
-        self.clear_thread_flags(handle);
+        self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
-        Some(handle)
+        Ok(thread)
     }
 
     // Add an additional user thread to a process
@@ -85,12 +105,14 @@ impl Scheduler {
         user_stack_order: Order,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Option<thread::Handle> {
+    ) -> Result<thread::Handle, Error> {
         // Allocate stacks before locking
         let kernel_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
+                .ok_or(Error::NotEnoughMemory)?;
         let user_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)
+                .ok_or(Error::NotEnoughMemory)?;
         // Now lock the scheduler
         let mut sched = self.sched.lock();
         // We should have a process control block already set up
@@ -102,33 +124,36 @@ impl Scheduler {
             .filter(|pcb| pcb.teardown_thread.is_none())
         else {
             drop(sched);
-            return None;
+            return Err(Error::ProcessNotAvailable);
         };
         let user_stack_top = user_stack.top();
         let user_stack_base = user_stack.base();
         let user_exit = pcb.entry_ra;
-        let thread_handle = sched.threads.acquire(
-            |kernel_stack| unsafe {
-                umode::init_stack_for_user_thread(
+        let thread = sched
+            .threads
+            .acquire(
+                |kernel_stack| unsafe {
+                    umode::init_stack_for_user_thread(
+                        kernel_stack,
+                        user_stack_base,
+                        user_stack_top,
+                        entry,
+                        user_exit,
+                    )
+                },
+                thread::ControlBlockSpec {
                     kernel_stack,
-                    user_stack_base,
-                    user_stack_top,
-                    entry,
-                    user_exit,
-                )
-            },
-            thread::ControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: Some(thread::UserContext {
-                    stack: user_stack,
-                    entry,
-                    process,
-                }),
-            },
-        )?;
+                    qos,
+                    priority,
+                    affinity,
+                    user: Some(thread::UserContext {
+                        stack: user_stack,
+                        entry,
+                        process,
+                    }),
+                },
+            )
+            .ok_or(Error::NotEnoughThreadSlots)?;
         // Increment this process's thread count
         if sched
             .processes
@@ -139,14 +164,14 @@ impl Scheduler {
             .is_err()
         {
             // Too many threads requested, need to exit
-            sched.threads.release(thread_handle);
+            sched.threads.release(thread);
             drop(sched);
-            return None;
+            return Err(Error::TooManyThreadsInProcess);
         }
         // Make sure threads don't launch with stale flags
-        self.clear_thread_flags(thread_handle);
+        self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
-        Some(thread_handle)
+        Ok(thread)
     }
     /// Spawn a new user process
     ///
@@ -163,7 +188,7 @@ impl Scheduler {
         loaded_image: userloader::LoadedImage,
         qos: Qos,
         affinity: Option<u8>,
-    ) -> Result<process::Handle, process::SpawnError> {
+    ) -> Result<process::Handle, Error> {
         // Load the program before locking; wasteful but safe if there aren't sufficient process resources
         let userloader::LoadedImage {
             user_mem_map,
@@ -174,10 +199,10 @@ impl Scheduler {
         // but we don't want to do this under the scheduler lock
         let kernel_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
-                .ok_or(process::SpawnError::NotEnoughMemory)?;
+                .ok_or(Error::NotEnoughMemory)?;
         let user_stack =
             MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)
-                .ok_or(process::SpawnError::NotEnoughMemory)?;
+                .ok_or(Error::NotEnoughMemory)?;
         // Take the lock
         let mut sched = self.sched.lock();
         // Start with the process control block as we need the handle for the thread
@@ -185,7 +210,7 @@ impl Scheduler {
             .processes
             .pcbs
             .add(process::ControlBlock::new(name, user_mem_map, entry_ra))
-            .ok_or(SpawnError::NotEnoughProcessSlots)?;
+            .ok_or(Error::NotEnoughProcessSlots)?;
         // Create the thread
         let user_stack_base = user_stack.base();
         let user_stack_top = user_stack.top();
@@ -213,7 +238,7 @@ impl Scheduler {
         ) else {
             // Not enough thread slots, need to remove the process and return
             sched.processes.pcbs.take(process);
-            return Err(SpawnError::NotEnoughThreadSlots);
+            return Err(Error::NotEnoughThreadSlots);
         };
         // Clear all stale flags
         self.clear_thread_flags(thread);

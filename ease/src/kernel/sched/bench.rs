@@ -190,16 +190,16 @@ fn worker() {
 fn pingpong() {
     PINGPONG_DONE.store(0, Ordering::Relaxed);
     WORKER_DONE.store(0, Ordering::Relaxed);
-    let p = Builder::new()
+    Builder::new()
         .with_stack_class(Order::KB2)
         .with_affinity(0)
-        .spawn(partner);
-    assert!(p.is_some(), "partner spawn failed");
-    let w = Builder::new()
+        .spawn(partner)
+        .expect("partner spawn failed");
+    Builder::new()
         .with_stack_class(Order::KB8)
         .with_affinity(0)
-        .spawn(worker);
-    assert!(w.is_some(), "worker spawn failed");
+        .spawn(worker)
+        .expect("worker spawn failed");
     let start = timer::elapsed_ms();
     while WORKER_DONE.load(Ordering::Acquire) == 0 {
         sched::sleep(10);
