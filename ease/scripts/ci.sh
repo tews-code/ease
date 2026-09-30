@@ -27,6 +27,13 @@
 #   ./scripts/ci.sh --fat16                  # build the FAT16 (superfloppy)
 #                                            # test disk instead of the default
 #                                            # FAT32 (MBR) image (see mkdisk.sh)
+#   ./scripts/ci.sh --miri                   # also run the host tests under
+#                                            # miri (needs the nightly miri
+#                                            # component); off by default
+#   ./scripts/ci.sh --all                    # the full run, then miri, then
+#                                            # the QEMU stage again under each
+#                                            # of --trace, --irqsoff and
+#                                            # --paint-stack in turn
 #   ./scripts/ci.sh --help                   # this message
 
 set -e
@@ -35,6 +42,8 @@ TEST_SET="test-all"
 PAINT_STACK=0
 TRACE=0
 IRQSOFF=0
+MIRI=0
+ALL=0
 FS_TYPE="fat32"
 
 for arg in "$@"; do
@@ -43,9 +52,11 @@ for arg in "$@"; do
         --paint-stack) PAINT_STACK=1 ;;
         --trace)       TRACE=1 ;;
         --irqsoff)     IRQSOFF=1 ;;
+        --miri)        MIRI=1 ;;
+        --all)         ALL=1; MIRI=1 ;;
         --fat16)       FS_TYPE="fat16" ;;
         --help|-h)
-            sed -n '2,30p' "$0"
+            sed -n '2,/^$/p' "$0"
             exit 0 ;;
         *)
             echo "error: unknown option '$arg' (try --help)" >&2
@@ -94,6 +105,11 @@ RISCV_FEATURES="$FEATURES"
 # they cannot bit-rot unnoticed (the trace feature did, once).
 DIAG_FEATURES="paint-stack trace irqsoff profile"
 
+# The diagnostics --all *runs* (not just compiles), one QEMU stage each, so a
+# failure is attributed to a single feature. `profile` is compile-checked
+# only: it has no functional suite of its own.
+ALL_RUN_FEATURES="trace irqsoff paint-stack"
+
 # The bump and freelist allocator modules are kept in-tree as reference
 # implementations (with host_tests) but aren't wired into the kernel
 # binary, so their code is legitimately dead from the kernel's point of
@@ -106,13 +122,35 @@ echo "Disk image              : $FS_TYPE (feature: $FS_FEATURE)"
 [ $PAINT_STACK -eq 1 ] && echo "Stack painting          : on (printing high-watermarks in QEMU stage)"
 [ $TRACE -eq 1 ] && echo "Tracing                 : on (trace feature in QEMU stage)"
 [ $IRQSOFF -eq 1 ] && echo "Interrupts-off tracing  : on (irqsoff feature in QEMU stage)"
+[ $MIRI -eq 1 ] && [ $FOCUSED -eq 0 ] && echo "Miri                    : on (host tests under miri)"
+[ $ALL -eq 1 ] && echo "All diagnostics         : on (QEMU stage re-run under: $ALL_RUN_FEATURES)"
+
+# One QEMU stage: clippy, then the test binary, both with the given feature
+# set. Clippy must see the same feature set as the QEMU test run, otherwise
+# cfg-gated code looks dead under the Cargo.toml default but live under the
+# tested feature set (or vice versa), producing spurious dead_code errors.
+# Fresh disk first: the FS tests mutate it.
+qemu_stage() {
+    local features="$1"
+    local label="$2"
+
+    echo ""
+    echo "=== Disk Image $label==="
+    ./scripts/mkdisk.sh "$FS_TYPE"
+
+    echo ""
+    echo "=== Clippy $label==="
+    cargo clippy --target riscv32imac-unknown-none-elf \
+        --no-default-features --features "$features" \
+        -- -D warnings $CLIPPY_EXTRA
+
+    echo ""
+    echo "=== QEMU Tests $label==="
+    cargo test --bin ease --no-default-features --features "$features"
+}
 
 # Unconditionally reformat to pass clippy
 cargo fmt
-
-echo ""
-echo "=== Disk Image ==="
-./scripts/mkdisk.sh "$FS_TYPE"
 
 echo ""
 echo "=== User Programs ==="
@@ -124,19 +162,7 @@ echo "=== User Programs ==="
 # in src/bin/ to a flat binary and checks it is the fixed program size.
 (cd ../ease-user && cargo build && ./scripts/userblob.sh)
 
-echo ""
-echo "=== Clippy ==="
-# Clippy must see the same feature set as the QEMU test run, otherwise
-# cfg-gated code looks dead under the Cargo.toml default but live under
-# the tested feature set (or vice versa), producing spurious dead_code
-# errors.
-cargo clippy --target riscv32imac-unknown-none-elf \
-    --no-default-features --features "$RISCV_FEATURES" \
-    -- -D warnings $CLIPPY_EXTRA
-
-echo ""
-echo "=== QEMU Tests ==="
-cargo test --bin ease --no-default-features --features "$RISCV_FEATURES"
+qemu_stage "$RISCV_FEATURES" ""
 
 if [ $FOCUSED -eq 0 ]; then
     echo ""
@@ -147,7 +173,18 @@ if [ $FOCUSED -eq 0 ]; then
         -- -D warnings $CLIPPY_EXTRA
 fi
 
+# The --all diagnostic re-runs, one QEMU stage per feature on top of the
+# tested set. Also honoured in focused mode (e.g. --all --test=test-sched
+# re-runs just that suite under each diagnostic).
+all_diagnostic_runs() {
+    local diag
+    for diag in $ALL_RUN_FEATURES; do
+        qemu_stage "$FEATURES $diag" "($diag) "
+    done
+}
+
 if [ $FOCUSED -eq 1 ]; then
+    [ $ALL -eq 1 ] && all_diagnostic_runs
     echo ""
     echo "✓ Focused checks passed (host tests, miri, docs, benchmarks skipped)"
     exit 0
@@ -186,18 +223,24 @@ cargo test --package ease --lib --target "$HOST_TARGET" \
 # TODO: Enable when binary is target-conditional
 # cargo test --package ease --tests --target "$HOST_TARGET"
 
-echo ""
-echo "=== Miri (host) ==="
-if rustup +nightly component list --installed 2>/dev/null | grep -q '^miri'; then
+if [ $MIRI -eq 1 ]; then
+    echo ""
+    echo "=== Miri (host) ==="
+    # Opt-in (--miri or --all): it is the slowest host stage. Asked for
+    # explicitly, so a missing component is an error, not a skip.
+    if ! rustup +nightly component list --installed 2>/dev/null | grep -q '^miri'; then
+        echo "error: miri requested but not installed: 'rustup +nightly component add miri'" >&2
+        exit 1
+    fi
     cargo +nightly miri test --package ease --lib --target "$HOST_TARGET" \
         --no-default-features --features "$FEATURES"
-else
-    echo "skipped: 'rustup +nightly component add miri' to enable"
 fi
 
 echo ""
 echo "=== Documentation ==="
 cargo doc --no-deps --target riscv32imac-unknown-none-elf
+
+[ $ALL -eq 1 ] && all_diagnostic_runs
 
 echo ""
 echo "✓ All checks passed!"
