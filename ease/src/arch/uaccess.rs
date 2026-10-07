@@ -39,7 +39,7 @@ pub(crate) fn fixup_for(faulting_pc: usize) -> Option<usize> {
 /// this is zero, but if there is a hardware exception it will instead return
 /// number of remaining bytes.
 ///
-/// In order to ensure irqsoff tracing, call this within the [crate::kernel::sync::with_interrupts_disabled] closure.
+/// In order to ensure irqsoff tracing, call this within the [crate::kernel::interrupts::with_interrupts_disabled] closure.
 ///
 /// # Safety
 /// Caller must ensure that the kernel buffer is valid for len writes and
@@ -100,7 +100,7 @@ pub(crate) unsafe extern "C" fn copy_from_user(src: *const u8, dst: *mut u8, len
 /// this is zero, but if there is a hardware exception it will instead return
 /// number of remaining bytes.
 ///
-/// In order to ensure irqsoff tracing, call this within the [crate::kernel::sync::with_interrupts_disabled] closure.
+/// In order to ensure irqsoff tracing, call this within the [crate::kernel::interrupts::with_interrupts_disabled] closure.
 ///
 /// # Safety
 /// Caller must ensure that the kernel buffer is valid for len reads and

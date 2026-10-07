@@ -721,7 +721,8 @@ fn site_stats(file: &str, line: u32) -> Option<(u64, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::sync::{IrqSpinLock, with_interrupts_disabled};
+    use crate::kernel::interrupts::with_interrupts_disabled;
+    use crate::kernel::sync::IrqSpinLock;
 
     /// The outermost lock site is attributed with a duration covering the
     /// work done under it; a critical section nested inside it opens no

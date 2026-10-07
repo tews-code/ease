@@ -641,7 +641,7 @@ mod tests {
     fn uart_flush_drains_synchronously_with_interrupts_off() {
         assert!(wait_drained(500), "ring never idle before test");
         print!("{:>300}\n", "S");
-        crate::kernel::sync::with_interrupts_disabled(|_cs| {
+        crate::kernel::interrupts::with_interrupts_disabled(|_cs| {
             flush();
             assert!(
                 queue::TX.is_empty(),
@@ -732,7 +732,7 @@ mod tests {
             use core::fmt::Write as _;
             // Nothing may panic while the writer lock is held with
             // interrupts off, so record here and assert on the test thread.
-            crate::kernel::sync::with_interrupts_disabled(|_cs| {
+            crate::kernel::interrupts::with_interrupts_disabled(|_cs| {
                 RAN_ON.store(hart_id(), Ordering::Relaxed);
                 let mut uart_writer = UART_WRITER.lock();
                 ROOM.store(queue::TX.remaining(), Ordering::Relaxed);

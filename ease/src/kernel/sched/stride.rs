@@ -14,8 +14,8 @@ use crate::kernel::sched::process;
 use crate::kernel::sched::thread;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_watermark;
-use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard, with_interrupts_disabled};
-use crate::kernel::{percpu, timer};
+use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard};
+use crate::kernel::{interrupts, percpu, timer};
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -475,7 +475,7 @@ impl Scheduler {
         // Note - the closure body will contain switch_to, which is unusual
         // It's a non-local control transfer wearing the disguise of a function call.
         // It works correctly because the closure frame is preserved on the suspended thread's stack
-        with_interrupts_disabled(|_cs| {
+        interrupts::with_interrupts_disabled(|_cs| {
             // Clear any reschedule flag as we are rescheduling
             let _ = percpu::take_needs_reschedule();
             // We manually take and release the lock before the
@@ -604,7 +604,7 @@ impl Scheduler {
     /// Note: we don't force needs_user_exit threads to exit here - they must complete preempt
     pub(super) fn schedule(&self) {
         if percpu::take_needs_reschedule() {
-            with_interrupts_disabled(|_cs| {
+            interrupts::with_interrupts_disabled(|_cs| {
                 let mut sched = self.sched.lock();
                 let now_cycles = timer::elapsed();
                 let curr_handle = percpu::current_thread();

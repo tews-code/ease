@@ -8,6 +8,7 @@
 pub mod alloc;
 pub mod collection;
 mod fd;
+pub(crate) mod interrupts;
 pub mod ipi;
 #[cfg(feature = "irqsoff")]
 pub mod irqsoff;

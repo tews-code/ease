@@ -5,7 +5,7 @@
 //! sections are opened and closed (see [crate::kernel::irqsoff]).
 //!
 //! The [crate::arch::uaccess] copy functions also disable interrupts, so callers
-//! are encouraged to wrap those functions in [crate::kernel::sync::with_interrupts_disabled] to
+//! are encouraged to wrap those functions in [crate::kernel::interrupts::with_interrupts_disabled] to
 //! allow for irqsoff tracing.
 
 use super::csr;

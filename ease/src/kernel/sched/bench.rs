@@ -9,8 +9,8 @@
 use crate::arch::csr::rdcycles;
 use crate::bench;
 use crate::kernel::alloc::Order;
+use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::sched::{self, Builder, thread};
-use crate::kernel::sync::with_interrupts_disabled;
 use crate::kernel::timer;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 

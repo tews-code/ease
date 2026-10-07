@@ -16,8 +16,8 @@ use crate::arch::pmp::Pmp;
 use crate::arch::uaccess;
 use crate::board;
 use crate::kernel::alloc::{MemRegion, Order, Pool};
+use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::sched::process::SyscallContext;
-use crate::kernel::sync::with_interrupts_disabled;
 
 // All programs are currently forced to have the same layout by linker script
 unsafe extern "C" {
