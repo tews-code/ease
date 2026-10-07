@@ -264,7 +264,7 @@ impl Map {
     /// Returns a `Ok(())` on success or an `Err(())` on failure. Failure
     /// is caused by being unable to allocate memory.
     pub(crate) fn try_for_process(&mut self) -> Result<(), ()> {
-        self.add_region(Role::Text, crate::Order::KB4)?;
+        self.add_region(Role::Text, crate::Order::KB8)?;
         self.add_region(Role::Data, crate::Order::KB2)?;
         self.add_region(Role::Bss, crate::Order::KB2)?;
         Ok(())
