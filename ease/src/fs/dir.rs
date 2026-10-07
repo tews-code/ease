@@ -1,92 +1,92 @@
 //! Directory
 
 /*
-* A directory is a table used to find the first cluster in a file chain.
-*
-* A FAT volume has a root directory and further sub-directories.
-*
-* Every directory entry is 32 bytes.
-*
-* ROOT DIRECTORY
-*
-* FAT16 has a continguous set of sectors acting as the root directory, which is
-* found immediately after the FAT sectors. The number of supported entries can be
-* found from BPB.
-*
-* FAT32 puts the root directory in a file, where the file's first cluster can be
-* found in the BPB.
-*
-* SUB-DIRECTORIES
-*
-* Both FAT16 and FAT32 put subdirectories in files (in the data sectors). Each directory
-* file's first cluster is found in it's parent directory table.
-*
-* In its parent's table, a subdirectory is an ordinary 32-byte entry with the directory
-* bit (0x10) set at offset 11, a first_cluster like any file and file_size = 0 always.
-*
-* Two entries open every subdirectory:
-* . (pointing to its own first cluster) and
-* .. (pointing to its parent's — with 0 conventionally meaning "parent is root").
-*
-* DIRECTORY ENTRY
-*
-* The directory entry (32 bytes) layout is:
-* ┌────────┬──────┬────────────────────────────────────────┐
-* │ Offset │ Size │               Field                    │
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 0      │ 1    │ Marker - either                        |
-* |        |      |     empty(0x00) or                     |
-* │        │      │     deleted (0xE5)                     |
-* │        │      │ The directory is packed to the start,  |
-* |        |      | so once 0x00 is found all subsequent   │
-* |        │      | entries will be 0x00 too.              |
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 0      │ 8    │ If marker is not found then this is    |
-* |        |      | Filename (space-padded)                |
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 8      │ 3    │ Extension (space-padded)               │
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 11     │ 1    │ Attributes                             │
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 20     │ 2    │ FAT16 - zero,                          |
-* |        |      | FAT32: First cluster high 16 bits      │
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 26     │ 2    │ FAT16: First cluster (LE  u16)         │
-* |        |      | FAT32: First cluster low 16 bits       │
-* ├────────┼──────┼────────────────────────────────────────┤
-* │ 28     │ 4    │ File size (little-endian u32)          │
-* └────────┴──────┴────────────────────────────────────────┘
-*
-* In FAT16, cluster numbers are only 16-bit, so the entire value fits in the
-* low word at offset 26, and offset 20 is always zero — dead space.
-*
-* In FAT32, cluster numbers are 28-bit and no longer fit in 16 bits,
-* so FAT32 presses offset 20 into service as the high half.
-* You reconstruct the real value as (high_word << 16) | low_word.
-*
-* ATTRIBUTES
-*
-* ┌─────────────┬───────────────────────────────────────────┐
-* │     Bit     │                  Meaning                  │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x01        │ Read-only                                 │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x02        │ Hidden                                    │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x04        │ System                                    │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x08        │ Volume label (volume ID)                  │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x10        │ Directory (subdirectory)                  │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x20        │ Archive                                   │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x40 / 0x80 │ Reserved                                  │
-* ├─────────────┼───────────────────────────────────────────┤
-* │ 0x0F        │ (0x01|0x02|0x04|0x08) Long-filename entry │
-* └─────────────┴───────────────────────────────────────────┘
-*
-*/
+ * A directory is a table used to find the first cluster in a file chain.
+ *
+ * A FAT volume has a root directory and further sub-directories.
+ *
+ * Every directory entry is 32 bytes.
+ *
+ * ROOT DIRECTORY
+ *
+ * FAT16 has a continguous set of sectors acting as the root directory, which is
+ * found immediately after the FAT sectors. The number of supported entries can be
+ * found from BPB.
+ *
+ * FAT32 puts the root directory in a file, where the file's first cluster can be
+ * found in the BPB.
+ *
+ * SUB-DIRECTORIES
+ *
+ * Both FAT16 and FAT32 put subdirectories in files (in the data sectors). Each directory
+ * file's first cluster is found in it's parent directory table.
+ *
+ * In its parent's table, a subdirectory is an ordinary 32-byte entry with the directory
+ * bit (0x10) set at offset 11, a first_cluster like any file and file_size = 0 always.
+ *
+ * Two entries open every subdirectory:
+ * . (pointing to its own first cluster) and
+ * .. (pointing to its parent's — with 0 conventionally meaning "parent is root").
+ *
+ * DIRECTORY ENTRY
+ *
+ * The directory entry (32 bytes) layout is:
+ * ┌────────┬──────┬────────────────────────────────────────┐
+ * │ Offset │ Size │               Field                    │
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 0      │ 1    │ Marker - either                        |
+ * |        |      |     empty(0x00) or                     |
+ * │        │      │     deleted (0xE5)                     |
+ * │        │      │ The directory is packed to the start,  |
+ * |        |      | so once 0x00 is found all subsequent   │
+ * |        │      | entries will be 0x00 too.              |
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 0      │ 8    │ If marker is not found then this is    |
+ * |        |      | Filename (space-padded)                |
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 8      │ 3    │ Extension (space-padded)               │
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 11     │ 1    │ Attributes                             │
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 20     │ 2    │ FAT16 - zero,                          |
+ * |        |      | FAT32: First cluster high 16 bits      │
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 26     │ 2    │ FAT16: First cluster (LE  u16)         │
+ * |        |      | FAT32: First cluster low 16 bits       │
+ * ├────────┼──────┼────────────────────────────────────────┤
+ * │ 28     │ 4    │ File size (little-endian u32)          │
+ * └────────┴──────┴────────────────────────────────────────┘
+ *
+ * In FAT16, cluster numbers are only 16-bit, so the entire value fits in the
+ * low word at offset 26, and offset 20 is always zero — dead space.
+ *
+ * In FAT32, cluster numbers are 28-bit and no longer fit in 16 bits,
+ * so FAT32 presses offset 20 into service as the high half.
+ * You reconstruct the real value as (high_word << 16) | low_word.
+ *
+ * ATTRIBUTES
+ *
+ * ┌─────────────┬───────────────────────────────────────────┐
+ * │     Bit     │                  Meaning                  │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x01        │ Read-only                                 │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x02        │ Hidden                                    │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x04        │ System                                    │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x08        │ Volume label (volume ID)                  │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x10        │ Directory (subdirectory)                  │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x20        │ Archive                                   │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x40 / 0x80 │ Reserved                                  │
+ * ├─────────────┼───────────────────────────────────────────┤
+ * │ 0x0F        │ (0x01|0x02|0x04|0x08) Long-filename entry │
+ * └─────────────┴───────────────────────────────────────────┘
+ *
+ */
 
 use super::{FsError, Location, VolumeType};
 use crate::kernel::collection::StackVec;

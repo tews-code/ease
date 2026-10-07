@@ -1,69 +1,69 @@
 //! Master Boot Record
 
 /* Master Boot Record — device sector 0 (512 bytes)
-*
-* ┌─────────┬──────┬─────────────────────────────────────────┬─────────────┐
-* │ Offset  │ Size │                 Field                   │    EASE?    │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 0       │ 446  │ x86 boot code (bootstrap loader)        │ skipped     │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 446     │ 16   │ Partition entry 1                       │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 462     │ 16   │ Partition entry 2                       │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 478     │ 16   │ Partition entry 3                       │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 494     │ 16   │ Partition entry 4                       │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 510     │ 2    │ Boot signature 0x55 0xAA                │ validated   │
-* └─────────┴──────┴─────────────────────────────────────────┴─────────────┘
-*
-* Partition entry (16 bytes, offsets relative to entry start)
-*
-* ┌─────────┬──────┬─────────────────────────────────────────┬─────────────┐
-* │ Offset  │ Size │                 Field                   │    EASE?    │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 0       │ 1    │ Status (0x80 bootable, 0x00 inactive)   │ skipped     │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 1       │ 3    │ CHS address of first sector             │ skipped (1) │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 4       │ 1    │ Partition type (2)                      │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 5       │ 3    │ CHS address of last sector              │ skipped (1) │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 8       │ 4    │ LBA of first sector (u32 LE)            │ parsed      │
-* ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
-* │ 12      │ 4    │ Sector count (u32 LE)                   │ parsed      │
-* └─────────┴──────┴─────────────────────────────────────────┴─────────────┘
-*
-* (1) Cylinder/head/sector fields are floppy-era geometry; modern readers
-*     use the LBA fields exclusively.
-* (2) Types EASE accepts: 0x04 (FAT16 <32MB), 0x06 (FAT16), 0x0E (FAT16
-*     LBA); later 0x0B/0x0C (FAT32). 0x00 marks an empty slot — check it
-*     before the type match, all-zero entries are the common case.
-*
-* The partition types are
-* ┌───────┬──────────────────────────────┬─────────────────────────────────┐
-* │ Type  │           Meaning            │        Relevance to EASE        │
-* ├───────┼──────────────────────────────┼─────────────────────────────────┤
-* │ 0x00  │ Empty slot                   │ skip (most slots, most cards)   │
-* │ 0x01  │ FAT12                        │ reject politely                 │
-* │ 0x04  │ FAT16, volume < 32 MiB       │ accept                          │
-* │ 0x06  │ FAT16, volume ≥ 32 MiB       │ accept                          │
-* │ 0x0E  │ FAT16 (LBA)                  │ accept — the modern spelling    │
-* │ 0x0B  │ FAT32 (CHS)                  │ accept when FAT32 lands         │
-* │ 0x0C  │ FAT32 (LBA)                  │ accept when FAT32 lands — the   │
-* │       │                              │ one shop cards actually use     │
-* │ 0x07  │ NTFS or exFAT                │ recognize → helpful error (1)   │
-* │ 0x05  │ Extended partition container │ ignore (nested table scheme)    │
-* │ 0x0F  │ Extended (LBA)               │ ignore                          │
-* │ 0x83  │ Linux filesystem             │ ignore                          │
-* │ 0x82  │ Linux swap                   │ ignore                          │
-* │ 0xEE  │ GPT protective (2)           │ recognize → helpful error       │
-* │ 0xEF  │ EFI system partition         │ ignore                          │
-* └───────┴──────────────────────────────┴─────────────────────────────────┘
-*
-*/
+ *
+ * ┌─────────┬──────┬─────────────────────────────────────────┬─────────────┐
+ * │ Offset  │ Size │                 Field                   │    EASE?    │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 0       │ 446  │ x86 boot code (bootstrap loader)        │ skipped     │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 446     │ 16   │ Partition entry 1                       │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 462     │ 16   │ Partition entry 2                       │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 478     │ 16   │ Partition entry 3                       │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 494     │ 16   │ Partition entry 4                       │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 510     │ 2    │ Boot signature 0x55 0xAA                │ validated   │
+ * └─────────┴──────┴─────────────────────────────────────────┴─────────────┘
+ *
+ * Partition entry (16 bytes, offsets relative to entry start)
+ *
+ * ┌─────────┬──────┬─────────────────────────────────────────┬─────────────┐
+ * │ Offset  │ Size │                 Field                   │    EASE?    │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 0       │ 1    │ Status (0x80 bootable, 0x00 inactive)   │ skipped     │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 1       │ 3    │ CHS address of first sector             │ skipped (1) │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 4       │ 1    │ Partition type (2)                      │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 5       │ 3    │ CHS address of last sector              │ skipped (1) │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 8       │ 4    │ LBA of first sector (u32 LE)            │ parsed      │
+ * ├─────────┼──────┼─────────────────────────────────────────┼─────────────┤
+ * │ 12      │ 4    │ Sector count (u32 LE)                   │ parsed      │
+ * └─────────┴──────┴─────────────────────────────────────────┴─────────────┘
+ *
+ * (1) Cylinder/head/sector fields are floppy-era geometry; modern readers
+ *     use the LBA fields exclusively.
+ * (2) Types EASE accepts: 0x04 (FAT16 <32MB), 0x06 (FAT16), 0x0E (FAT16
+ *     LBA); later 0x0B/0x0C (FAT32). 0x00 marks an empty slot — check it
+ *     before the type match, all-zero entries are the common case.
+ *
+ * The partition types are
+ * ┌───────┬──────────────────────────────┬─────────────────────────────────┐
+ * │ Type  │           Meaning            │        Relevance to EASE        │
+ * ├───────┼──────────────────────────────┼─────────────────────────────────┤
+ * │ 0x00  │ Empty slot                   │ skip (most slots, most cards)   │
+ * │ 0x01  │ FAT12                        │ reject politely                 │
+ * │ 0x04  │ FAT16, volume < 32 MiB       │ accept                          │
+ * │ 0x06  │ FAT16, volume ≥ 32 MiB       │ accept                          │
+ * │ 0x0E  │ FAT16 (LBA)                  │ accept — the modern spelling    │
+ * │ 0x0B  │ FAT32 (CHS)                  │ accept when FAT32 lands         │
+ * │ 0x0C  │ FAT32 (LBA)                  │ accept when FAT32 lands — the   │
+ * │       │                              │ one shop cards actually use     │
+ * │ 0x07  │ NTFS or exFAT                │ recognize → helpful error (1)   │
+ * │ 0x05  │ Extended partition container │ ignore (nested table scheme)    │
+ * │ 0x0F  │ Extended (LBA)               │ ignore                          │
+ * │ 0x83  │ Linux filesystem             │ ignore                          │
+ * │ 0x82  │ Linux swap                   │ ignore                          │
+ * │ 0xEE  │ GPT protective (2)           │ recognize → helpful error       │
+ * │ 0xEF  │ EFI system partition         │ ignore                          │
+ * └───────┴──────────────────────────────┴─────────────────────────────────┘
+ *
+ */
 
 use super::{BOOT_SECTOR_SIG, SECTOR_SIZE};
 
