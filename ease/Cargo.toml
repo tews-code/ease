@@ -13,7 +13,7 @@ name = "ease"
 path = "src/main.rs"
 
 [features]
-default = ["test-all"]
+default = ["test-all", "fat32", "trace", "paint-stack"]
 qemu = []  # For QEMU-specific code
 profile = []
 trace = []
