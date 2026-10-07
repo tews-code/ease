@@ -57,6 +57,18 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         name: "user_write_probe",
         image: Image::Flash(user_write_probe),
     },
+    Program {
+        name: "user_print_probe",
+        image: Image::Flash(user_print_probe),
+    },
+    Program {
+        name: "print-probe",
+        image: Image::Blob(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
+            "print-probe.bin"
+        ))),
+    },
 ]);
 
 /// User programs are either built into the OS binary as functions and loaded from flash
@@ -419,6 +431,22 @@ pub extern "C" fn user_write_probe() {
     user_exit();
 }
 
+/// Prints `PRINT OK` through [`user_put_char`] and exits: a smoke test for
+/// the helper every other probe uses to report its verdict, so a broken
+/// print path fails here by name rather than as a confusing probe failure.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_print_probe() {
+    // Fixed-size array and index loop only: `.len()` and iterators are
+    // calls into core, which U-mode cannot execute
+    const MSG: [u8; 9] = *b"PRINT OK\n";
+    let mut i = 0;
+    while i < 9 {
+        user_put_char(MSG[i] as usize);
+        i += 1;
+    }
+    user_exit();
+}
+
 /// Raw WRITE syscall returning the kernel's (error, value) pair unchanged
 #[unsafe(link_section = ".user_text")]
 fn user_write(fd: usize, addr: usize, len: usize) -> (usize, usize) {
@@ -453,11 +481,16 @@ pub fn user_get_char() -> Option<usize> {
 
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn user_put_char(b: usize) {
+    let buf: [u8; 1] = [b as u8; 1];
+    let _value: usize;
+    let _error: usize;
     unsafe {
         core::arch::asm!(
             "ecall",
-            in("a0") b,
-            in("a7") syscall::PUT_CHAR,
+            inout("a0") 1 => _error,
+            inout("a1") &buf as *const u8 => _value,
+            in("a2") 1,
+            in("a7") syscall::WRITE,
         );
     }
 }

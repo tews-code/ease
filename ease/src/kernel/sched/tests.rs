@@ -2765,6 +2765,66 @@ fn blocking_syscall_preserves_user_registers() {
     );
 }
 
+/// Spawn a user program and wait for it to exit, returning whether it did.
+fn run_to_exit(name: &'static str) -> bool {
+    let handle = crate::kernel::sched::spawn_process(name).expect("probe spawn should succeed");
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            return true;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    false
+}
+
+// PRINT SMOKE TEST for the kernel-side user_put_char helper. Every in-kernel
+// probe reports its verdict through it, so when it breaks they all fail
+// with misleading messages (twice now via the register probe). This names
+// the real culprit. The `a_` prefix is load-bearing: test cases run in
+// name order and the runner stops at the first failure, so both smoke
+// tests must sort before every probe that prints.
+#[test_case]
+fn a_print_smoke_user_put_char() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("user_print_probe"), "print probe never exited");
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("PRINT OK\n"),
+        "user_put_char output missing: the shared probe print helper is broken"
+    );
+}
+
+// PRINT SMOKE TEST for ease-ulib's println! as a real blob program uses it:
+// core::fmt -> Writer::write_str -> write_all -> WRITE. The 200-byte line is
+// longer than one WRITE call takes, so it only arrives whole if write_all
+// loops correctly over short writes.
+#[test_case]
+fn a_print_smoke_ulib_println() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("print-probe"), "ulib print probe never exited");
+    #[cfg(feature = "test-io")]
+    {
+        assert!(
+            crate::io::test_io::contains("ULIB PRINT 42 OK\n"),
+            "formatted println! output missing"
+        );
+        let long = "0123456789012345678901234567890123456789";
+        let mut expected = [0u8; 201];
+        for (i, byte) in expected[..200].iter_mut().enumerate() {
+            *byte = long.as_bytes()[i % long.len()];
+        }
+        expected[200] = b'\n';
+        assert!(
+            crate::io::test_io::contains(
+                core::str::from_utf8(&expected).expect("digits are ASCII")
+            ),
+            "200-byte println! line did not arrive intact: write_all short-write loop is broken"
+        );
+    }
+}
+
 // WRITE end to end from U-mode: user_write_probe issues valid writes on
 // fds 1 and 2, a bad fd, a buffer outside its memory, a zero-length write
 // and one longer than the kernel's per-call buffer, checking each

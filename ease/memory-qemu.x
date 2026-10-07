@@ -57,7 +57,7 @@ ENTRY(_start) /* For ELF metadata e.g. debugger */
  *             |  PSRAM heap ->     |
  *             |    (4MB)           |
  *             +--------------------+   End of heap
- *             | .user_text (4KB)   |   Temporary for user processes set at compile time; Must be NAPOT for PMP
+ *             | .user_text (8KB)   |   Temporary for user processes set at compile time; Must be NAPOT for PMP
  *             +--------------------+
  *             | .user_data/bss(4KB)|   Temporary for user processes set at compile time; Must be NAPOT for PMP
  *             +--------------------+

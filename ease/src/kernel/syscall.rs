@@ -4,7 +4,7 @@ use crate::arch::{trap, umode};
 use crate::drivers::{keyboard, uart};
 use crate::kernel::{self, interrupts, sync};
 use crate::sched::{self, SyscallContext, thread, usermem};
-use ease_abi::syscall;
+use ease_abi::{fds, syscall};
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
@@ -33,16 +33,6 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
                 kernel::trap::Work::Syscall(frame.syscall()),
             );
             umode::EcallResult::Diverted
-        }
-        syscall::PUT_CHAR => {
-            // Advance mepc
-            frame.mepc += 4;
-            if let Some(c) = char::from_u32(frame.a0 as u32) {
-                dprint!("{}", c);
-            }
-            frame.a0 = 0;
-            frame.a1 = 0;
-            umode::EcallResult::Completed
         }
         syscall::WRITE => {
             kernel::trap::divert_work_to_kernel(
@@ -129,7 +119,7 @@ fn get_char(frame: &mut trap::Frame) {
 fn write(frame: &mut trap::Frame) {
     // No wait loop, so no need to call [sched::exit_user_thread_if_needs_exit].
     // Check if the fd is valid
-    if frame.a0 != 1 && frame.a0 != 2 {
+    if frame.a0 != fds::STDOUT && frame.a0 != fds::STDERR {
         // Wrong file descriptor, set up frame for error number and return
         frame.a0 = ease_abi::Error::BadFd.into();
         frame.a1 = 0;

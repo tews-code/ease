@@ -4,7 +4,7 @@
 
 use core::arch::asm;
 
-use ease_abi::syscall;
+use ease_abi::{fds, syscall};
 use ease_abi::Error;
 pub use ease_abi::ascii;
 
@@ -15,9 +15,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     exit();
 }
 
-/// Print a single u8 ASCII character to console
+/// Print a single u8 byte to standard out
 pub fn put_char(ch: u8) -> Result<(), Error> {
-    ecall1(syscall::PUT_CHAR, ch as usize).map(|_| () )
+    let buf = [ch; 1];
+    ecall3(syscall::WRITE, fds::STDOUT, buf.as_ptr().addr(), 1).map(|_| () )
 }
 /// Get a key from the keyboard
 ///
@@ -83,6 +84,7 @@ fn ecall0(syscall: usize) -> Result<usize, Error> {
 }
 /// Common syscall asm and error decoded for one argument syscalls
 /// `error` in a0, `value` in a1, zero means success
+#[expect(dead_code)]
 fn ecall1(syscall: usize, arg: usize) -> Result<usize, Error> {
     let error: usize;
     let value: usize;
@@ -140,14 +142,13 @@ pub extern "C" fn _start() -> ! {
 
 // PRINT MACROS
 
-/// Struct that prints via syscall::PUT_CHAR
+/// Struct that prints via syscall::WRITE to STDOUT
 pub struct Writer;
 
 impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for &b in s.as_bytes() {
-            let _ = put_char(b);
-        }
+        write_all(fds::STDOUT, s.as_bytes())
+            .map_err(|_| core::fmt::Error)?;
         Ok(())
     }
 }
