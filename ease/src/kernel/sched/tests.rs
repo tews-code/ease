@@ -493,11 +493,13 @@ fn minimal_wake_latency_under_two_busy_harts() {
             let start = crate::kernel::timer::elapsed_ms();
             crate::kernel::sched::sleep(20);
             let elapsed = (crate::kernel::timer::elapsed_ms() - start) as usize;
-            // Dump the trace the instant a late wake is seen, so its tail
-            // shows which thread held the CPU while we sat Ready.
+            // Panic the instant a late wake is seen: under `trace` the panic
+            // handler dumps the trace with the other hart parked, so its tail
+            // shows which thread held the CPU while we sat Ready. (Calling
+            // dump_trace here directly would read the ring while both harts
+            // are still writing it.)
             #[cfg(feature = "trace")]
             if elapsed > 40 {
-                crate::kernel::sched::trace::dump_trace();
                 panic!("minimal repro: woke late {elapsed} ms");
             }
             // Record the worst latency seen across iterations.
@@ -532,8 +534,15 @@ fn minimal_wake_latency_under_two_busy_harts() {
     // state resembles the steady-state suite (high-pass runners).
     crate::kernel::sched::sleep(200);
 
+    // The panic handler and its trace dump run on the measurer's own stack.
+    // A dump that panicked part-way on a 2 KB stack was seen with this
+    // thread's canary corrupted, so give the dump headroom under `trace`.
     crate::kernel::sched::Builder::new()
-        .with_stack_class(Order::KB2)
+        .with_stack_class(if cfg!(feature = "trace") {
+            Order::KB8
+        } else {
+            Order::KB2
+        })
         .spawn(measurer)
         .expect("spawn measurer");
 

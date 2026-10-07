@@ -10,8 +10,9 @@ use crate::kernel::stack;
 #[cfg(test)]
 use crate::qemu;
 
-pub(super) static STOP: AtomicBool = AtomicBool::new(false);
-pub(super) static PARKED: AtomicBool = AtomicBool::new(false);
+pub(crate) static STOP: AtomicBool = AtomicBool::new(false);
+pub(crate) static PARKED: AtomicBool = AtomicBool::new(false);
+pub(super) static PANIC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" {
     static __hart0_idle_stack_base: u8;
@@ -109,6 +110,23 @@ impl core::fmt::Write for DirectConsoleWriter {
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     {
+        use core::fmt::Write;
+        let mut console = DirectConsoleWriter { x: 0, y: 0 };
+
+        // If there is already a panic ongoing, just print this message and stop - we are panicing inside a panic.
+        if PANIC_IN_PROGRESS
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            dprintln!("PANIC: {info}");
+            let _ = write!(console, "PANIC: {info}");
+            #[cfg(test)]
+            qemu::exit_failure();
+            #[cfg(not(test))]
+            loop {
+                wait_for_interrupt();
+            }
+        }
         // No more interrupts
         crate::arch::interrupts::disable();
         // Tell other hart to stop
@@ -120,10 +138,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
             counter += 1;
             core::hint::spin_loop();
         }
-
-        use core::fmt::Write;
-
-        let mut console = DirectConsoleWriter { x: 0, y: 0 };
 
         // Now go ahead with panic info dump
         dprintln!("PANIC: {info}");

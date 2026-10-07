@@ -69,5 +69,40 @@ pub(super) fn test_runner(tests: &[&dyn Testable]) {
         crate::kernel::irqsoff::test_boundary("(end of run)");
         crate::kernel::irqsoff::print_report();
     }
+    #[cfg(feature = "trace")]
+    dump_trace_at_end_of_run();
     crate::qemu::exit_success();
+}
+
+/// Dump the scheduler trace at the end of every passing `--trace` run, so the
+/// dump code runs on every such run instead of only on a failure (it had
+/// rotted unseen: a light snapshot's unknown other-hart roster panicked it).
+///
+/// `dump_trace` must run single-threaded with no concurrent snapshot writers,
+/// so this freezes the system the way the panic handler does: park the other
+/// hart via STOP + IPI and keep this hart's interrupts off for the dump.
+#[cfg(all(test, feature = "trace"))]
+fn dump_trace_at_end_of_run() {
+    use crate::kernel::panic::{PARKED, STOP};
+    use core::sync::atomic::Ordering;
+    // The dump writes straight to the UART; drain the buffered test output
+    // first so the two don't interleave
+    uart::flush();
+    crate::kernel::interrupts::with_interrupts_disabled(|_cs| {
+        STOP.store(true, Ordering::Relaxed);
+        crate::kernel::ipi::send(crate::kernel::ipi::RESCHEDULE);
+        let start = crate::kernel::timer::elapsed_ms();
+        while !PARKED.load(Ordering::Acquire) {
+            assert!(
+                crate::kernel::timer::elapsed_ms() - start < 1000,
+                "other hart never parked for the end-of-run trace dump"
+            );
+            core::hint::spin_loop();
+        }
+        // Light points are rare (only when a snapshot finds the sched lock
+        // hot) and the runner resets the trace per test, so force one: the
+        // dump's light-row rendering then runs on every trace run.
+        crate::kernel::sched::trace::take_light_snapshot_for_test("end-of-run");
+        crate::kernel::sched::trace::dump_trace();
+    });
 }

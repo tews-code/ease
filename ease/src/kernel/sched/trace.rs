@@ -312,6 +312,14 @@ fn take_light_snapshot(label: &'static str) {
     }
 }
 
+/// Test hook: record a light point unconditionally, so the end-of-run dump
+/// renders the light-row path on every trace run instead of only when a
+/// snapshot happened to find the scheduler lock hot.
+#[cfg(test)]
+pub(crate) fn take_light_snapshot_for_test(label: &'static str) {
+    take_light_snapshot(label);
+}
+
 /// Discard all buffered snapshots. The test runner calls this at each test
 /// boundary so a panic dump shows only the failing test's history, not the
 /// tail of whatever ran before it (e.g. T3's busy contenders bleeding into
@@ -480,11 +488,12 @@ pub(crate) fn dump_trace() {
         // dense run of these lines, then move on.
         if unsafe { (**tp).light } {
             for h in 0..HARTS_MAX {
-                let cur = unsafe { (**tp).per_cpu[h].current_thread_handle }
-                    .unwrap()
-                    .idx();
                 let nr = unsafe { (**tp).per_cpu[h].needs_reschedule };
-                dprint!(" H{h}:cur{cur}{} |", if nr { "*" } else { "" });
+                if let Some(cur) = unsafe { (**tp).per_cpu[h].current_thread_handle } {
+                    dprint!(" H{h}:cur{}{} |", cur.idx(), if nr { "*" } else { "" });
+                } else {
+                    dprint!(" H{h}:cur?{} |", if nr { "*" } else { "" });
+                }
             }
             dprintln!(" [light]");
             continue;
