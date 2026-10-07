@@ -53,41 +53,47 @@ impl<'a> ValidatedUserBuf<'a> {
     }
     /// Copy from a given source slice into the user buffer.
     ///
-    /// Returns the number of bytes copied. If the transfer direction is wrong
-    /// `0` bytes are copied.
+    /// Returns the number of bytes copied.
+    ///
+    /// # Panics
+    /// Panics if the transfer direction is wrong.
     pub(crate) fn copy_to_user(&self, src: &[u8]) -> usize {
-        if self.direction == Transfer::ToUser {
-            let copy_len = self.buf.len().min(src.len());
-            let bytes_uncopied = with_interrupts_disabled(|_c|
-                // Safety:
-                // - The borrow ensures that the validated buffer still belongs to a live process
-                // - the kernel slice is a Rust reference, so it's valid, and &mut rules out other readers or writers
-                // - PMP checks every access to the user side, so concurrent writes from other user threads are harmless.
-                unsafe {
-                    uaccess::copy_to_user(src.as_ptr(), self.buf.cast::<u8>().as_ptr(), copy_len)
-                });
-            return copy_len - bytes_uncopied;
-        }
-        0
+        assert!(
+            self.direction == Transfer::ToUser,
+            "invalid buffer transfer direction"
+        );
+        let copy_len = self.buf.len().min(src.len());
+        let bytes_uncopied = with_interrupts_disabled(|_c|
+            // Safety:
+            // - The borrow ensures that the validated buffer still belongs to a live process
+            // - the kernel slice is a Rust reference, so it's valid, and &mut rules out other readers or writers
+            // - PMP checks every access to the user side, so concurrent writes from other user threads are harmless.
+            unsafe {
+                uaccess::copy_to_user(src.as_ptr(), self.buf.cast::<u8>().as_ptr(), copy_len)
+            });
+        copy_len - bytes_uncopied
     }
     /// Copy from the user buffer into a slice.
     ///
-    /// Returns the number of bytes copied. If the transfer direction is wrong
-    /// `0` bytes are copied.
+    /// Returns the number of bytes copied.
+    ///
+    /// # Panics
+    /// Panics if the transfer direction is wrong.
     pub(crate) fn copy_from_user(&self, dest: &mut [u8]) -> usize {
-        if self.direction == Transfer::FromUser {
-            let copy_len = self.buf.len().min(dest.len());
-            let bytes_uncopied = with_interrupts_disabled(|_c|
-                // Safety:
-                // - The borrow ensures that the validated buffer still belongs to a live process
-                // - the kernel slice is a Rust reference, so it's valid, and &mut rules out other readers or writers
-                // - PMP checks every access to the user side, so concurrent writes from other user threads are harmless.
-                unsafe {
-                    uaccess::copy_from_user(self.buf.cast::<u8>().as_ptr(), dest.as_mut_ptr(), copy_len)
-                });
-            return copy_len - bytes_uncopied;
-        }
-        0
+        assert!(
+            self.direction == Transfer::FromUser,
+            "invalid data transfer direction for buffer"
+        );
+        let copy_len = self.buf.len().min(dest.len());
+        let bytes_uncopied = with_interrupts_disabled(|_c|
+            // Safety:
+            // - The borrow ensures that the validated buffer still belongs to a live process
+            // - the kernel slice is a Rust reference, so it's valid, and &mut rules out other readers or writers
+            // - PMP checks every access to the user side, so concurrent writes from other user threads are harmless.
+            unsafe {
+                uaccess::copy_from_user(self.buf.cast::<u8>().as_ptr(), dest.as_mut_ptr(), copy_len)
+            });
+        copy_len - bytes_uncopied
     }
 }
 /// This informs what access the kernel will have to a provided user buffer
