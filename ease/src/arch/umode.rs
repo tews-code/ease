@@ -67,17 +67,11 @@
 
 use super::{context, umode};
 use crate::arch::trap;
-use crate::drivers::keyboard;
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::sched::{self, post_switch_cleanup, thread, userloader::UserEntry};
 use crate::kernel::stack;
-use crate::kernel::sync;
-use crate::kernel::trap::{Work, divert_work_to_kernel};
 use core::arch::naked_asm;
 use core::ptr::NonNull;
-use ease_abi::syscall;
-#[cfg(feature = "profile")]
-use ease_macros::profile;
 
 pub(crate) enum EcallResult {
     Completed,
@@ -214,100 +208,4 @@ pub(crate) extern "C" fn user_thread_exit(reason: usize) -> ! {
         _ => panic!("unknown user thread exit reason"),
     };
     sched::exit_current_user_thread(exit_reason);
-}
-/// Handles blocking system calls for user threads.
-/// Checks if the user thread should be exited and performs exit call.
-///
-/// # Panics #
-/// Panics if the system call number is unknown
-pub(crate) fn user_thread_block(frame: &mut trap::Frame, syscall: usize) {
-    match syscall {
-        syscall::GET_CHAR => {
-            // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
-            sched::exit_user_thread_if_needs_exit();
-            // Block using a wait queue, with a closure to evalute the key press
-            let mut key = None;
-            let result = keyboard::queue::KEYS_PENDING.wait_with_interruptible(
-                &keyboard::queue::CONSUMER,
-                |consumer| {
-                    key = consumer
-                        .as_mut()
-                        .expect("decoded key queue must be initialised")
-                        .pop();
-                    key.is_some()
-                },
-            );
-            match result {
-                Ok(guard) => drop(guard),
-                Err(sync::Interrupted) => {
-                    sched::exit_current_user_thread(thread::ExitReason::Fault)
-                }
-            }
-            // Return the key in the frame's value field
-            frame.a0 = 0;
-            frame.a1 = key
-                .expect("wait should only have returned on a valid key popped")
-                .code();
-        }
-        // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
-        // discipline. The guard lives in an inner scope: on Err(Interrupted)
-        // we leave the scope by normal control flow, the guard drops (mutex
-        // freed), and only THEN does the thread exit. Calling exit inside
-        // the scope would leak the guard — exit diverges, Drop never runs.
-        #[cfg(all(test, feature = "test-sched"))]
-        syscall::TEST_MUTEX_BLOCK => {
-            use crate::kernel::sched::test_support;
-            {
-                let _guard = test_support::TEST_MUTEX.lock();
-                while test_support::TEST_MUTEX_SIGNAL.wait_interruptible().is_ok() {
-                    // Spurious signal: keep holding and keep waiting.
-                }
-                // Err(Interrupted): fall out of the scope, dropping _guard.
-            }
-            sched::exit_current_user_thread(thread::ExitReason::Fault);
-        }
-        _ => panic!("unexpected blocking syscall: {}", syscall),
-    }
-}
-/// Handle U-mode ecalls
-///
-/// We only expect ecalls from u-mode
-/// For blocking calls we use the percpu::resume_* stash
-#[inline(never)]
-#[cold]
-#[cfg_attr(feature = "profile", profile)]
-pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> EcallResult {
-    match frame.syscall() {
-        syscall::EXIT => {
-            frame.a0 = thread::ExitReason::Exit as usize;
-            frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
-            EcallResult::Diverted
-        }
-        syscall::PUT_CHAR => {
-            // Advance mepc
-            frame.mepc += 4;
-            if let Some(c) = char::from_u32(frame.a0 as u32) {
-                crate::dprint!("{c}");
-            }
-            frame.a0 = 0; // Report success
-            frame.a1 = 0;
-            EcallResult::Completed
-        }
-        syscall::GET_CHAR => {
-            divert_work_to_kernel(frame, frame.mepc + 4, Work::Syscall(frame.syscall()));
-            EcallResult::Diverted
-        }
-        // Test-only: park holding a kernel mutex, for the boundary-kill test.
-        #[cfg(all(test, feature = "test-sched"))]
-        syscall::TEST_MUTEX_BLOCK => {
-            divert_work_to_kernel(frame, frame.mepc + 4, Work::Syscall(frame.syscall()));
-            EcallResult::Diverted
-        }
-        _ => {
-            // Advance mepc
-            frame.mepc += 4;
-            crate::dprint!("user ecall code {}", frame.syscall());
-            EcallResult::Completed
-        }
-    }
 }

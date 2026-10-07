@@ -147,7 +147,6 @@ pub mod mstatus {
     pub const MPP: usize = 3 << 11;
     /// Modify privilege
     pub const MPRV: usize = 1 << 17;
-
     /// Atomically sets bits in the mstatus CSR.
     pub fn enable_bits(bits: usize) {
         // Safety: csrs atomically sets bits in mstatus CSR

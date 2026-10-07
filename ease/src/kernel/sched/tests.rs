@@ -2765,6 +2765,34 @@ fn blocking_syscall_preserves_user_registers() {
     );
 }
 
+// WRITE end to end from U-mode: user_write_probe issues valid writes on
+// fds 1 and 2, a bad fd, a buffer outside its memory, a zero-length write
+// and one longer than the kernel's per-call buffer, checking each
+// (error, value) pair itself and printing WRITE OK or WRITE FAIL <mask>.
+// A kernel-side panic on the WRITE path (e.g. the UART writer's
+// interrupts-enabled assert) fails the run outright.
+#[test_case]
+fn write_syscall_reports_counts_and_errors() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle = crate::kernel::sched::spawn_process("user_write_probe")
+        .expect("write probe spawn should succeed");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(drained, "write probe never exited");
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("WRITE OK"),
+        "write probe did not print WRITE OK (see WRITE FAIL <mask> on the console)"
+    );
+}
+
 // Exercises the user-stack canary response: user_canary_stomp overwrites
 // the canary word at the base of its own stack (its own memory — PMP
 // permits it) and spins. The trap handler's post-match canary check must

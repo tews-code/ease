@@ -10,7 +10,7 @@ use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
 use crate::drivers::{plic, uart, virtio};
 use crate::kernel::sched::{thread, userloader};
-use crate::kernel::{ipi, panic, percpu, sched, stack};
+use crate::kernel::{ipi, panic, percpu, sched, stack, syscall};
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -128,7 +128,7 @@ fn trap_handler_impl(frame: &mut trap::Frame) {
         }
         Trap::Interrupt(EXTERNAL) => handle_external_irq(),
         Trap::Interrupt(code) => handle_unknown_interrupt(code),
-        Trap::Exception(ECALL_FROM_U) => match umode::handle_ecall(frame) {
+        Trap::Exception(ECALL_FROM_U) => match syscall::handle_ecall(frame) {
             EcallResult::Completed => {}
             EcallResult::Diverted => return,
         },
@@ -186,7 +186,8 @@ pub(crate) enum Work {
 /// Examines the percpu resume work field and dispatches to resume that work
 /// This function is `extern "C"` so it can be called from asm!.
 ///
-/// The caller *must* use [percpu::set_resume_context] to avoid panic
+/// The caller *must* use [percpu::set_resume_context] to avoid panic.
+/// For user threads that are diverted see [crate::kernel::syscall].
 ///
 /// # Panics
 /// Panics if the resume context is `None`
@@ -195,7 +196,7 @@ pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
         .expect("should not be resuming work if no deferred work is stashed in percpu");
     match resume_context.work {
         Work::Preempt => sched::schedule(),
-        Work::Syscall(syscall) => umode::user_thread_block(frame, syscall),
+        Work::Syscall(syscall) => syscall::handle_diverted_user_thread(frame, syscall),
         Work::Exit(reason) => sched::exit_current_user_thread(reason),
     }
     // Put the resume context into the frame

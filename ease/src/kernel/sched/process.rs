@@ -38,7 +38,7 @@ impl SyscallContext {
     ///
     /// # Panics
     /// Panics if called on a kernel thread
-    pub(crate) fn process() -> Self {
+    pub(crate) fn current() -> Self {
         let thread = percpu::current_thread();
         let process = sched::thread::Threads::process_handle_of(
             &sched::stride::SCHEDULER.sched.lock().threads,

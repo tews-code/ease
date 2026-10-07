@@ -103,7 +103,6 @@ pub(crate) enum Transfer {
     FromUser,
     ToUser,
 }
-
 impl Transfer {
     pub(crate) fn pmp_permission(&self) -> u8 {
         match self {
@@ -120,6 +119,16 @@ pub(crate) struct UserBuf {
     base_addr: usize,
     len: usize,
     pub(super) direction: Transfer, // Direction the data is moving. Must match the PMP of that memory extent
+}
+impl UserBuf {
+    /// Create a new untrusted user buffer from raw parts.
+    pub(crate) const fn new(base_addr: usize, len: usize, direction: Transfer) -> Self {
+        Self {
+            base_addr,
+            len,
+            direction,
+        }
+    }
 }
 /// The form of backing for the memory region - either fixed from the linker or
 /// dynamically from the buddy allocator

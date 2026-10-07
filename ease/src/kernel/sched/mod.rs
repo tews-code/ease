@@ -23,6 +23,7 @@ use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::percpu;
 use crate::user;
 pub(crate) use deadline::Deadline;
+pub(crate) use process::SyscallContext;
 use stride::SCHEDULER;
 #[expect(unused_imports)]
 pub(crate) use stride::{PRIORITY_DEFAULT, PRIORITY_MIN, SchedInner};

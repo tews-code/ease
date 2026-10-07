@@ -31,6 +31,7 @@ use crate::arch::{hart_id, interrupts, mmio};
 use crate::board::uart;
 use crate::kernel::collection::{StackVec, spsc};
 use crate::kernel::sync::SpinLock;
+use core::fmt::Write;
 
 // Standard 16550 UART offsets
 /// Receive Buffer Register
@@ -287,6 +288,8 @@ pub(crate) struct UartWriter {
 }
 
 impl UartWriter {
+    /// Size of StackVec used to push through formatted text for lost bytes
+    const LOST_BYTES_STR_LEN: usize = 48;
     /// New UartWriter
     const fn new() -> Self {
         Self {
@@ -307,29 +310,35 @@ impl UartWriter {
             Err(())
         }
     }
-}
-/// Implement Write trait on sealed struct - only use via [with_uart_writer]
-impl core::fmt::Write for UartWriter {
-    /// Writes all the bytes in the string and
-    /// enables the THRE interrupt when done
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+    /// Push a byte slice into the transmission queue. Enables THRE when done.
+    /// Returns the number of bytes successfully queued
+    pub(crate) fn write_bytes(&mut self, buf: &[u8]) -> usize {
         if self.lost > 0 {
-            let mut marker: StackVec<u8, 48> = StackVec::new();
+            let mut marker: StackVec<u8, { Self::LOST_BYTES_STR_LEN }> = StackVec::new();
             let _ = write!(marker, "\nLost bytes: {}\n", self.lost);
             if queue::TX.remaining() < marker.len() {
                 // Still no room to report the gap: this write joins it.
-                self.lost += s.len();
-                return Ok(());
+                self.lost += buf.len();
+                return 0;
             }
             for &byte in marker.as_slice() {
                 let _ = self.write_byte(byte);
             }
             self.lost = 0;
         }
-        let dropped = s.bytes().filter(|&b| self.write_byte(b).is_err()).count();
+        let dropped = buf.iter().filter(|&&b| self.write_byte(b).is_err()).count();
         self.lost += dropped;
         mmio::fence_mem_write_to_mmio_write();
         THRE_interrupt_enable();
+        buf.len() - dropped
+    }
+}
+/// Implement Write trait on sealed struct - only use via [with_uart_writer]
+impl Write for UartWriter {
+    /// Queues the strings bytes. Any dropped bytes are counted in the UartWriter struct
+    /// and are printed as lost bytes when the queue next has sufficient slots.
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let _ = self.write_bytes(s.as_bytes());
         Ok(())
     }
 }

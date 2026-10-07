@@ -103,6 +103,12 @@ mod arch {
             #[inline]
             pub fn enable_bits(_bits: usize) {}
         }
+        pub mod mstatus {
+            #[inline]
+            pub fn read() -> usize {
+                0
+            }
+        }
     }
 
     // Stubs for `kernel::profile` so the lib crate can compile profiled

@@ -15,8 +15,9 @@ use crate::kernel::irqsoff::{self, Site};
 use core::panic::Location;
 
 /// Enables machine-wide interrupts for this hart
+/// Returns the mstatus prior to interrupts being enabled.
 #[cfg_attr(feature = "irqsoff", track_caller)]
-pub(crate) fn enable() {
+pub(crate) fn enable() -> usize {
     // Close the section before re-enabling, so a trap landing straight after
     // `csrsi` opens a fresh one. A redundant enable (MIE already set) closes
     // nothing: any pending open is a dangling one from an invisible close.
@@ -24,10 +25,12 @@ pub(crate) fn enable() {
     if !enabled() {
         irqsoff::close(Site::At(Location::caller()));
     }
+    let mstatus: usize;
     unsafe {
         // Write mstatus to set MIE
-        core::arch::asm!("csrsi mstatus, {}", const csr::mstatus::MIE);
+        core::arch::asm!("csrrsi {}, mstatus, {}", out(reg) mstatus, const csr::mstatus::MIE);
     }
+    mstatus
 }
 
 /// Disables interrupts
@@ -48,7 +51,7 @@ pub(crate) fn disable() -> usize {
     mstatus
 }
 
-/// Enables interrupts if previously enabled
+/// Enables interrupts if previously enabled, following a [disable].
 ///
 /// - `prev` is the previous machine status register
 ///
@@ -62,6 +65,17 @@ pub(crate) fn restore(prev: usize) {
         unsafe {
             core::arch::asm!("csrsi mstatus, {}", const csr::mstatus::MIE);
         }
+    }
+}
+/// Unconditionally reverts the interrupt status to that held in the previous `mstatus` provided.
+///
+/// - `prev` is the previous machine status register
+#[cfg_attr(feature = "irqsoff", track_caller)]
+pub(crate) fn revert(prev: usize) {
+    if prev & csr::mstatus::MIE != 0 {
+        enable();
+    } else {
+        disable();
     }
 }
 

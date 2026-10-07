@@ -38,3 +38,21 @@ where
 
     result
 }
+/// Runs the closure with interrupts enabled.
+/// Interrupts are restored to their previous state when the closure returns.
+///
+/// # Safety:
+/// The caller must not hold an interrupts-off token, e.g. a IrqSpinLock guard
+/// or CriticalSection token.
+#[cfg(target_os = "none")]
+#[cfg_attr(feature = "irqsoff", track_caller)] // irqsoff attributes the section to our caller
+pub(crate) unsafe fn with_interrupts_enabled<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let prev = interrupts::enable();
+    let result = f();
+    interrupts::revert(prev);
+
+    result
+}

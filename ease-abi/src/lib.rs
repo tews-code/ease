@@ -38,7 +38,7 @@ pub enum Error {
     /// Attempt to write but zero bytes written; Produced by `ulib` not kernel.
     WriteZero = 4,
 }
-/// Convert an error number into the Error enum
+/// Convert an error number into the Error enum.
 ///
 /// If the error is successfully mapped, returns `Ok` holding the error variant.
 /// If the error is not mapped, returns `Err` holding the unmapped value.
@@ -52,6 +52,12 @@ impl TryFrom<usize> for Error {
             v if v == Error::WriteZero as usize => Ok(Error::WriteZero),
             _ => Err(value),
         }
+    }
+}
+/// Convert an Error into a number.
+impl From<Error> for usize {
+    fn from(value: Error) -> Self {
+        value as usize
     }
 }
 

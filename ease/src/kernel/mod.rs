@@ -18,5 +18,6 @@ pub mod profile;
 pub mod sched;
 pub mod stack;
 pub mod sync;
+mod syscall;
 pub mod timer;
 pub mod trap;

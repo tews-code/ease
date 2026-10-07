@@ -53,6 +53,10 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         name: "user_register_probe",
         image: Image::Flash(user_register_probe),
     },
+    Program {
+        name: "user_write_probe",
+        image: Image::Flash(user_write_probe),
+    },
 ]);
 
 /// User programs are either built into the OS binary as functions and loaded from flash
@@ -313,6 +317,123 @@ pub extern "C" fn user_register_probe() {
     loop {
         unsafe { core::arch::asm!("nop") };
     }
+}
+
+/// Length of the probe's long buffer: longer than any sensible per-call
+/// kernel WRITE buffer, so the kernel must return a short count.
+const WRITE_PROBE_LONG: usize = 160;
+
+/// Exercises the WRITE syscall from U-mode and prints a verdict for the
+/// kernel-side test: `WRITE OK` on success, otherwise `WRITE FAIL 0x<mask>`
+/// with one bit per failed step, then exits.
+///
+/// Buffers live on the user stack (the only writable user memory a Flash
+/// program has) and are filled byte by byte: zero-filling or copying an
+/// array would become a memset/memcpy call into kernel text, which U-mode
+/// cannot execute.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_write_probe() {
+    use ease_abi::Error;
+    let mut short = core::mem::MaybeUninit::<[u8; 8]>::uninit();
+    let short_ptr = short.as_mut_ptr().cast::<u8>();
+    let mut long = core::mem::MaybeUninit::<[u8; WRITE_PROBE_LONG]>::uninit();
+    let long_ptr = long.as_mut_ptr().cast::<u8>();
+    unsafe {
+        core::arch::asm!(
+            // short = "[write]\n"
+            "li t0, '['", "sb t0, 0({s})",
+            "li t0, 'w'", "sb t0, 1({s})",
+            "li t0, 'r'", "sb t0, 2({s})",
+            "li t0, 'i'", "sb t0, 3({s})",
+            "li t0, 't'", "sb t0, 4({s})",
+            "li t0, 'e'", "sb t0, 5({s})",
+            "li t0, ']'", "sb t0, 6({s})",
+            "li t0, 10",  "sb t0, 7({s})",
+            // long = "=" * (WRITE_PROBE_LONG - 1) + "\n"
+            "li t0, '='",
+            "mv t1, {l}",
+            "addi t2, {l}, {last}",
+            "1:",
+            "sb t0, 0(t1)",
+            "addi t1, t1, 1",
+            "bne t1, t2, 1b",
+            "li t0, 10", "sb t0, 0(t1)",
+            s = in(reg) short_ptr,
+            l = in(reg) long_ptr,
+            last = const WRITE_PROBE_LONG - 1,
+            out("t0") _, out("t1") _, out("t2") _,
+        );
+    }
+    let short_addr = short_ptr as usize;
+    let mut fail: usize = 0;
+    // 0: a valid stack buffer on stdout is written in full
+    if user_write(1, short_addr, 8) != (0, 8) {
+        fail |= 1 << 0;
+    }
+    // 1: stderr is accepted too
+    if user_write(2, short_addr, 8) != (0, 8) {
+        fail |= 1 << 1;
+    }
+    // 2: any other fd is refused without touching the buffer
+    if user_write(7, short_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 2;
+    }
+    // 3: a buffer outside the process's memory is refused
+    if user_write(1, 0x1000, 8) != (Error::BadBuffer as usize, 0) {
+        fail |= 1 << 3;
+    }
+    // 4: zero length succeeds and writes nothing
+    if user_write(1, short_addr, 0) != (0, 0) {
+        fail |= 1 << 4;
+    }
+    // 5: a buffer longer than the kernel's per-call limit is a short count
+    let (error, written) = user_write(1, long_ptr as usize, WRITE_PROBE_LONG);
+    if error != 0 || written == 0 || written >= WRITE_PROBE_LONG {
+        fail |= 1 << 5;
+    }
+    user_put_char(b'\n' as usize);
+    if fail == 0 {
+        // Positive signal for the kernel-side test: a fault-kill would also
+        // drain the process, so a clean exit alone proves nothing
+        const OK: [u8; 9] = *b"WRITE OK\n";
+        let mut i = 0;
+        while i < 9 {
+            user_put_char(OK[i] as usize);
+            i += 1;
+        }
+    } else {
+        const MSG: [u8; 13] = *b"WRITE FAIL 0x";
+        const HEX: [u8; 16] = *b"0123456789abcdef";
+        let mut i = 0;
+        while i < 13 {
+            user_put_char(MSG[i] as usize);
+            i += 1;
+        }
+        let mut shift = 8;
+        while shift > 0 {
+            shift -= 4;
+            user_put_char(HEX[(fail >> shift) & 0xf] as usize);
+        }
+        user_put_char(b'\n' as usize);
+    }
+    user_exit();
+}
+
+/// Raw WRITE syscall returning the kernel's (error, value) pair unchanged
+#[unsafe(link_section = ".user_text")]
+fn user_write(fd: usize, addr: usize, len: usize) -> (usize, usize) {
+    let error: usize;
+    let value: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") fd => error,
+            inout("a1") addr => value,
+            in("a2") len,
+            in("a7") syscall::WRITE,
+        );
+    }
+    (error, value)
 }
 
 #[unsafe(link_section = ".user_text")]
