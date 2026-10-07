@@ -3,7 +3,8 @@
 use core::sync::atomic::Ordering;
 
 use crate::arch::csr::mcause::{self, Trap, exception::*, interrupt::*};
-use crate::arch::csr::{mepc, mtval};
+use crate::arch::csr::{mepc, mstatus, mtval};
+use crate::arch::uaccess;
 use crate::arch::umode::EcallResult;
 use crate::arch::{self, hart_id, trap, umode};
 use crate::board;
@@ -206,6 +207,7 @@ pub(crate) extern "C" fn run_resume_work(frame: &mut trap::Frame) {
 ///
 /// User processes are exited immediately.
 /// Kernel threads panic with some detail printed.
+/// The only recovered exceptions are those caused by uaccess copy access faults.
 #[inline(never)]
 #[cold]
 #[cfg_attr(feature = "profile", profile)]
@@ -244,20 +246,30 @@ fn handle_exception(frame: &mut trap::Frame, code: usize) {
     } else {
         match code {
             ILLEGAL_INSTRUCTION => panic!("Illegal instruction at {:x}", mepc::read()),
-            LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => panic!(
-                "{} access fault {} (=mcause) attempted at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
-                match code {
-                    LOAD_ACCESS_FAULT => "Load",
-                    STORE_ACCESS_FAULT => "Store",
-                    _ => {
-                        ""
-                    }
-                },
-                code,
-                mtval::read(),
-                mepc::read(),
-                frame.ra,
-            ),
+            LOAD_ACCESS_FAULT | STORE_ACCESS_FAULT => {
+                // Identify if this is an access fault during uaccess copy
+                if let Some(fixup_addr) = uaccess::fixup_for(frame.mepc) {
+                    // Set the return address to the fixup
+                    frame.mepc = fixup_addr;
+                    // Also clear MPRV from this trap frame
+                    frame.mstatus &= !mstatus::MPRV;
+                } else {
+                    panic!(
+                        "{} access fault {} (=mcause) attempted at address {:x} (=mtval) from instruction {:x} (=mepc), return address {:x} (=ra)",
+                        match code {
+                            LOAD_ACCESS_FAULT => "Load",
+                            STORE_ACCESS_FAULT => "Store",
+                            _ => {
+                                ""
+                            }
+                        },
+                        code,
+                        mtval::read(),
+                        mepc::read(),
+                        frame.ra
+                    )
+                }
+            }
             _ => panic!(
                 "Unknown exception code {:x} mepc {:x} mtval {:x}",
                 code,

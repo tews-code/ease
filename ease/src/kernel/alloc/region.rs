@@ -114,6 +114,13 @@ impl MemRegion {
     pub(crate) fn size(&self) -> usize {
         self.order.size()
     }
+    /// Confirms whether a memory extent is contained within the region
+    pub(crate) fn contains(&self, base_addr: usize, len: usize) -> bool {
+        base_addr >= self.base_addr()
+            && base_addr
+                .checked_add(len)
+                .is_some_and(|a| a <= self.top().addr().get())
+    }
 }
 
 impl Drop for MemRegion {

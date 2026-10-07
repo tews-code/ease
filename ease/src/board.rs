@@ -2,25 +2,15 @@
 
 #![allow(dead_code)]
 
-// Core-local interrupt (timer)
-pub mod clint {
-    pub const BASE: usize = 0x0200_0000;
-    pub const TIMER_FREQ_HZ: u64 = 10_000_000;
-}
+// HARTS
+pub const HARTS_MAX: usize = 2;
 
-pub mod virtio {
-    pub const VIRTQ_PAGE_SIZE: usize = 512;
-    // Virtio block device
-    pub mod blk {
-        pub const BASE: usize = 0x10001000; // Attached to MMIO bus 0
-        pub const BLOCK_SIZE: usize = 512;
-        pub const IRQ: u32 = 1;
-    }
-    // Virtio keyboard device
-    pub mod keyboard {
-        pub const BASE: usize = 0x10002000; // Attached to MMIO bus 1
-        pub const IRQ: u32 = 2;
-    }
+// PMP
+pub mod pmp {
+    pub const ADDR_COUNT: usize = 8;
+    pub(crate) const R: u8 = 1 << 0;
+    pub(crate) const W: u8 = 1 << 1;
+    pub(crate) const X: u8 = 1 << 2;
 }
 
 // Platform Level Interrupt Controller
@@ -42,8 +32,23 @@ pub mod uart {
     pub const FIFO_SIZE: usize = 16;
 }
 
-// HARTS
-pub const HARTS_MAX: usize = 2;
+// Core-local interrupt (timer)
+pub mod clint {
+    pub const BASE: usize = 0x0200_0000;
+    pub const TIMER_FREQ_HZ: u64 = 10_000_000;
+}
 
-// PMP
-pub const PMP_ADDR_COUNT: usize = 8;
+pub mod virtio {
+    pub const VIRTQ_PAGE_SIZE: usize = 512;
+    // Virtio block device
+    pub mod blk {
+        pub const BASE: usize = 0x10001000; // Attached to MMIO bus 0
+        pub const BLOCK_SIZE: usize = 512;
+        pub const IRQ: u32 = 1;
+    }
+    // Virtio keyboard device
+    pub mod keyboard {
+        pub const BASE: usize = 0x10002000; // Attached to MMIO bus 1
+        pub const IRQ: u32 = 2;
+    }
+}

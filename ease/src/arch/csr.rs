@@ -29,14 +29,11 @@ macro_rules! define_csr {
 
 /// PMP
 pub mod pmp {
-    pub(crate) const R: u8 = 1;
-    pub(crate) const W: u8 = 1 << 1;
-    pub(crate) const X: u8 = 1 << 2;
     pub(crate) const OFF: u8 = 0;
     pub(crate) const NAPOT: u8 = 0b11 << 3;
     pub(crate) const NO_ACCESS: u8 = 0;
     pub(crate) const LOCK: u8 = 1 << 7;
-
+    // PMP addresses - we use 8 of these
     define_csr!(pmpaddr0);
     define_csr!(pmpaddr1);
     define_csr!(pmpaddr2);
@@ -45,7 +42,7 @@ pub mod pmp {
     define_csr!(pmpaddr5);
     define_csr!(pmpaddr6);
     define_csr!(pmpaddr7);
-
+    // Config registers
     define_csr!(pmpcfg0);
     define_csr!(pmpcfg1);
 }
@@ -148,6 +145,8 @@ pub mod mstatus {
     pub const MPIE: usize = 1 << 7;
     /// Machine previous priority - mret stays in M-mode
     pub const MPP: usize = 3 << 11;
+    /// Modify privilege
+    pub const MPRV: usize = 1 << 17;
 
     /// Atomically sets bits in the mstatus CSR.
     pub fn enable_bits(bits: usize) {

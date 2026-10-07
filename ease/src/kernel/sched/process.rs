@@ -2,6 +2,8 @@
 //!
 //! Ease uses kernel scheduling for threads within a process
 
+use core::marker::PhantomData;
+
 use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
@@ -11,10 +13,76 @@ use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
 use crate::kernel::sched;
+use crate::kernel::sched::usermem::{UserBuf, ValidatedUserBuf};
 use crate::kernel::sync::IrqSpinLockGuard;
 
 pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
 const MAX_THREADS_PER_PROC: u8 = 6;
+
+/// A token to ensure the current thread's process is alive during syscalls.
+/// It holds the process handle as well as the active thread handle.
+pub(crate) struct SyscallContext {
+    process: Handle,
+    thread: thread::Handle,
+    _marker: PhantomData<*const ()>, // !Sync and !Send
+}
+
+impl SyscallContext {
+    /// Get a new SyscallContext token for the current thread which can be used
+    /// to guarantee the process is live through the duration of a syscall.
+    ///
+    /// This is guaranteed because the calling thread is running and never released
+    /// by any other thread, and a process is alive until it has zero threads left.
+    ///
+    /// Takes the scheduler lock.
+    ///
+    /// # Panics
+    /// Panics if called on a kernel thread
+    pub(crate) fn process() -> Self {
+        let thread = percpu::current_thread();
+        let process = sched::thread::Threads::process_handle_of(
+            &sched::stride::SCHEDULER.sched.lock().threads,
+            thread,
+        )
+        .expect("should only call this on a user thread");
+        Self {
+            thread,
+            process,
+            _marker: PhantomData,
+        }
+    }
+    /// Validate a user-thread provided `UserBuf` against the process memory map and thread stack, returning
+    /// an `Option<ValidatedUserBuf>`, with `None` indicating that the buffer did not pass validation.
+    ///
+    /// Takes the scheduler lock.
+    ///
+    /// # Panics
+    /// Panics if run on a kernel thread
+    pub(crate) fn validate<'a>(&'a self, user_buf: UserBuf) -> Option<ValidatedUserBuf<'a>> {
+        let sched = &sched::SCHEDULER.sched.lock();
+        let mem_map = &sched
+            .processes
+            .pcbs
+            .get(self.process)
+            .expect("must run on user thread")
+            .mem_map;
+        let user_stack = &sched
+            .threads
+            .tcbs
+            .get(self.thread)
+            .expect("must be a valid current thread")
+            .user
+            .as_ref()
+            .expect("must be a user thread")
+            .stack;
+        let validated_buf = mem_map.validate(user_stack, user_buf)?;
+        Some(ValidatedUserBuf::new(
+            validated_buf,
+            user_buf.direction,
+            self,
+        ))
+    }
+}
 
 /// The process control block
 pub(crate) struct ControlBlock {

@@ -47,7 +47,7 @@
 //   address numbers. Nesting is allowed.
 
 use crate::arch::csr::pmp;
-use crate::board::{self, PMP_ADDR_COUNT};
+use crate::board;
 
 #[derive(PartialEq, Eq)]
 struct PmpAddr(usize);
@@ -98,7 +98,8 @@ impl PmpCfg {
     const fn check_cfg(permissions: u8) -> u8 {
         let clean_permissions = (permissions << 5) >> 5;
         assert!(
-            (clean_permissions & (pmp::W | pmp::X)) != (pmp::W | pmp::X),
+            (clean_permissions & (board::pmp::W | board::pmp::X))
+                != (board::pmp::W | board::pmp::X),
             "attempt to set a PMP region to write and execute"
         );
         clean_permissions
@@ -128,22 +129,22 @@ impl PmpCfg {
 }
 
 pub(crate) struct Pmp {
-    addr: [PmpAddr; board::PMP_ADDR_COUNT],
-    cfg: [PmpCfg; board::PMP_ADDR_COUNT / 4], // Each register holds permissions for 4 addresses
+    addr: [PmpAddr; board::pmp::ADDR_COUNT],
+    cfg: [PmpCfg; board::pmp::ADDR_COUNT / 4], // Each register holds permissions for 4 addresses
 }
 
 impl Pmp {
     pub(crate) const fn new() -> Self {
         Self {
-            addr: [const { PmpAddr::new() }; board::PMP_ADDR_COUNT],
-            cfg: [const { PmpCfg::new(0, 0, 0, 0) }; board::PMP_ADDR_COUNT / 4],
+            addr: [const { PmpAddr::new() }; board::pmp::ADDR_COUNT],
+            cfg: [const { PmpCfg::new(0, 0, 0, 0) }; board::pmp::ADDR_COUNT / 4],
         }
     }
     fn clear(&mut self) {
-        for pmp_addr in self.addr.iter_mut().take(PMP_ADDR_COUNT) {
+        for pmp_addr in self.addr.iter_mut().take(board::pmp::ADDR_COUNT) {
             pmp_addr.clear();
         }
-        for pmp_cfg in self.cfg.iter_mut().take(PMP_ADDR_COUNT / 4) {
+        for pmp_cfg in self.cfg.iter_mut().take(board::pmp::ADDR_COUNT / 4) {
             pmp_cfg.clear();
         }
     }
@@ -156,7 +157,7 @@ impl Pmp {
         access: u8,
         permissions: u8,
     ) {
-        assert!(region < board::PMP_ADDR_COUNT);
+        assert!(region < board::pmp::ADDR_COUNT);
         self.addr[region] = PmpAddr::from_base_size(base, size);
         self.cfg[region / 4].set(region, access, permissions);
     }
@@ -216,7 +217,7 @@ pub(crate) extern "C" fn protect_sram_text(sram_text_start: usize, pmp_region_si
         sram_text_start,
         pmp_region_size,
         pmp::NAPOT,
-        pmp::R | pmp::X,
+        board::pmp::R | board::pmp::X,
     );
     pmp.set_lock(1);
     pmp.activate();
@@ -240,17 +241,17 @@ fn assert_text_guard_locked(region: usize) {
         cfg
     );
     assert!(
-        cfg & pmp::W == 0,
+        cfg & board::pmp::W == 0,
         "scratch .text guard is writable: cfg={:#x}",
         cfg
     );
     assert!(
-        cfg & pmp::R != 0,
+        cfg & board::pmp::R != 0,
         "scratch .text guard not readable: cfg={:#x}",
         cfg
     );
     assert!(
-        cfg & pmp::X != 0,
+        cfg & board::pmp::X != 0,
         "scratch .text guard not executable: cfg={:#x}",
         cfg
     );

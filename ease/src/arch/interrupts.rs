@@ -1,8 +1,12 @@
 //! Interrupt control for each Hart
 //!
 //! These three functions are the only software doors through which `mstatus.MIE`
-//! changes, so under the `irqsoff` feature they are also where interrupts-off
-//! sections are opened and closed (see [`crate::kernel::irqsoff`]).
+//! changes are traced by the `irqsoff` feature, which can see where interrupts-off
+//! sections are opened and closed (see [crate::kernel::irqsoff]).
+//!
+//! The [crate::arch::uaccess] copy functions also disable interrupts, so callers
+//! are encouraged to wrap those functions in [crate::kernel::sync::with_interrupts_disabled] to
+//! allow for irqsoff tracing.
 
 use super::csr;
 #[cfg(feature = "irqsoff")]

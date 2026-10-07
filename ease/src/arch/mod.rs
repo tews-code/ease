@@ -10,6 +10,7 @@ pub mod per_hart;
 #[allow(dead_code)]
 pub mod pmp;
 pub mod trap;
+pub mod uaccess;
 pub mod umode;
 
 /// Main registers

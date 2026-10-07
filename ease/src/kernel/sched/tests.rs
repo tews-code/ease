@@ -2405,7 +2405,8 @@ fn seventh_thread_never_joins_a_process() {
     assert!(
         matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
-            Err(super::spawn::Error::TooManyThreadsInProcess)
+            Err(super::spawn::Error::TooManyThreadsInProcess
+                | super::spawn::Error::ProcessNotAvailable)
         ),
         "a seventh thread joined a process at the thread cap"
     );
