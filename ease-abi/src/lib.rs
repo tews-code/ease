@@ -1,7 +1,6 @@
 //! System Calls
 //!
-//! Shared system call definitions and
-//! Syscall error codes.
+//! Shared system call definitions and syscall error codes.
 //!
 //! We take inspiration from the RISCV SBI approach on syscall responses:
 //!  `a0` holds 0 on success or a syscall error code on failure
@@ -17,6 +16,7 @@ pub mod syscall {
     pub const EXIT: usize = 0;
     pub const PUT_CHAR: usize = 1;
     pub const GET_CHAR: usize = 2;
+    pub const WRITE: usize = 3;
 
     // Test-only syscalls live at 100+ so real syscall growth never
     // collides. The kernel only wires them up in test builds; a
@@ -29,14 +29,27 @@ pub mod syscall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     // Skip 0 as it indicates success
+    /// Item not found
     NotFound  = 1,
+    /// Buffer is invalid, for example outside of the process memory range
+    BadBuffer = 2,
+    /// File descriptor is invalid
+    BadFd = 3,
+    /// Attempt to write but zero bytes written; Produced by `ulib` not kernel.
+    WriteZero = 4,
 }
-
+/// Convert an error number into the Error enum
+///
+/// If the error is successfully mapped, returns `Ok` holding the error variant.
+/// If the error is not mapped, returns `Err` holding the unmapped value.
 impl TryFrom<usize> for Error {
     type Error = usize; // when decoding fails, hand back the raw number so it can be printed
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         match value {
             v if v == Error::NotFound as usize => Ok(Error::NotFound),
+            v if v == Error::BadBuffer as usize => Ok(Error::BadBuffer),
+            v if v == Error::BadFd as usize => Ok(Error::BadFd),
+            v if v == Error::WriteZero as usize => Ok(Error::WriteZero),
             _ => Err(value),
         }
     }

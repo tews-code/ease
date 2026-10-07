@@ -28,6 +28,28 @@ pub fn put_char(ch: u8) -> Result<(), Error> {
 pub fn get_key() -> Result<Option<usize>, Error> {
     ecall0(syscall::GET_CHAR).map(|v| if v == 0 { None } else { Some(v) })
 }
+/// Write a buffer from a user slice to file descriptor `fd`.
+///
+/// Writes as many bytes as permitted by the syscall.
+/// Returns the number of bytes written on success
+/// or holds an `Error` on failure.
+pub fn write(fd: usize, buf: &[u8]) -> Result<usize, Error> {
+    ecall3(syscall::WRITE, fd, buf.as_ptr().addr(), buf.len())
+}
+/// Writes the complete buffer in a user slice to file descriptor `fd`.
+/// Loops over [write] until the buffer is empty.
+///
+/// Returns `Ok(())` on success or `Err(Error)` on failure.
+pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {
+    let mut idx = 0;
+    while idx < buf.len() {
+        let bytes_written = write(fd, &buf[idx..])?;
+        if bytes_written == 0 { return Err(Error::WriteZero)}; // We aren't making any progress
+        idx += bytes_written;
+        if idx > buf.len() { panic!("written more bytes than buffer holds"); }
+    }
+    Ok(())
+}
 /// Exit a process
 pub fn exit() -> ! {
     unsafe {
@@ -39,7 +61,6 @@ pub fn exit() -> ! {
         );
     }
 }
-
 /// Common syscall asm and error decoded for zero argument syscalls
 /// `error` in a0, `value` in a1, zero means success
 fn ecall0(syscall: usize) -> Result<usize, Error> {
@@ -80,7 +101,28 @@ fn ecall1(syscall: usize, arg: usize) -> Result<usize, Error> {
         Err(Error::try_from(error).expect("kernel returned an unknown error code"))
     }
 }
-
+/// Common syscall asm and error decoded for three-argument syscalls
+///
+/// Returns `Ok(usize)` on success or an `Error` on failure.
+fn ecall3(syscall: usize, arg0: usize, arg1: usize, arg2: usize) -> Result<usize, Error> {
+    let error: usize;
+    let value: usize;
+    unsafe {
+        asm!(
+            "ecall",
+             clobber_abi("C"),
+             inout("a0") arg0 => error,
+             inout("a1") arg1 => value,
+             in("a2") arg2,
+             in("a7") syscall,
+        );
+    }
+    if error == 0 {
+        Ok(value)
+    } else {
+        Err(Error::try_from(error).expect("kernel returned an unknown error code"))
+    }
+}
 unsafe extern "C" {
     /// Common "main" exported by all user programs
     /// This is picked up by _start and run once, followed by exit.
