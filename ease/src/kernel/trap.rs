@@ -287,7 +287,13 @@ fn handle_exception(frame: &mut trap::Frame, code: usize) {
 fn irq_panic() -> ! {
     use crate::io::DirectWriter;
     use core::fmt::Write;
-    let _ = writeln!(DirectWriter, "mepc is {:x}", crate::arch::csr::mepc::read());
+    let _ = writeln!(DirectWriter, "IRQ STACK OVERFLOW");
+    let _ = writeln!(
+        DirectWriter,
+        "hart is {}, mepc is {:x}",
+        hart_id(),
+        crate::arch::csr::mepc::read()
+    );
     let _ = writeln!(
         DirectWriter,
         "mcause is {:?}",
