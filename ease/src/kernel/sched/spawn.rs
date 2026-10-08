@@ -250,7 +250,8 @@ impl Scheduler {
             .expect("just installed and still hold the lock");
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
-        pcb.fds.new_process();
+        // Add the file descriptors just before launching the user thread - this is the "commit point" after which we don't revert
+        pcb.fds.add_standard_fds();
         self.finish_spawn(sched, affinity);
         Ok(process)
     }

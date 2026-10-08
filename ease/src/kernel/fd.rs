@@ -37,7 +37,7 @@ impl Table {
     /// Add the base file descriptors for a new process
     ///
     /// Panics - panics if there are any previous entries in the FD array
-    pub(super) fn new_process(&mut self) {
+    pub(super) fn add_standard_fds(&mut self) {
         assert!(
             self.is_empty(),
             "previous process teardown didn't clear file descriptor table"

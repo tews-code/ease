@@ -340,7 +340,3 @@ fn open_file_descriptor(fd_kind: fd::Kind) -> Result<usize, fd::Error> {
 fn close_file_descriptor(fd: usize) -> Result<fd::Kind, fd::Error> {
     SCHEDULER.close_fd(fd)
 }
-
-fn new_process_fds() {
-    SCHEDULER.new_process_fds();
-}

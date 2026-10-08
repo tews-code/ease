@@ -891,8 +891,4 @@ impl Scheduler {
     pub(super) fn close_fd(&self, fd: usize) -> Result<fd::Kind, fd::Error> {
         self.with_current_process_fds(|fds| fds.close(fd))
     }
-
-    pub(super) fn new_process_fds(&self) {
-        self.with_current_process_fds(|fds| fds.new_process());
-    }
 }
