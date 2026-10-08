@@ -3,6 +3,12 @@ resolver = "3"
 members = ["ease", "ease-abi", "ease-macros"]
 exclude = ["ease-ulib", "ease-user"]
 
+# `cargo run` and the QEMU test suite share one optimisation level, so stack
+# use and timing match what CI measures. Unoptimised (opt-level 0) builds
+# overflowed the 1.5 KB IRQ stack in trace's trap-context snapshot.
+[profile.dev]
+opt-level = 1
+
 [profile.test]
 opt-level = 1
 
