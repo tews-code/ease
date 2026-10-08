@@ -33,9 +33,11 @@ pub(crate) use staticcell::StaticCell;
 #[allow(unused_imports)]
 pub(crate) use waitqueue::WaitQueue;
 
-/// Return Err variants
+// Return Err variants
+/// Blocked thread has reached its timeout
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimedOut;
+/// User process has a fault and this thread needs teardown
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interrupted;
 

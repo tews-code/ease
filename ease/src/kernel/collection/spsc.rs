@@ -131,7 +131,7 @@ impl<T: Copy + Send, const N: usize> Queue<T, N> {
             .wrapping_sub(self.head.load(Ordering::Relaxed))
     }
     /// Gives the number of remaining slots
-    pub(crate) fn remaining(&self) -> usize {
+    pub(crate) fn free(&self) -> usize {
         N - self.len()
     }
     /// Checks if the queue is empty

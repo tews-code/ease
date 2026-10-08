@@ -69,6 +69,14 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
             "print-probe.bin"
         ))),
     },
+    Program {
+        name: "flood-probe",
+        image: Image::Blob(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
+            "flood-probe.bin"
+        ))),
+    },
 ]);
 
 /// User programs are either built into the OS binary as functions and loaded from flash

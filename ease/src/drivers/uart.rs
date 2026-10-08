@@ -30,7 +30,7 @@ use ease_macros::profile;
 use crate::arch::{hart_id, interrupts, mmio};
 use crate::board::uart;
 use crate::kernel::collection::{StackVec, spsc};
-use crate::kernel::sync::SpinLock;
+use crate::kernel::sync::{Interrupted, SpinLock};
 use core::fmt::Write;
 
 // Standard 16550 UART offsets
@@ -70,7 +70,7 @@ const IIR_THR_EMPTY: u8 = 0b0010;
 const IIR_RX_DATA_AVAILABLE: u8 = 0b0100;
 const IIR_RX_LINE_STATUS: u8 = 0b0110;
 const IIR_RX_TIMEOUT: u8 = 0b1100;
-/// We construct the SPSC queues in this module
+/// We construct the SPSC queues in this module and associated wait queues
 ///
 /// For transmission the producer is exclusively held in the [UartWriter] struct. Given that `UartWriter`
 /// is protected by a spin lock, this serialises multiple threads from both HARTs to ensure only one queue
@@ -110,6 +110,11 @@ mod queue {
         unsafe { TryLock::new(TX.consumer_unchecked()) };
     /// Wait queue on TX being empty
     pub(super) static TX_DRAINED: WaitQueue = WaitQueue::new();
+    /// Number of free bytes where we wake the wait queue of threads wanting to transmit
+    pub(super) const TX_BYTES_AVAIL_TRIGGER: usize = 256;
+    const _: () = assert!(TX_BYTES_AVAIL_TRIGGER <= TX_LEN);
+    /// Wait queue on TX being ready for some bytes
+    pub(super) static TX_AVAIL: WaitQueue = WaitQueue::new();
 }
 
 /// Main writer
@@ -158,9 +163,26 @@ where
     let mut uart_writer = UART_WRITER.lock();
     f(&mut uart_writer)
 }
-
+/// Provides user thread access to the [queue::TX_AVAIL] wait queue.
+/// When the thread is unblocked it queues as many bytes as are
+/// available in the TX queue.
+///
+/// Returns the number of bytes transmitted on success or
+/// [crate::kernel::sync::Interrupted] on Err.
+pub(crate) fn wait_and_print_interruptible(buf: &[u8]) -> Result<usize, Interrupted> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut bytes_written: usize = 0;
+    // Block until the TX queue has slots available
+    queue::TX_AVAIL.wait_with_interruptible(&UART_WRITER, |uart_writer| {
+        bytes_written = uart_writer.write_bytes(&buf[..queue::TX.free().min(buf.len())]);
+        bytes_written > 0
+    })?;
+    Ok(bytes_written)
+}
 /// Pop bytes from the TX queue and write them into the FIFO
-/// with at most [FIFO_BYTES] written.
+/// with at most [crate::board::uart::FIFO_SIZE] bytes written.
 /// Mask THRE if the queue is empty (with a recheck in case of late push)
 ///
 /// Takes a exclusive borrow of the Consumer to ensure only one caller at a time
@@ -316,7 +338,7 @@ impl UartWriter {
         if self.lost > 0 {
             let mut marker: StackVec<u8, { Self::LOST_BYTES_STR_LEN }> = StackVec::new();
             let _ = write!(marker, "\nLost bytes: {}\n", self.lost);
-            if queue::TX.remaining() < marker.len() {
+            if queue::TX.free() < marker.len() {
                 // Still no room to report the gap: this write joins it.
                 self.lost += buf.len();
                 return 0;
@@ -375,6 +397,10 @@ pub fn handle_interrupt() {
                 let mut consumer = queue::TX_CONSUMER.try_lock()
                 .expect("flush should not be holding the consumer, as flush only takes the consumer if interrupts are disabled");
                 tx_fill_fifo(&mut consumer);
+                // Wake any queue threads waiting on TX having available slots
+                if queue::TX.free() >= queue::TX_BYTES_AVAIL_TRIGGER {
+                    queue::TX_AVAIL.wake_all();
+                }
                 // Wake any queue threads waiting on TX being drained
                 if queue::TX.is_empty() {
                     queue::TX_DRAINED.wake_all();
@@ -744,9 +770,9 @@ mod tests {
             crate::kernel::interrupts::with_interrupts_disabled(|_cs| {
                 RAN_ON.store(hart_id(), Ordering::Relaxed);
                 let mut uart_writer = UART_WRITER.lock();
-                ROOM.store(queue::TX.remaining(), Ordering::Relaxed);
+                ROOM.store(queue::TX.free(), Ordering::Relaxed);
                 let _ = write!(uart_writer, "{:>OVERSIZE$}", "D");
-                LEFT.store(queue::TX.remaining(), Ordering::Relaxed);
+                LEFT.store(queue::TX.free(), Ordering::Relaxed);
                 LOST.store(uart_writer.lost, Ordering::Relaxed);
             });
             DONE.store(1, Ordering::Release);

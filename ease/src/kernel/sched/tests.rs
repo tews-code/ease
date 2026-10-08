@@ -2834,6 +2834,46 @@ fn a_print_smoke_ulib_println() {
     }
 }
 
+// FLOOD TEST for blocking WRITE: flood-probe writes 2 KB of numbered lines,
+// twice the UART transmit queue, through ease-ulib's write_all. Once the
+// queue is full WRITE must wait for space instead of returning 0 (which
+// write_all reports as WriteZero, failing the probe's verdict). Every line
+// must then arrive whole and in order, and nothing may be reported lost.
+#[test_case]
+fn write_all_survives_a_full_tx_queue() {
+    const FLOOD_LINES: usize = 32;
+    const LINE_LEN: usize = 64;
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("flood-probe"), "flood probe never exited");
+    #[cfg(feature = "test-io")]
+    {
+        let out = crate::io::test_io::output();
+        assert!(
+            out.contains("FLOOD OK"),
+            "flood probe's write_all failed (see FLOOD FAIL on the console)"
+        );
+        assert!(
+            !out.contains("Lost bytes"),
+            "user output was reported lost: WRITE must wait, not drop"
+        );
+        let mut rest = out;
+        for i in 0..FLOOD_LINES {
+            let mut line = [b'.'; LINE_LEN];
+            line[..6].copy_from_slice(b"FLOOD ");
+            line[6] = b'0' + (i / 10) as u8;
+            line[7] = b'0' + (i % 10) as u8;
+            line[8] = b' ';
+            line[LINE_LEN - 1] = b'\n';
+            let line = core::str::from_utf8(&line).expect("ASCII");
+            match rest.find(line) {
+                Some(at) => rest = &rest[at + line.len()..],
+                None => panic!("flood line {i} missing, truncated or out of order"),
+            }
+        }
+    }
+}
+
 // WRITE end to end from U-mode: user_write_probe issues valid writes on
 // fds 1 and 2, a bad fd, a buffer outside its memory, a zero-length write
 // and one longer than the kernel's per-call buffer, checking each

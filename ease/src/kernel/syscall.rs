@@ -134,9 +134,14 @@ fn write(frame: &mut trap::Frame) {
         let mut buf = [0u8; WRITE_BUF_LEN];
         // Safely copy into the kernel buffer
         let bytes_copied = validated_user_buf.copy_from_user(&mut buf);
-        // Send the bytes via UART
-        let bytes_written =
-            uart::with_uart_writer(|writer| writer.write_bytes(&buf[..bytes_copied]));
+        // Send the bytes via UART; we sleep on the wait queue until there
+        // is some free space in the queue
+        let bytes_written = match uart::wait_and_print_interruptible(&buf[..bytes_copied]) {
+            Ok(bytes_written) => bytes_written,
+            Err(kernel::sync::Interrupted) => {
+                sched::exit_current_user_thread(thread::ExitReason::Fault)
+            }
+        };
         // Return the number of bytes written
         frame.a0 = 0;
         frame.a1 = bytes_written;
