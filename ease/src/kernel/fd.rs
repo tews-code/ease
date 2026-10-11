@@ -230,3 +230,109 @@ impl Table {
         self.slot(fd).as_ref().ok_or(Error::StaleFileDescriptor)
     }
 }
+
+// Host tests: ValidFd and Table are plain safe Rust, so validation bounds
+// and slot bookkeeping are checked natively. The FILE_DESCRIPTORS static
+// and its free functions are left to the QEMU tests (they need the lock
+// and run inside spawn/teardown). Entry::File is not built here: a
+// FileHandle needs a mounted volume.
+#[cfg(all(test, not(target_os = "none"), feature = "test-io"))]
+mod host_tests {
+    use super::*;
+
+    fn valid(n: usize) -> ValidFd {
+        ValidFd::validate(Untrusted::new(n)).expect("fd should be in range")
+    }
+
+    fn kind_at(table: &Table, n: usize) -> Option<Kind> {
+        table.get(valid(n)).ok().map(Entry::kind)
+    }
+
+    #[test]
+    fn validate_accepts_every_in_range_fd() {
+        for n in 0..MAX_OPEN {
+            assert_eq!(valid(n).get(), n);
+        }
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_fds() {
+        for n in [MAX_OPEN, MAX_OPEN + 1, usize::MAX] {
+            assert!(
+                matches!(
+                    ValidFd::validate(Untrusted::new(n)),
+                    Err(Error::UnknownFileDescriptor)
+                ),
+                "fd {n} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn new_table_is_empty() {
+        let table = Table::new();
+        assert!(table.is_empty());
+        for n in 0..MAX_OPEN {
+            assert!(matches!(
+                table.get(valid(n)),
+                Err(Error::StaleFileDescriptor)
+            ));
+        }
+    }
+
+    #[test]
+    fn standard_fds_are_keyboard_console_debug_console() {
+        let mut table = Table::new();
+        table.add_standard_fds();
+        assert!(!table.is_empty());
+        assert_eq!(kind_at(&table, 0), Some(Kind::Keyboard));
+        assert_eq!(kind_at(&table, 1), Some(Kind::Console));
+        assert_eq!(kind_at(&table, 2), Some(Kind::DebugConsole));
+        for n in 3..MAX_OPEN {
+            assert_eq!(kind_at(&table, n), None, "fd {n} should be empty");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "previous process teardown")]
+    fn standard_fds_twice_panics() {
+        let mut table = Table::new();
+        table.add_standard_fds();
+        table.add_standard_fds();
+    }
+
+    #[test]
+    fn close_returns_entry_and_empties_slot() {
+        let mut table = Table::new();
+        table.add_standard_fds();
+        let closed = table.close(valid(1)).expect("fd 1 is open");
+        assert_eq!(closed.kind(), Kind::Console);
+        assert_eq!(kind_at(&table, 1), None);
+        // Closing again is a stale fd, not a panic
+        assert!(matches!(
+            table.close(valid(1)),
+            Err(Error::StaleFileDescriptor)
+        ));
+        // Neighbours are untouched
+        assert_eq!(kind_at(&table, 0), Some(Kind::Keyboard));
+        assert_eq!(kind_at(&table, 2), Some(Kind::DebugConsole));
+    }
+
+    #[test]
+    fn open_fills_lowest_free_slot_then_refuses_when_full() {
+        let mut table = Table::new();
+        table.add_standard_fds();
+        assert_eq!(table.open(Entry::Console).ok(), Some(3));
+        // A freed low slot is reused before higher ones
+        let _ = table.close(valid(1)).expect("fd 1 is open");
+        assert_eq!(table.open(Entry::DebugConsole).ok(), Some(1));
+        for n in 4..MAX_OPEN {
+            assert_eq!(table.open(Entry::Console).ok(), Some(n));
+        }
+        // Full: the entry comes back to the caller rather than being dropped
+        assert!(matches!(
+            table.open(Entry::Keyboard),
+            Err(Error::NotEnoughSlots(Entry::Keyboard))
+        ));
+    }
+}

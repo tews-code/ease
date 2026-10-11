@@ -394,7 +394,7 @@ pub extern "C" fn user_write_probe() {
     if user_write(2, short_addr, 8) != (0, 8) {
         fail |= 1 << 1;
     }
-    // 2: any other fd is refused without touching the buffer
+    // 2: an in-range but empty fd slot is refused without touching the buffer
     if user_write(7, short_addr, 8) != (Error::BadFd as usize, 0) {
         fail |= 1 << 2;
     }
@@ -410,6 +410,18 @@ pub extern "C" fn user_write_probe() {
     let (error, written) = user_write(1, long_ptr as usize, WRITE_PROBE_LONG);
     if error != 0 || written == 0 || written >= WRITE_PROBE_LONG {
         fail |= 1 << 5;
+    }
+    // 6: an open fd of the wrong kind (0 is the keyboard) is refused
+    if user_write(0, short_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 6;
+    }
+    // 7: the first fd past the kernel's table (fd::MAX_OPEN = 8) is refused
+    if user_write(8, short_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 7;
+    }
+    // 8: a wildly out-of-range fd is refused, not a kernel panic
+    if user_write(usize::MAX, short_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 8;
     }
     user_put_char(b'\n' as usize);
     if fail == 0 {
@@ -429,7 +441,7 @@ pub extern "C" fn user_write_probe() {
             user_put_char(MSG[i] as usize);
             i += 1;
         }
-        let mut shift = 8;
+        let mut shift = 12;
         while shift > 0 {
             shift -= 4;
             user_put_char(HEX[(fail >> shift) & 0xf] as usize);

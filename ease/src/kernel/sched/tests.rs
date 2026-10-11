@@ -2875,9 +2875,11 @@ fn write_all_survives_a_full_tx_queue() {
 }
 
 // WRITE end to end from U-mode: user_write_probe issues valid writes on
-// fds 1 and 2, a bad fd, a buffer outside its memory, a zero-length write
-// and one longer than the kernel's per-call buffer, checking each
-// (error, value) pair itself and printing WRITE OK or WRITE FAIL <mask>.
+// fds 1 and 2, refused writes on an empty fd slot (7), an open fd of the
+// wrong kind (0, the keyboard) and out-of-range fds (8 and usize::MAX),
+// a buffer outside its memory, a zero-length write and one longer than
+// the kernel's per-call buffer, checking each (error, value) pair itself
+// and printing WRITE OK or WRITE FAIL <mask>.
 // A kernel-side panic on the WRITE path (e.g. the UART writer's
 // interrupts-enabled assert) fails the run outright.
 #[test_case]
