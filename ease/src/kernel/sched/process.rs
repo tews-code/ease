@@ -20,9 +20,11 @@ pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are fo
 const MAX_THREADS_PER_PROC: u8 = 6;
 
 /// A token to ensure the current thread's process is alive during syscalls.
-/// It holds the process handle as well as the active thread handle.
+/// It holds the process handle as well as the active thread handle and the
+/// file descriptor table handle.
 pub(crate) struct SyscallContext {
     process: Handle,
+    fds: Option<fd::Handle>,
     thread: thread::Handle,
     _marker: PhantomData<*const ()>, // !Sync and !Send
 }
@@ -40,17 +42,23 @@ impl SyscallContext {
     /// Panics if called on a kernel thread
     pub(crate) fn current() -> Self {
         let thread = percpu::current_thread();
-        let process = sched::thread::Threads::process_handle_of(
-            &sched::stride::SCHEDULER.sched.lock().threads,
-            thread,
-        )
-        .expect("should only call this on a user thread");
+        let sched = sched::stride::SCHEDULER.sched.lock();
+        let process = sched::thread::Threads::process_handle_of(&sched.threads, thread)
+            .expect("should only call this on a user thread");
+        let fds = sched
+            .processes
+            .pcbs
+            .get(process)
+            .expect("the process handle should not be stale")
+            .fds;
         Self {
-            thread,
             process,
+            fds,
+            thread,
             _marker: PhantomData,
         }
     }
+
     /// Validate a user-thread provided `UserBuf` against the process memory map and thread stack, returning
     /// an `Option<ValidatedUserBuf>`, with `None` indicating that the buffer did not pass validation.
     ///
@@ -58,7 +66,7 @@ impl SyscallContext {
     ///
     /// # Panics
     /// Panics if run on a kernel thread
-    pub(crate) fn validate<'a>(&'a self, user_buf: UserBuf) -> Option<ValidatedUserBuf<'a>> {
+    pub(crate) fn validate_buf<'a>(&'a self, user_buf: UserBuf) -> Option<ValidatedUserBuf<'a>> {
         let sched = &sched::SCHEDULER.sched.lock();
         let mem_map = &sched
             .processes
@@ -82,13 +90,24 @@ impl SyscallContext {
             self,
         ))
     }
+
+    /// Get the current process file descriptor table handle
+    ///
+    /// # Panics
+    /// Panics if the file descriptors handle is `None`
+    pub(crate) fn process_fds(&self) -> fd::Handle {
+        self.fds
+            .expect("the process should have a valid file descriptors handle")
+    }
 }
 
 /// The process control block
 pub(crate) struct ControlBlock {
     _name: &'static str,
     pub(super) mem_map: usermem::Map,
-    pub(super) fds: fd::Table,
+    // File descriptors are in separate static arena with its own lock.
+    // `None` represents a process being set up or in its final teardown state
+    pub(super) fds: Option<fd::Handle>,
     thread_count: u8,
     pub(super) entry_ra: usize, // Inserted into the 'ra' register slot in the forged trap return
     pub(super) teardown_thread: Option<thread::Handle>, // Handle of the thread that performs the resource release for the entire process
@@ -99,16 +118,18 @@ impl ControlBlock {
         Self {
             _name,
             mem_map,
-            fds: fd::Table::new(),
+            fds: None,
             thread_count: 0,
             entry_ra,
             teardown_thread: None,
         }
     }
+
     /// Get the thread count of this process.
     pub(super) fn thread_count(&self) -> u8 {
         self.thread_count
     }
+
     /// Adds to the thread count and returns the new value if not above the cap
     ///
     /// Errors if the process can't have any more threads
@@ -120,6 +141,7 @@ impl ControlBlock {
             Err(())
         }
     }
+
     /// Decrements the process thread count, returns new count.
     ///
     /// # Panics
@@ -132,6 +154,7 @@ impl ControlBlock {
         self.thread_count -= 1;
         self.thread_count
     }
+
     /// Sets the process teardown thread. This thread takes responsbility for
     /// releasing any shared process resource. There can be only one.
     ///
@@ -154,31 +177,8 @@ pub(super) struct Processes {
 pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
 
 impl SchedInner {
-    /// Claim the file descriptor table of a process from the last (cleanup) thread
-    ///
-    /// Returns None if another thread has not yet released its resources.
-    /// # Panics #
-    /// Panics if the thread handle is stale.
-    pub(super) fn claim_fds(
-        &mut self,
-        process: Handle,
-        thread: thread::Handle,
-    ) -> Option<[Option<fd::Kind>; fd::MAX]> {
-        // Set this thread to no longer use resources
-        self.threads
-            .tcbs
-            .get_mut(thread)
-            .expect("current thread must have a valid TCB set up")
-            .resources_released = true;
-        // Take the file descriptors from this process
-        if !self.threads.any_resource_holders(process) {
-            Some(self.processes.pcbs.get_mut(process).unwrap().fds.take_all())
-        } else {
-            None
-        }
-    }
     /// Attempt to claim the resource freeing role as a thread in a faulting process.
-    /// This method does not check the validitiy of the given thread handle.
+    /// This method does not check the validity of the given thread handle.
     ///
     /// Returns `true` if the role was claimed, otherwise `false` if the role has already been claimed
     /// by another thread.
@@ -192,6 +192,37 @@ impl SchedInner {
             .expect("should be a valid process")
             .set_teardown_thread(thread)
     }
+
+    /// If this is the last thread in the process, take the file descriptor table handle from the PCB
+    /// and immediately take the corresponding file descriptor table from file descriptors arena,
+    /// ensuring these happen under the same scheduler lock.
+    ///
+    /// Must be called _after_ [Threads::mark_resources_released].
+    ///
+    /// Lock order: (1) SCHEDULER (2) FILE_DESCRIPTORS
+    ///
+    /// # Panics
+    /// - If the process handle is stale
+    /// - The file descriptors handle has already been taken from the PCB
+    pub(super) fn take_fds_if_last(&mut self, process: Handle) -> Option<fd::Table> {
+        if self.threads.any_resource_holders(process) {
+            return None;
+        }
+        // There are no resource holders, we can release resources
+        // First take the fds handle out of the PCB.
+        let fds = self
+            .processes
+            .pcbs
+            .get_mut(process)
+            .expect("process handle should not be stale")
+            .fds
+            .take()
+            .expect("the file descriptors arena handle should not already have been taken");
+        // Now take the file descriptor table
+        // This takes an IrqSpinLock on FILE_DESCRIPTORS
+        Some(fd::take(fds))
+    }
+
     /// Get the current thread count of the given process index
     ///
     /// # Panics #
@@ -237,12 +268,13 @@ impl Scheduler {
         if new_thread_count == 0 {
             // Make sure the file descriptors have been cleaned up before emptying the slot
             assert!(
-                process_control_block.fds.is_empty(),
+                process_control_block.fds.is_none(),
                 "process control block has no threads but still has open file descriptors"
             );
             let _ = sched.processes.pcbs.take(process);
         }
     }
+
     /// Evict sibling threads for a faulting multi-thread user process
     pub(super) fn evict_sibling_threads(
         &self,
@@ -332,6 +364,7 @@ impl Scheduler {
         if claimed_role {
             // Set a wait timeout in case the user thread hangs; No leeway on this wakeup
             let deadline = Deadline::after_ms(CLAIM_ROLE_TIMEOUT_MS, 0);
+            // Loop until all the other threads are done (or panic if its taking too long)
             loop {
                 let mut sched = self.sched.lock();
                 if sched.thread_count(process) == 1 {
@@ -361,11 +394,16 @@ impl Scheduler {
                 self.park_if_blocked_until(deadline);
             }
         }
-        // Mark this thread as no longer using resources
-        let fds = self.sched.lock().claim_fds(process, current_thread);
-        if let Some(fds) = fds {
-            fd::Table::close_all(fds);
-        }
+        // Drop the resources
+        let mut sched = self.sched.lock();
+        sched.threads.mark_resources_released(current_thread);
+        let fd_table = sched.take_fds_if_last(process);
+        drop(sched);
+        // Drop the file descriptors for this process, bearing in mind this could take some time
+        // Where this is not the last thread, we are dropping `None` which leaves the files in
+        // place until the last threads makes the call on `Some(fd_table)` and actually closes the
+        // files.
+        drop(fd_table);
         // Exit this thread
         self.exit(reason);
     }

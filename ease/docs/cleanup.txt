@@ -1,0 +1,36 @@
+Cleanup follow-ups
+==================
+
+Observations made while working on something else. Not design work or
+roadmap items: each is a small, self-contained change, to be done as its
+own commit rather than folded into whatever change spotted it.
+
+Tick with [x] when done, or delete the line.
+
+[ ] Change the process::SyscallContext direct SCHEDULER lock takers
+    (current() and validate_buf() in sched/process.rs) to use a new method in
+    process's impl Scheduler, returning Copy values (process handle,
+    fd::Handle) so SyscallContext never names the SCHEDULER static.
+
+[ ] lib.rs sched stub has process::MAX_COUNT = 8, but the real value is
+    thread::MAX_COUNT - 2 (14). Make the stub match, or derive it the same
+    way.
+
+[x] fd::Table::take_all has no callers; remove it.
+
+[ ] fd::Table::close_all is equivalent to dropping the Table (each
+    FileHandle's Drop already saves metadata and closes). Process teardown
+    now drops the Table explicitly, so close_all has no callers; remove it.
+
+[ ] Explore the Untrusted -> Valid* pattern (as used for fd::ValidFd)
+    across the code base:
+    - How far up can the wrapping go? Today syscall.rs wraps frame.a0 at
+      the call site. Could the trap-frame argument accessors return
+      validate::Untrusted values, so no syscall can read a raw argument
+      register by mistake? What does that cost in arch/trap code?
+    - Where else does untrusted data index, size or point at something?
+      Candidates: other syscall arguments (lengths, flags, handles),
+      UserBuf -> ValidatedUserBuf (could it implement Validate?),
+      on-disk FAT/BPB/directory fields read from the block device,
+      virtio descriptor/used-ring values from the device.
+    - Only wrap values where a missed check becomes a panic or memory bug.

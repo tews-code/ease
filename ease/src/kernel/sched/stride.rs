@@ -6,7 +6,6 @@ use super::Qos;
 use crate::arch::hart_id;
 use crate::kernel::alloc::Order;
 use crate::kernel::collection::{Arena, AtomicBitmap, bitmap_words_for};
-use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::sched::Deadline;
 use crate::kernel::sched::MemRegion;
@@ -859,36 +858,5 @@ impl Scheduler {
     pub fn stacks(&self) {
         let sched = self.sched.lock();
         sched.threads.stacks();
-    }
-
-    // FILE DESCRIPTORS
-
-    /// Run a closure on the current process's file descriptors
-    ///
-    /// # Panics #
-    /// Panics if the thread is not a user thread or holds a stale process handle
-    fn with_current_process_fds<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut fd::Table) -> R,
-    {
-        let mut sched = self.sched.lock();
-        let process = sched
-            .threads
-            .process_handle_of(percpu::current_thread())
-            .expect("the current thread must be a user thread with a valid PCB handle");
-        f(&mut sched
-            .processes
-            .pcbs
-            .get_mut(process)
-            .expect("the current thread's PCB should not be stale")
-            .fds)
-    }
-
-    pub(super) fn open_fd(&self, fd_kind: fd::Kind) -> Result<usize, fd::Error> {
-        self.with_current_process_fds(|fds| fds.open(fd_kind))
-    }
-
-    pub(super) fn close_fd(&self, fd: usize) -> Result<fd::Kind, fd::Error> {
-        self.with_current_process_fds(|fds| fds.close(fd))
     }
 }

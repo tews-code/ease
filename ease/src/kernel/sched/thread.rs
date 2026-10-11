@@ -302,7 +302,7 @@ impl Threads {
         slice_end.min(wake.unwrap_or(u64::MAX))
     }
 
-    // Debug - print the painted stack depth for running threads
+    /// Debug - print the painted stack depth for running threads
     #[cfg(feature = "paint-stack")]
     pub(super) fn stacks(&self) {
         for (handle, tcb) in self.tcbs.iter_with_handles() {
@@ -338,6 +338,18 @@ impl Threads {
     pub(super) fn process_handle_of(&self, thread: Handle) -> Option<process::Handle> {
         self.tcbs.get(thread).and_then(|tcb| tcb.process())
     }
+
+    /// Marks a thread as having released its resources
+    ///
+    /// # Panics
+    /// Panics if the thread handle is invalid
+    pub(super) fn mark_resources_released(&mut self, thread: Handle) {
+        self.tcbs
+            .get_mut(thread)
+            .expect("thread handle must be valid")
+            .resources_released = true;
+    }
+
     /// Determines if any threads are resource holders for a process
     pub(super) fn any_resource_holders(&self, process: process::Handle) -> bool {
         self.tcbs.iter().any(|tcb| {

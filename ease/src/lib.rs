@@ -234,6 +234,9 @@ mod kernel {
 
     #[allow(dead_code)]
     pub mod sched {
+        pub mod process {
+            pub const MAX_COUNT: usize = 14;
+        }
 
         pub mod thread {
             pub const MAX_COUNT: usize = 16;
@@ -314,6 +317,8 @@ mod kernel {
             panic!("sched stub: must not be called from the lib crate");
         }
     }
+
+    pub mod validate;
 }
 
 #[allow(dead_code)]

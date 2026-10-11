@@ -2,9 +2,12 @@
 
 use crate::arch::{trap, umode};
 use crate::drivers::{keyboard, uart};
-use crate::kernel::{self, interrupts, sync};
-use crate::sched::{self, SyscallContext, thread, usermem};
-use ease_abi::{fds, syscall};
+use crate::kernel::{
+    self, fd, interrupts, sync,
+    validate::{Untrusted, Validate},
+};
+use crate::sched::{self, process, thread, usermem};
+use ease_abi::syscall;
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
@@ -118,18 +121,31 @@ fn get_char(frame: &mut trap::Frame) {
 
 fn write(frame: &mut trap::Frame) {
     // No wait loop, so no need to call [sched::exit_user_thread_if_needs_exit].
+    // Get the (untrusted) file descriptor from the frame
+    let fd = Untrusted::new(frame.a0);
     // Check if the fd is valid
-    if frame.a0 != fds::STDOUT && frame.a0 != fds::STDERR {
+    let fd = match fd::ValidFd::validate(fd) {
+        Ok(fd) => fd,
+        Err(_) => {
+            frame.a0 = ease_abi::Error::BadFd.into();
+            frame.a1 = 0;
+            return;
+        }
+    };
+    // Check what kind the fd is indexing
+    let syscall_context = process::SyscallContext::current();
+    if !matches!(
+        fd::kind(syscall_context.process_fds(), fd),
+        Some(fd::Kind::Console | fd::Kind::DebugConsole)
+    ) {
         // Wrong file descriptor, set up frame for error number and return
         frame.a0 = ease_abi::Error::BadFd.into();
         frame.a1 = 0;
         return;
     }
-    // Create the syscall context to allow the syscall's lifetime to protect access to the user slice memory
-    let syscall_context = SyscallContext::current();
     // Build the user buffer and validate it
     let user_buf = usermem::UserBuf::new(frame.a1, frame.a2, usermem::Transfer::FromUser);
-    if let Some(validated_user_buf) = syscall_context.validate(user_buf) {
+    if let Some(validated_user_buf) = syscall_context.validate_buf(user_buf) {
         // Kernel buffer to receive the bytes
         let mut buf = [0u8; WRITE_BUF_LEN];
         // Safely copy into the kernel buffer

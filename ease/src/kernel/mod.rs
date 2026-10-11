@@ -21,3 +21,4 @@ pub mod sync;
 mod syscall;
 pub mod timer;
 pub mod trap;
+pub mod validate;

@@ -154,6 +154,8 @@ impl OpenFileTable {
     }
 }
 
+/// The file handle struct is not Copy or Clone as dropping
+/// the handle will cause the file to be closed.
 #[derive(Debug)]
 pub(crate) struct FileHandle {
     open_file_table_handle: Handle<OpenFile>,

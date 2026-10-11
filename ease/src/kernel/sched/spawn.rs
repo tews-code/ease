@@ -2,6 +2,7 @@
 
 use crate::arch::{context, umode};
 use crate::kernel::alloc::{MemRegion, Order};
+use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
 use crate::kernel::sync::IrqSpinLockGuard;
@@ -177,6 +178,9 @@ impl Scheduler {
     ///
     /// The process starts with one user thread.
     /// Note that additional threads added later will share the same `UserMemMap`.
+    ///
+    /// Takes a lock on the file descriptor table while holding the scheduler lock.
+    /// Lock order: (1) SCHEDULER (2) FILE_DESCRIPTORS
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_process(
@@ -251,7 +255,10 @@ impl Scheduler {
         pcb.add_thread_count()
             .expect("adding the first thread is always valid");
         // Add the file descriptors just before launching the user thread - this is the "commit point" after which we don't revert
-        pcb.fds.add_standard_fds();
+        // Get a handle to a file descriptor table for this process
+        let fds = fd::new();
+        pcb.fds = Some(fds);
+        fd::add_standard(fds);
         self.finish_spawn(sched, affinity);
         Ok(process)
     }

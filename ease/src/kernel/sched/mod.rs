@@ -3,7 +3,7 @@
 #[cfg(all(test, feature = "bench"))]
 mod bench;
 mod deadline;
-mod process;
+pub(crate) mod process;
 mod spawn;
 mod stride;
 #[cfg(all(test, any(feature = "test-sched", feature = "bench")))]
@@ -18,12 +18,10 @@ pub(crate) mod usermem;
 
 use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};
-use crate::kernel::fd;
 use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::percpu;
 use crate::user;
 pub(crate) use deadline::Deadline;
-pub(crate) use process::SyscallContext;
 use stride::SCHEDULER;
 #[expect(unused_imports)]
 pub(crate) use stride::{PRIORITY_DEFAULT, PRIORITY_MIN, SchedInner};
@@ -327,16 +325,4 @@ pub fn clear_wakeup_signal(handle: thread::Handle) {
 #[cfg(feature = "paint-stack")]
 pub fn stacks() {
     SCHEDULER.stacks();
-}
-
-//
-//  FILE DESCRIPTORS
-//
-
-fn open_file_descriptor(fd_kind: fd::Kind) -> Result<usize, fd::Error> {
-    SCHEDULER.open_fd(fd_kind)
-}
-
-fn close_file_descriptor(fd: usize) -> Result<fd::Kind, fd::Error> {
-    SCHEDULER.close_fd(fd)
 }
