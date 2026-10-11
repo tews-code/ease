@@ -7,10 +7,12 @@ own commit rather than folded into whatever change spotted it.
 
 Tick with [x] when done, or delete the line.
 
-[ ] Change the process::SyscallContext direct SCHEDULER lock takers
-    (current() and validate_buf() in sched/process.rs) to use a new method in
-    process's impl Scheduler, returning Copy values (process handle,
-    fd::Handle) so SyscallContext never names the SCHEDULER static.
+[ ] Change the process::SyscallContext direct SCHEDULER lock takers to
+    go through a method in process's impl Scheduler, so SyscallContext
+    never takes the scheduler lock itself. current() is done
+    (Scheduler::current_process_and_fds); validate_buf() remains. It
+    borrows the memory map under the lock, so its Scheduler method must
+    do the whole validation inside rather than return a value.
 
 [ ] lib.rs sched stub has process::MAX_COUNT = 8, but the real value is
     thread::MAX_COUNT - 2 (14). Make the stub match, or derive it the same

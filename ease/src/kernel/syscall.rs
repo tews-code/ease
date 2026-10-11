@@ -135,7 +135,7 @@ fn write(frame: &mut trap::Frame) {
     // Check what kind the fd is indexing
     let syscall_context = process::SyscallContext::current();
     if !matches!(
-        fd::kind(syscall_context.process_fds(), fd),
+        fd::kind(syscall_context.fds(), fd),
         Some(fd::Kind::Console | fd::Kind::DebugConsole)
     ) {
         // Wrong file descriptor, set up frame for error number and return

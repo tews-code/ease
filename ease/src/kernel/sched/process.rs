@@ -24,7 +24,7 @@ const MAX_THREADS_PER_PROC: u8 = 6;
 /// file descriptor table handle.
 pub(crate) struct SyscallContext {
     process: Handle,
-    fds: Option<fd::Handle>,
+    fds: fd::Handle,
     thread: thread::Handle,
     _marker: PhantomData<*const ()>, // !Sync and !Send
 }
@@ -41,20 +41,13 @@ impl SyscallContext {
     /// # Panics
     /// Panics if called on a kernel thread
     pub(crate) fn current() -> Self {
-        let thread = percpu::current_thread();
-        let sched = sched::stride::SCHEDULER.sched.lock();
-        let process = sched::thread::Threads::process_handle_of(&sched.threads, thread)
-            .expect("should only call this on a user thread");
-        let fds = sched
-            .processes
-            .pcbs
-            .get(process)
-            .expect("the process handle should not be stale")
-            .fds;
+        let (process, fds) = sched::SCHEDULER
+            .current_process_and_fds()
+            .expect("should not call on a kernel thread");
         Self {
             process,
             fds,
-            thread,
+            thread: percpu::current_thread(),
             _marker: PhantomData,
         }
     }
@@ -91,13 +84,9 @@ impl SyscallContext {
         ))
     }
 
-    /// Get the current process file descriptor table handle
-    ///
-    /// # Panics
-    /// Panics if the file descriptors handle is `None`
-    pub(crate) fn process_fds(&self) -> fd::Handle {
+    /// Get the SyscallContext process file descriptor table handle
+    pub(crate) fn fds(&self) -> fd::Handle {
         self.fds
-            .expect("the process should have a valid file descriptors handle")
     }
 }
 
@@ -406,5 +395,29 @@ impl Scheduler {
         drop(fd_table);
         // Exit this thread
         self.exit(reason);
+    }
+
+    /// Get the current thread's process handle and file descriptor table handle
+    /// Returns `None` if the current thread is a kernel thread.
+    ///
+    /// # Panics
+    /// Panics if the process handle is stale or the file descriptor table handle is `None`
+    pub(super) fn current_process_and_fds(&self) -> Option<(Handle, fd::Handle)> {
+        let sched = self.sched.lock();
+        sched
+            .threads
+            .process_handle_of(percpu::current_thread())
+            .map(|ph| {
+                (
+                    ph,
+                    sched
+                        .processes
+                        .pcbs
+                        .get(ph)
+                        .expect("process handle should not be stale")
+                        .fds
+                        .expect("process should have a file descriptor table handle"),
+                )
+            })
     }
 }
