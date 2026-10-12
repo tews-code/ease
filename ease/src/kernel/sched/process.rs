@@ -2,8 +2,6 @@
 //!
 //! Ease uses kernel scheduling for threads within a process
 
-use core::marker::PhantomData;
-
 use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
@@ -15,17 +13,17 @@ use crate::kernel::percpu;
 use crate::kernel::sched;
 use crate::kernel::sched::usermem::{UserBuf, ValidatedUserBuf};
 use crate::kernel::sync::IrqSpinLockGuard;
+use core::marker::PhantomData;
+use core::ptr::NonNull;
 
 pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
 const MAX_THREADS_PER_PROC: u8 = 6;
 
 /// A token to ensure the current thread's process is alive during syscalls.
-/// It holds the process handle as well as the active thread handle and the
-/// file descriptor table handle.
+/// It holds the active thread handle and the file descriptor table handle.
 pub(crate) struct SyscallContext {
-    process: Handle,
-    fds: fd::Handle,
     thread: thread::Handle,
+    fds: fd::Handle,
     _marker: PhantomData<*const ()>, // !Sync and !Send
 }
 
@@ -41,13 +39,12 @@ impl SyscallContext {
     /// # Panics
     /// Panics if called on a kernel thread
     pub(crate) fn current() -> Self {
-        let (process, fds) = sched::SCHEDULER
-            .current_process_and_fds()
+        let fds = sched::SCHEDULER
+            .current_fds()
             .expect("should not call on a kernel thread");
         Self {
-            process,
-            fds,
             thread: percpu::current_thread(),
+            fds,
             _marker: PhantomData,
         }
     }
@@ -60,23 +57,7 @@ impl SyscallContext {
     /// # Panics
     /// Panics if run on a kernel thread
     pub(crate) fn validate_buf<'a>(&'a self, user_buf: UserBuf) -> Option<ValidatedUserBuf<'a>> {
-        let sched = &sched::SCHEDULER.sched.lock();
-        let mem_map = &sched
-            .processes
-            .pcbs
-            .get(self.process)
-            .expect("must run on user thread")
-            .mem_map;
-        let user_stack = &sched
-            .threads
-            .tcbs
-            .get(self.thread)
-            .expect("must be a valid current thread")
-            .user
-            .as_ref()
-            .expect("must be a user thread")
-            .stack;
-        let validated_buf = mem_map.validate(user_stack, user_buf)?;
+        let validated_buf = sched::SCHEDULER.validate_user_buf(self.thread, user_buf)?;
         Some(ValidatedUserBuf::new(
             validated_buf,
             user_buf.direction,
@@ -397,27 +378,57 @@ impl Scheduler {
         self.exit(reason);
     }
 
-    /// Get the current thread's process handle and file descriptor table handle
+    /// Get the current thread's process file descriptor table handle
     /// Returns `None` if the current thread is a kernel thread.
     ///
     /// # Panics
     /// Panics if the process handle is stale or the file descriptor table handle is `None`
-    pub(super) fn current_process_and_fds(&self) -> Option<(Handle, fd::Handle)> {
+    pub(super) fn current_fds(&self) -> Option<fd::Handle> {
         let sched = self.sched.lock();
         sched
             .threads
             .process_handle_of(percpu::current_thread())
             .map(|ph| {
-                (
-                    ph,
-                    sched
-                        .processes
-                        .pcbs
-                        .get(ph)
-                        .expect("process handle should not be stale")
-                        .fds
-                        .expect("process should have a file descriptor table handle"),
-                )
+                sched
+                    .processes
+                    .pcbs
+                    .get(ph)
+                    .expect("process handle should not be stale")
+                    .fds
+                    .expect("process should have a file descriptor table handle")
             })
+    }
+
+    /// Validates a given user buffer against the given user thread and its process memory map.
+    ///
+    /// Returns `None` if the buffer is not validated, or `Some(NonNull<[u8]>)` if the
+    /// user buffer is valid.
+    ///
+    /// # Panics
+    /// Panics if:
+    /// - the given thread handle is stale
+    /// - the thread is not a user thread.
+    /// - the thread's process handle is stale
+    pub(super) fn validate_user_buf(
+        &self,
+        thread: thread::Handle,
+        user_buf: UserBuf,
+    ) -> Option<NonNull<[u8]>> {
+        let sched = self.sched.lock();
+        let user_context = sched
+            .threads
+            .tcbs
+            .get(thread)
+            .expect("thread handle should not be stale")
+            .user
+            .as_ref()
+            .expect("should not run on a kernel thread");
+        let mem_map = &sched
+            .processes
+            .pcbs
+            .get(user_context.process)
+            .expect("process handle should not be stale")
+            .mem_map;
+        mem_map.validate(&user_context.stack, user_buf)
     }
 }
