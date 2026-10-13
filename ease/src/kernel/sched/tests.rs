@@ -2652,7 +2652,7 @@ fn concurrent_image_loads_serialise_without_deadlock() {
 
 // WHITE-BOX GUARD for the trap-stack migration's core invariant: a user
 // thread's diverted excursions run on its KERNEL stack, never on the
-// user-controlled sp. A thread blocking in GET_CHAR parks mid-excursion,
+// user-controlled sp. A thread blocking in READ parks mid-excursion,
 // so its saved context pins where those frames actually live. History:
 // written red-first against the pre-migration kernel (sp 0x80000e80 in
 // the USER stack — kernel frames in user-writable memory, the trust
@@ -2664,7 +2664,7 @@ fn concurrent_image_loads_serialise_without_deadlock() {
 fn blocked_user_thread_frames_on_kernel_stack() {
     let handle =
         crate::kernel::sched::spawn_process("echo").expect("echo process spawn should succeed");
-    // Wait for its thread to park on the keyboard completion, then
+    // Wait for its thread to park in READ on stdin, then
     // snapshot Copy values under the lock (no refs across the boundary).
     let mut snapshot = None;
     for _ in 0..200 {
@@ -2691,7 +2691,7 @@ fn blocked_user_thread_frames_on_kernel_stack() {
         crate::kernel::sched::sleep(10);
     }
     let (sp, kernel_base, kernel_size, user_base, user_size) =
-        snapshot.expect("echo's thread never blocked on GET_CHAR");
+        snapshot.expect("echo's thread never blocked in READ");
     let in_kernel_stack = sp >= kernel_base && sp < kernel_base + kernel_size;
     let in_user_stack = sp >= user_base && sp < user_base + user_size;
     // Demand exactly-one-place: "in kernel" alone would miss overlapping
@@ -2719,10 +2719,57 @@ fn blocked_user_thread_frames_on_kernel_stack() {
     assert!(drained, "echo process never released after fault-kill");
 }
 
+// echo end to end: it must block in READ on stdin, print back what it
+// reads, and exit when it reads 'x'. Input arrives through the UART RX
+// test hook, exactly as the RX interrupt would deliver it.
+#[test_case]
+fn echo_prints_input_and_exits_on_x() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle =
+        crate::kernel::sched::spawn_process("echo").expect("echo process spawn should succeed");
+    // With no input queued, echo must park in READ
+    crate::kernel::sched::sleep(50);
+    assert!(
+        process_alive(handle),
+        "echo exited before any input: READ did not block"
+    );
+    crate::drivers::uart::inject_rx(b"EchoMe");
+    #[cfg(feature = "test-io")]
+    {
+        let mut echoed = false;
+        for _ in 0..200 {
+            if crate::io::test_io::contains("EchoMe") {
+                echoed = true;
+                break;
+            }
+            crate::kernel::sched::sleep(10);
+        }
+        assert!(echoed, "echo never printed back the injected \"EchoMe\"");
+    }
+    assert!(process_alive(handle), "echo exited before reading 'x'");
+    crate::drivers::uart::inject_rx(b"x");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    if !drained {
+        // Don't leak a parked echo into later tests
+        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+            .expect("faulter should join the echo process");
+    }
+    assert!(drained, "echo did not exit after reading 'x'");
+}
+
 // REGRESSION GUARD for the single trap-return path: a blocking syscall
 // hands back every register except its two results. The probe program
-// loads a distinctive value into s0-s11, t0-t6 and a2-a7, blocks in
-// GET_CHAR, and after the kernel injects a key compares all 25 (see
+// loads a distinctive value into s0-s11, t0-t6 and a3-a6, blocks in
+// READ on stdin (a2 and a7 carry READ's length and number, which must
+// also survive), and after the kernel injects a byte compares all 25 (see
 // user::user_register_probe). REG OK on the console plus a clean exit
 // is the pass signal; any mismatch prints REG MISMATCH <bitmask> and
 // spins, so the drain timeout below is the failure. Before the syscall path went
@@ -2734,7 +2781,7 @@ fn blocking_syscall_preserves_user_registers() {
     crate::io::test_io::clear();
     let handle = crate::kernel::sched::spawn_process("user_register_probe")
         .expect("register probe spawn should succeed");
-    // Wait for the probe to park in GET_CHAR so the key wakes it through
+    // Wait for the probe to park in READ so the byte wakes it through
     // the blocking path rather than being read on the way in.
     let mut blocked = false;
     for _ in 0..200 {
@@ -2750,10 +2797,8 @@ fn blocking_syscall_preserves_user_registers() {
         }
         crate::kernel::sched::sleep(10);
     }
-    assert!(blocked, "register probe never blocked in GET_CHAR");
-    crate::drivers::keyboard::inject_key(crate::drivers::keyboard::DecodedKey::from_code(
-        b'k' as usize,
-    ));
+    assert!(blocked, "register probe never blocked in READ");
+    crate::drivers::uart::inject_rx(b"k");
     let mut drained = false;
     for _ in 0..200 {
         if !process_alive(handle) {

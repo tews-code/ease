@@ -2,7 +2,7 @@
 
 use core::arch::naked_asm;
 
-use ease_abi::syscall;
+use ease_abi::{fds::STDIN, syscall};
 
 pub(crate) const PROGRAMS: Programs = Programs(&[
     Program {
@@ -113,16 +113,22 @@ impl Programs {
     }
 }
 
-/// Echos character read from the keyboard until `x` at which
-/// point it quits
+/// Echos character read from std in until `x` at which point it quits
 #[unsafe(link_section = ".user_text")]
 pub extern "C" fn echo() {
+    let mut buf = [0u8; 16];
     loop {
-        if let Some(ch) = user_get_char() {
-            if ch == b'x' as usize {
-                user_exit();
+        let (error, bytes_copied) = user_read(STDIN, buf.as_mut_ptr().addr(), buf.len());
+        if error == 0 {
+            let mut idx = 0;
+            while idx < bytes_copied && idx < buf.len() {
+                let byte = buf[idx];
+                if byte == b'x' {
+                    user_exit();
+                }
+                user_put_char(byte as usize);
+                idx += 1;
             }
-            user_put_char(ch);
         }
     }
 }
@@ -231,16 +237,22 @@ const PROBE_REGS: usize = 25;
 /// Expected value of probe register `i` after the syscall. Distinct per
 /// register so a swap shows up, and distinct per class so a stale value
 /// from another register is recognisable in the mismatch mask.
+/// Length the register probe passes to READ in a2: one byte, so it fits the
+/// scratch slot at 52(sp) and must come back unchanged like any other a2 value.
+const REG_PROBE_READ_LEN: usize = 1;
+
 #[unsafe(link_section = ".user_text")]
 extern "C" fn probe_expected(i: usize) -> usize {
     if i < 12 {
         0x5000_0000 + i // s0..s11
     } else if i < 19 {
         0x7000_0000 + (i - 12) // t0..t6
+    } else if i == 19 {
+        REG_PROBE_READ_LEN // a2 carried READ's length argument
     } else if i < 24 {
-        0x6000_0000 + (i - 19 + 2) // a2..a6
+        0x6000_0000 + (i - 19 + 2) // a3..a6
     } else {
-        syscall::GET_CHAR // a7 carried the syscall number
+        syscall::READ // a7 carried the syscall number
     }
 }
 
@@ -248,9 +260,12 @@ extern "C" fn probe_expected(i: usize) -> usize {
 /// hand back every register except the two results.
 ///
 /// Loads a distinctive value into s0–s11 (callee-saved: the user ABI relies
-/// on these surviving) and into t0–t6 and a2–a7 (caller-saved: the full
-/// frame restore preserves them too), blocks in GET_CHAR until the kernel
-/// test injects a key, then dumps all 25 registers and compares. All match:
+/// on these surviving) and into t0–t6 and a3–a6 (caller-saved: the full
+/// frame restore preserves them too), blocks in READ on stdin until the
+/// kernel test injects a byte, then dumps all 25 registers and compares.
+/// a0–a2 and a7 carry READ's arguments (a2 = [`REG_PROBE_READ_LEN`], read
+/// into a scratch byte in the probe's stack frame); a0 and a1 are the
+/// syscall's two results, while a2 and a7 must still come back unchanged. All match:
 /// exits cleanly. Any mismatch: prints REG MISMATCH with a bitmask (bit i =
 /// register i in [`probe_expected`]'s order) and spins, so the kernel-side
 /// test times out and the console says why.
@@ -278,10 +293,14 @@ pub extern "C" fn user_register_probe() {
             "li s8, 0x50000008", "li s9, 0x50000009", "li s10, 0x5000000a", "li s11, 0x5000000b",
             "li t0, 0x70000000", "li t1, 0x70000001", "li t2, 0x70000002", "li t3, 0x70000003",
             "li t4, 0x70000004", "li t5, 0x70000005", "li t6, 0x70000006",
-            "li a2, 0x60000002", "li a3, 0x60000003", "li a4, 0x60000004", "li a5, 0x60000005",
+            "li a3, 0x60000003", "li a4, 0x60000004", "li a5, 0x60000005",
             "li a6, 0x60000006",
-            "li a7, {get_char}",
-            // Block until the kernel test injects a key
+            // READ(stdin, scratch byte at 52(sp), REG_PROBE_READ_LEN)
+            "li a0, {stdin}",
+            "addi a1, sp, 52",
+            "li a2, {read_len}",
+            "li a7, {read}",
+            // Block until the kernel test injects a byte
             "ecall",
             // Dump every register under test before touching any of them
             "lw a0,  48(sp)",
@@ -297,7 +316,9 @@ pub extern "C" fn user_register_probe() {
             "lw s4,  16(sp)", "lw s5,  20(sp)", "lw s6,  24(sp)", "lw s7,  28(sp)",
             "lw s8,  32(sp)", "lw s9,  36(sp)", "lw s10, 40(sp)", "lw s11, 44(sp)",
             "addi sp, sp, 64",
-            get_char = const syscall::GET_CHAR,
+            stdin = const STDIN,
+            read_len = const REG_PROBE_READ_LEN,
+            read = const syscall::READ,
             inout("a0") regs.as_mut_ptr().cast::<usize>() => _,
             out("a1") _, out("a2") _, out("a3") _, out("a4") _, out("a5") _,
             out("a6") _, out("a7") _,
@@ -620,21 +641,6 @@ fn user_read(fd: usize, addr: usize, len: usize) -> (usize, usize) {
         );
     }
     (error, value)
-}
-
-#[unsafe(link_section = ".user_text")]
-pub fn user_get_char() -> Option<usize> {
-    let error: usize;
-    let value: usize;
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            out("a0") error,
-            out("a1") value,
-            in("a7") syscall::GET_CHAR,
-        );
-    }
-    if error == 0 { Some(value) } else { None }
 }
 
 #[unsafe(link_section = ".user_text")]
