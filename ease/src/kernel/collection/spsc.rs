@@ -100,7 +100,7 @@ impl<T: Copy + Send, const N: usize> Queue<T, N> {
     ///     │       │
     ///  Producer  Consumer
     ///
-    /// Bare in mind that Rust aliasing refers to _bytes_, not the entire object. In
+    /// Bear in mind that Rust aliasing refers to _bytes_, not the entire object. In
     /// our case `push` only writes bytes at the head, and `pop` only reads/writes bytes
     /// at the tail, and from the logic and atomic indices these never overlap.
     pub(crate) fn split<'a>(&'a mut self) -> (Producer<'a, T, N>, Consumer<'a, T, N>) {

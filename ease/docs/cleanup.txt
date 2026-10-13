@@ -7,18 +7,20 @@ own commit rather than folded into whatever change spotted it.
 
 Tick with [x] when done, or delete the line.
 
+Planned features and roadmap work live in docs/todo.txt, not here.
+
 [x] Change the process::SyscallContext direct SCHEDULER lock takers to
     go through a method in process's impl Scheduler, so SyscallContext
     never takes the scheduler lock itself. Done: Scheduler::current_fds
     and Scheduler::validate_user_buf.
 
-[ ] lib.rs sched stub has process::MAX_COUNT = 8, but the real value is
+[x] lib.rs sched stub has process::MAX_COUNT = 8, but the real value is
     thread::MAX_COUNT - 2 (14). Make the stub match, or derive it the same
     way.
 
 [x] fd::Table::take_all has no callers; remove it.
 
-[ ] fd::Table::close_all is equivalent to dropping the Table (each
+[x] fd::Table::close_all is equivalent to dropping the Table (each
     FileHandle's Drop already saves metadata and closes). Process teardown
     now drops the Table explicitly, so close_all has no callers; remove it.
 
@@ -34,3 +36,13 @@ Tick with [x] when done, or delete the line.
       on-disk FAT/BPB/directory fields read from the block device,
       virtio descriptor/used-ring values from the device.
     - Only wrap values where a missed check becomes a panic or memory bug.
+
+[ ] Remove the test-only TEST_MUTEX_BLOCK syscall (ease-abi = 100,
+    syscall.rs dispatch arm + test_mutex_block, user.rs user_mutex_block
+    and its image entry, test_support TEST_MUTEX / TEST_MUTEX_SIGNAL).
+    - It backs the boundary-kill test in sched/tests.rs (~line 2933):
+      a user thread fault-killed while holding a kernel Mutex across an
+      interruptible wait must drop the guard before exiting.
+    - Don't lose that coverage: move the test onto a real syscall that
+      holds a lock across an interruptible wait, or decide (and note
+      why) that the property is covered elsewhere, before deleting.

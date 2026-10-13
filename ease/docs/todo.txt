@@ -1,0 +1,96 @@
+Feature todo
+============
+
+Planned features, in priority order. Higher priority than docs/cleanup.txt,
+which holds small tidy-ups noticed along the way. Each item is split into
+steps that each pass CI and can be committed on their own.
+
+Tick with [x] when done, or delete the line.
+
+[ ] Console input: fd 0 reads from a "console input" role, not a device.
+    Model (QEMU mirrors the real hardware):
+      - typing in konsole -> UART  ==  Pi Debug Probe serial -> RP2350 UART
+      - typing in the QEMU window -> virtio keyboard  ==  SPI keyboard
+    Both sources feed console input; READ and the shell only ever see fd 0.
+    Design:
+      - One wait queue owned by the console-input layer; every source calls
+        "notify console input" after pushing (replaces RX_AVAIL and
+        KEYS_PENDING as wait points; a thread can sleep on only one queue).
+      - Each source keeps its own ring (UART RX bytes, keyboard KEYS); no
+        merged ring, since SPSC allows one producer.
+      - One lock over both consumers: wait_with_interruptible locks a single
+        resource, so the console-input struct holds the UART reader AND the
+        keyboard consumer. READ's predicate drains whichever has data.
+      - Common format: bytes, special keys as ANSI escape sequences
+        (ESC [ A for Up), which a terminal already sends over the UART.
+      - Known limitation: simultaneous typing on both sources can interleave
+        an escape sequence. One human types; note it, don't engineer it.
+    Steps:
+    [ ] 1. READ syscall with console input backed by the UART only: rename
+           the fd Entry/Kind to console input, READ has one arm, UART RX
+           IRQ wakes the console-input queue. Error-path tests (bad fd,
+           fd 1, bad/read-only buffer, zero length); blocking test needs a
+           way to inject RX bytes.
+    [ ] 2. Retire GET_CHAR; move the echo user program to READ.
+    [ ] 3. Virtio keyboard as the second source, ASCII only: its consumer
+           moves into the console-input struct, the decoder thread notifies
+           console input.
+    [ ] 4. Special keys as escape sequences. Never split a sequence across
+           reads: only take a key if its whole sequence fits (needs a peek
+           on the SPSC queue). Fixes the >0xFF special-key truncation.
+
+[ ] Board role table in board.rs, once a second board makes it pay off.
+    - board.rs stays data only: its own small enum of the devices the board
+      has (do not import driver types; drivers depend on board, not the
+      reverse), plus consts assigning roles: console input, console output,
+      debug output.
+    - QEMU: console in = UART + virtio keyboard; console out = UART (later
+      + display); debug out = UART.
+    - RP2350: console in = UART (probe) + SPI keyboard; console out =
+      display + UART; debug out = UART.
+    - The kernel console layer reads the table at init and registers
+      sources/sinks per role; const tables let the match compile away.
+    - Debug is output-only for now (STDERR convention). Debug input only
+      if a kernel debug monitor is ever wanted: a one-line table change.
+    - Console output gets the same role treatment as input (STDOUT ->
+      console output -> UART/display/RTT sinks).
+
+[ ] RTT (SEGGER Real-Time Transfer) as another console device, for early
+    RP2350 bring-up before the UART works. Fits the role table as one more
+    device; nothing above the console layer changes.
+    - Input has no interrupt: poll the RTT down buffer (timer tick or a
+      small periodic thread, deferrable), and on new bytes call "notify
+      console input". The down buffer is already a ring, so the
+      console-input struct reads it directly; no extra ring.
+    - Output: the RTT up buffer is a console-output sink. Non-blocking:
+      when no probe is reading and it fills, drop and count (the existing
+      print policy). Never block waiting for a debugger.
+    - Hardware: control block ("SEGGER RTT" magic) must sit in RAM the
+      probe scans (linker placement); publish indices after data (same
+      ordering discipline as the SPSC queue).
+    - QEMU testing: a test plays the probe (writes the down buffer, reads
+      the up buffer) and checks READ end to end. Optional interactive
+      "probe": QEMU RAM backed by a shared memory-backend-file (share=on),
+      a host script mmaps it and scans for the control block. Avoid the
+      gdbstub (halts the VM per access).
+
+[ ] Separate .rodata from .text (linker scripts + PMP), so read-only data
+    is R only, not R+X. Hardening: today constant data is executable.
+    Current state:
+      - User blobs: ease-user/user-memory-qemu.x puts .rodata/.srodata
+        inside the user .text output section, and usermem Role::Text
+        grants R|X over the whole window.
+      - Kernel: memory-qemu.x already has separate .text and .rodata
+        output sections, but both sit back to back in FLASH; check what
+        the flash PMP grant (pmp.rs, "kernel/user code grant") covers.
+    To do:
+      - Linker: give .rodata its own aligned output section (and start/end
+        symbols) in both scripts; add linker ASSERTs for alignment/size as
+        done for the scratch .text.
+      - PMP: a Role (e.g. Rodata) with R only, plus its Backing.
+      - Budget: 8 PMP entries, 2 taken by the kernel scratch .text guards,
+        6 left for U-mode. A separate rodata region costs one more entry
+        per process; NAPOT needs power-of-two size and alignment (padding
+        cost), TOR needs two entries. Decide which before splitting.
+      - Tests: a U-mode probe that jumps into its own .rodata must
+        fault-kill the process; one that reads .rodata must still work.
