@@ -20,14 +20,16 @@
 //! The THR (Transmitter Holding Register) is the staging slot for a byte to be transmitted. When you write a byte to the UART, it lands here and is ready for actual transmission.
 //!
 //! # Receiving #
-//! The RBR register holds the latest received byte.
+//! The RBR register holds the head of the FIFO with the oldest received byte.
 //!
 //! In our driver, we have two SPSC ring buffers, one for RX and one for TX.
 
 #[cfg(feature = "profile")]
 use ease_macros::profile;
 
-use crate::arch::{hart_id, interrupts, mmio};
+#[cfg(test)]
+use crate::arch::hart_id;
+use crate::arch::{interrupts, mmio};
 use crate::board::uart;
 use crate::kernel::collection::{StackVec, spsc};
 use crate::kernel::sync::{Interrupted, SpinLock};
@@ -50,6 +52,7 @@ const LSR: usize = 5;
 /// Line Status Register - TX is ready as THR is Empty
 const LSR_THRE: u8 = 1 << 5;
 /// Line Status Register - TX is done as both THR and TSR are Empty
+#[cfg(test)]
 const LSR_TEMT: u8 = 1 << 6;
 /// Line Status Register - RX is ready (data in RBR)
 const LSR_DATA_READY: u8 = 1 << 0;
@@ -82,24 +85,24 @@ const IIR_RX_TIMEOUT: u8 = 0b1100;
 /// threads consuming this queue so the consumer is protected by a spin lock.
 mod queue {
     use crate::kernel::collection::spsc;
-    use crate::kernel::sync::{SpinLock, TryLock, WaitQueue};
+    use crate::kernel::sync::{TryLock, WaitQueue};
 
     /// Byte queue length for receiving. Small, so we don't support bursts e.g. paste into console
     pub(super) const RX_LEN: usize = 64;
     /// Ease queue size for transmission. Set to 1KB to deal with bursts.
     pub(super) const TX_LEN: usize = 1024;
 
-    /// Byte queue for receiveing
+    /// Receiver queue
     pub(super) static RX: spsc::Queue<u8, RX_LEN> = spsc::Queue::new();
     /// Receiving byte producer is a static because it is used by the ISR after trap.
     /// It is exclusively used by the ISR on HART 0. We use `TryLock` as a lightweight
-    /// way to bring interior mutability into the static.
-    // Safety: Only create the consumer once right here
+    /// way to bring interior mutability into the static.  Note the RX consumer is held
+    /// in the struct UartReader, which is protected by a spinlock.
+    // Safety: Only create the producer once right here.
     pub(super) static RX_PRODUCER: TryLock<spsc::Producer<'static, u8, RX_LEN>> =
         unsafe { TryLock::new(RX.producer_unchecked()) };
-    /// Receiving byte consumer is a static where multiple input (keyboard) readers can contend.
-    pub(super) static RX_CONSUMER: SpinLock<spsc::Consumer<'static, u8, RX_LEN>> =
-        SpinLock::new(unsafe { RX.consumer_unchecked() });
+    // Wait queue for threads blocked on input
+    pub(super) static RX_AVAIL: WaitQueue = WaitQueue::new();
 
     /// Transmission queue
     pub(super) static TX: spsc::Queue<u8, TX_LEN> = spsc::Queue::new();
@@ -118,8 +121,12 @@ mod queue {
 }
 
 /// Main writer
-/// Note that this can only be used used with interrupts enabled
+/// Note that this can only be used with interrupts enabled
 static UART_WRITER: SpinLock<UartWriter> = SpinLock::new(UartWriter::new()); // Private - only access with `with_uart_writer`
+
+/// Main reader
+/// Note that this can only be used with interrupts enabled
+static UART_READER: SpinLock<UartReader> = SpinLock::new(UartReader::new());
 
 /// Direct write to MMIO - skips queue
 /// Busy waits on the LSR before writing the byte
@@ -147,6 +154,23 @@ pub(crate) fn init() {
         FCR_FIFO_ENABLE | FCR_RX_FIFO_RESET | FCR_TX_FIFO_RESET | FCR_TRIGGER_8,
     );
     RBR_interrupt_enable();
+}
+
+/// Provides user thread access to the [queue::RX_AVAIL] wait queue.
+///
+/// Returns the number of bytes received on success or
+/// [crate::kernel::sync::Interrupted] on Err.
+pub(crate) fn wait_and_read_interruptible(buf: &mut [u8]) -> Result<usize, Interrupted> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut bytes_read: usize = 0;
+    // Block until the RX queue has bytes available
+    queue::RX_AVAIL.wait_with_interruptible(&UART_READER, |uart_reader| {
+        bytes_read = uart_reader.read_bytes(buf);
+        bytes_read > 0
+    })?;
+    Ok(bytes_read)
 }
 
 /// Prints to UART
@@ -218,7 +242,7 @@ fn tx_fill_fifo(consumer: &mut spsc::Consumer<'static, u8, { queue::TX_LEN }>) {
 /// Only call from kernel threads as it cannot be interrupted for thread teardown.
 ///
 /// Note that full flush can take milliseconds so avoid using in critical sections.
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) fn flush() {
     if !queue::TX.is_empty() {
         // We know that there are bytes left so preemptively enable the THRE interrupt
@@ -271,6 +295,7 @@ fn LSR_tx_ready() -> bool {
 }
 /// Helper function to check the LSR to see if transmitter is empty (THR and TSR are both empty)
 #[allow(non_snake_case)]
+#[cfg(test)]
 fn LSR_tx_done() -> bool {
     let lsr = mmio::read8(uart::BASE, LSR);
     lsr & LSR_TEMT != 0
@@ -297,6 +322,58 @@ fn THRE_interrupt_disable() {
 fn RBR_interrupt_enable() {
     let enabled_interrupts = mmio::read8(uart::BASE, IER);
     mmio::write8(uart::BASE, IER, enabled_interrupts | ERBFI);
+}
+
+/// Test support: queue received bytes exactly as the RX interrupt would,
+/// then wake readers, so a thread blocked in READ wakes without real input.
+///
+/// The RX producer belongs to the interrupt handler, which `expect`s its
+/// `try_lock` to succeed. This is only safe while no real RX interrupt can
+/// run at the same time, which holds in CI because nothing types into the
+/// serial port.
+#[cfg(test)]
+pub(crate) fn inject_rx(bytes: &[u8]) {
+    {
+        let mut producer = queue::RX_PRODUCER
+            .try_lock()
+            .expect("no RX interrupt should be running during a test");
+        for &byte in bytes {
+            let _ = producer.push(byte);
+        }
+    }
+    queue::RX_AVAIL.wake_all();
+}
+
+/// UART Reader to hold the RX queue consumer
+pub(crate) struct UartReader {
+    consumer: spsc::Consumer<'static, u8, { queue::RX_LEN }>,
+}
+
+impl UartReader {
+    const fn new() -> Self {
+        Self {
+            // Safety: we never call split and do not change the queue once set up
+            consumer: unsafe { queue::RX.consumer_unchecked() },
+        }
+    }
+
+    /// Pop a single byte from the receiver queue
+    fn read_byte(&mut self) -> Option<u8> {
+        self.consumer.pop()
+    }
+
+    /// Fill a given buffer with bytes from the receiver queue
+    /// Returns the number of bytes received
+    fn read_bytes(&mut self, buf: &mut [u8]) -> usize {
+        let mut count: usize = 0;
+        while count < buf.len()
+            && let Some(b) = self.read_byte()
+        {
+            buf[count] = b;
+            count += 1;
+        }
+        count
+    }
 }
 
 /// UART Writer to hold the write_str trait
@@ -392,6 +469,8 @@ pub fn handle_interrupt() {
                     // so there is no need to serialise
                     let _ = producer.push(byte); // drop if full
                 }
+                // Wake any wait-queue threads
+                queue::RX_AVAIL.wake_all();
             }
             IIR_THR_EMPTY => {
                 let mut consumer = queue::TX_CONSUMER.try_lock()

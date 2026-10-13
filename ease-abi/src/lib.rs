@@ -14,8 +14,10 @@
 
 pub mod syscall {
     pub const EXIT: usize = 0;
-    pub const GET_CHAR: usize = 1;
+    pub const READ: usize = 1;
     pub const WRITE: usize = 2;
+
+    pub const GET_CHAR: usize = 17;
 
     // Test-only syscalls live at 100+ so real syscall growth never
     // collides. The kernel only wires them up in test builds; a

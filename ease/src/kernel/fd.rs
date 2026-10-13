@@ -2,6 +2,8 @@
 //!
 //! File descriptors are held in a static arena, and each process holds a handle to its slot.
 
+use ease_abi::fds::{STDERR, STDIN, STDOUT};
+
 use crate::fs::FileHandle;
 use crate::kernel::collection::Arena;
 use crate::kernel::sched::process;
@@ -131,8 +133,8 @@ pub(super) enum Error {
 
 #[derive(Debug)]
 pub(super) enum Entry {
-    Keyboard,
-    Console,
+    ConsoleInput,
+    ConsoleOutput,
     DebugConsole,
     File(FileHandle),
 }
@@ -142,8 +144,8 @@ impl Entry {
     /// descriptor being dropped.
     pub(super) fn kind(&self) -> Kind {
         match self {
-            Entry::Keyboard => Kind::Keyboard,
-            Entry::Console => Kind::Console,
+            Entry::ConsoleInput => Kind::ConsoleInput,
+            Entry::ConsoleOutput => Kind::ConsoleOutput,
             Entry::DebugConsole => Kind::DebugConsole,
             Entry::File(_) => Kind::File,
         }
@@ -155,8 +157,8 @@ impl Entry {
 /// Note that this is Copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
-    Keyboard,
-    Console,
+    ConsoleInput,
+    ConsoleOutput,
     DebugConsole,
     File,
 }
@@ -179,9 +181,9 @@ impl Table {
             "previous process teardown didn't clear file descriptor table"
         );
         // A new process traditionally starts with three file descriptors
-        self.0[0] = Some(Entry::Keyboard);
-        self.0[1] = Some(Entry::Console);
-        self.0[2] = Some(Entry::DebugConsole);
+        self.0[STDIN] = Some(Entry::ConsoleInput);
+        self.0[STDOUT] = Some(Entry::ConsoleOutput);
+        self.0[STDERR] = Some(Entry::DebugConsole);
     }
 
     /// Add an open file
@@ -281,13 +283,13 @@ mod host_tests {
     }
 
     #[test]
-    fn standard_fds_are_keyboard_console_debug_console() {
+    fn standard_fds_are_console_input_output_and_debug() {
         let mut table = Table::new();
         table.add_standard_fds();
         assert!(!table.is_empty());
-        assert_eq!(kind_at(&table, 0), Some(Kind::Keyboard));
-        assert_eq!(kind_at(&table, 1), Some(Kind::Console));
-        assert_eq!(kind_at(&table, 2), Some(Kind::DebugConsole));
+        assert_eq!(kind_at(&table, STDIN), Some(Kind::ConsoleInput));
+        assert_eq!(kind_at(&table, STDOUT), Some(Kind::ConsoleOutput));
+        assert_eq!(kind_at(&table, STDERR), Some(Kind::DebugConsole));
         for n in 3..MAX_OPEN {
             assert_eq!(kind_at(&table, n), None, "fd {n} should be empty");
         }
@@ -305,34 +307,34 @@ mod host_tests {
     fn close_returns_entry_and_empties_slot() {
         let mut table = Table::new();
         table.add_standard_fds();
-        let closed = table.close(valid(1)).expect("fd 1 is open");
-        assert_eq!(closed.kind(), Kind::Console);
-        assert_eq!(kind_at(&table, 1), None);
+        let closed = table.close(valid(STDOUT)).expect("stdout is open");
+        assert_eq!(closed.kind(), Kind::ConsoleOutput);
+        assert_eq!(kind_at(&table, STDOUT), None);
         // Closing again is a stale fd, not a panic
         assert!(matches!(
-            table.close(valid(1)),
+            table.close(valid(STDOUT)),
             Err(Error::StaleFileDescriptor)
         ));
         // Neighbours are untouched
-        assert_eq!(kind_at(&table, 0), Some(Kind::Keyboard));
-        assert_eq!(kind_at(&table, 2), Some(Kind::DebugConsole));
+        assert_eq!(kind_at(&table, STDIN), Some(Kind::ConsoleInput));
+        assert_eq!(kind_at(&table, STDERR), Some(Kind::DebugConsole));
     }
 
     #[test]
     fn open_fills_lowest_free_slot_then_refuses_when_full() {
         let mut table = Table::new();
         table.add_standard_fds();
-        assert_eq!(table.open(Entry::Console).ok(), Some(3));
+        assert_eq!(table.open(Entry::ConsoleOutput).ok(), Some(3));
         // A freed low slot is reused before higher ones
         let _ = table.close(valid(1)).expect("fd 1 is open");
         assert_eq!(table.open(Entry::DebugConsole).ok(), Some(1));
         for n in 4..MAX_OPEN {
-            assert_eq!(table.open(Entry::Console).ok(), Some(n));
+            assert_eq!(table.open(Entry::ConsoleOutput).ok(), Some(n));
         }
         // Full: the entry comes back to the caller rather than being dropped
         assert!(matches!(
-            table.open(Entry::Keyboard),
-            Err(Error::NotEnoughSlots(Entry::Keyboard))
+            table.open(Entry::ConsoleInput),
+            Err(Error::NotEnoughSlots(Entry::ConsoleInput))
         ));
     }
 }

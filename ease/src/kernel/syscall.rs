@@ -13,6 +13,7 @@ use ease_macros::profile;
 
 /// Size of the user write buffer. Bytes are copied one at a time with interrupts off for up to this buf length.
 const WRITE_BUF_LEN: usize = 128;
+const READ_BUF_LEN: usize = 128;
 
 /// Handle U-mode ecalls
 ///
@@ -29,15 +30,7 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             umode::EcallResult::Diverted
         }
-        syscall::GET_CHAR => {
-            kernel::trap::divert_work_to_kernel(
-                frame,
-                frame.mepc + 4,
-                kernel::trap::Work::Syscall(frame.syscall()),
-            );
-            umode::EcallResult::Diverted
-        }
-        syscall::WRITE => {
+        syscall::READ | syscall::WRITE | syscall::GET_CHAR => {
             kernel::trap::divert_work_to_kernel(
                 frame,
                 frame.mepc + 4,
@@ -78,6 +71,7 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
     unsafe {
         interrupts::with_interrupts_enabled(|| {
             match syscall {
+                syscall::READ => read(frame),
                 syscall::GET_CHAR => get_char(frame),
                 syscall::WRITE => write(frame),
                 // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
@@ -93,30 +87,54 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
     }
 }
 
-fn get_char(frame: &mut trap::Frame) {
-    // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
+fn read(frame: &mut trap::Frame) {
+    // READ holds nothing across its waits, so exit-on-the-spot is legal here
     sched::exit_user_thread_if_needs_exit();
-    // Block using a wait queue, with a closure to evalute the key press
-    let mut key = None;
-    let result = keyboard::queue::KEYS_PENDING.wait_with_interruptible(
-        &keyboard::queue::CONSUMER,
-        |consumer| {
-            key = consumer
-                .as_mut()
-                .expect("decoded key queue must be initialised")
-                .pop();
-            key.is_some()
-        },
-    );
-    match result {
-        Ok(guard) => drop(guard),
-        Err(sync::Interrupted) => sched::exit_current_user_thread(thread::ExitReason::Fault),
+    // Get the untrusted file descriptor from the frame.
+    let fd = Untrusted::new(frame.a0);
+    // Validate
+    let fd = match fd::ValidFd::validate(fd) {
+        Ok(fd) => fd,
+        Err(_) => {
+            frame.a0 = ease_abi::Error::BadFd.into();
+            frame.a1 = 0;
+            return;
+        }
+    };
+    // Validate the file descriptor kind
+    let syscall_context = process::SyscallContext::current();
+    if !matches!(
+        fd::kind(syscall_context.fds(), fd),
+        Some(fd::Kind::ConsoleInput)
+    ) {
+        // Wrong file descriptor, set up frame for error number and return
+        frame.a0 = ease_abi::Error::BadFd.into();
+        frame.a1 = 0;
+        return;
     }
-    // Return the key in the frame's value field
-    frame.a0 = 0;
-    frame.a1 = key
-        .expect("wait should only have returned on a valid key popped")
-        .code();
+    // Build the user buffer and validate it
+    let user_buf = usermem::UserBuf::new(frame.a1, frame.a2, usermem::Transfer::ToUser);
+    if let Some(validated_user_buf) = syscall_context.validate_buf(user_buf) {
+        // Kernel buffer to receive the bytes
+        let mut buf = [0u8; READ_BUF_LEN];
+        // Read the bytes via UART; we sleep until at least a byte is available
+        let bytes_read = match uart::wait_and_read_interruptible(
+            &mut buf[..validated_user_buf.len().min(READ_BUF_LEN)],
+        ) {
+            Ok(bytes_read) => bytes_read,
+            Err(kernel::sync::Interrupted) => {
+                sched::exit_current_user_thread(thread::ExitReason::Fault)
+            }
+        };
+        // Safely copy from the kernel buffer into the user buffer
+        let bytes_copied = validated_user_buf.copy_to_user(&buf[..bytes_read]);
+        // Return the number of bytes read
+        frame.a0 = 0;
+        frame.a1 = bytes_copied;
+    } else {
+        frame.a0 = ease_abi::Error::BadBuffer.into();
+        frame.a1 = 0;
+    }
 }
 
 fn write(frame: &mut trap::Frame) {
@@ -136,7 +154,7 @@ fn write(frame: &mut trap::Frame) {
     let syscall_context = process::SyscallContext::current();
     if !matches!(
         fd::kind(syscall_context.fds(), fd),
-        Some(fd::Kind::Console | fd::Kind::DebugConsole)
+        Some(fd::Kind::ConsoleOutput | fd::Kind::DebugConsole)
     ) {
         // Wrong file descriptor, set up frame for error number and return
         frame.a0 = ease_abi::Error::BadFd.into();
@@ -165,6 +183,32 @@ fn write(frame: &mut trap::Frame) {
         frame.a0 = ease_abi::Error::BadBuffer.into();
         frame.a1 = 0;
     }
+}
+
+fn get_char(frame: &mut trap::Frame) {
+    // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
+    sched::exit_user_thread_if_needs_exit();
+    // Block using a wait queue, with a closure to evalute the key press
+    let mut key = None;
+    let result = keyboard::queue::KEYS_PENDING.wait_with_interruptible(
+        &keyboard::queue::CONSUMER,
+        |consumer| {
+            key = consumer
+                .as_mut()
+                .expect("decoded key queue must be initialised")
+                .pop();
+            key.is_some()
+        },
+    );
+    match result {
+        Ok(guard) => drop(guard),
+        Err(sync::Interrupted) => sched::exit_current_user_thread(thread::ExitReason::Fault),
+    }
+    // Return the key in the frame's value field
+    frame.a0 = 0;
+    frame.a1 = key
+        .expect("wait should only have returned on a valid key popped")
+        .code();
 }
 
 #[cfg(all(test, feature = "test-sched"))]

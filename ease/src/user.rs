@@ -58,6 +58,14 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
         image: Image::Flash(user_write_probe),
     },
     Program {
+        name: "user_read_probe",
+        image: Image::Flash(user_read_probe),
+    },
+    Program {
+        name: "user_read_split_probe",
+        image: Image::Flash(user_read_split_probe),
+    },
+    Program {
         name: "user_print_probe",
         image: Image::Flash(user_print_probe),
     },
@@ -451,6 +459,119 @@ pub extern "C" fn user_write_probe() {
     user_exit();
 }
 
+/// Exercises the READ syscall's refusal paths from U-mode and prints a
+/// verdict for the kernel-side test: `READ OK` on success, otherwise
+/// `READ FAIL 0x<mask>` with one bit per failed step, then exits.
+///
+/// None of these calls may block: each is refused (or, for zero length,
+/// satisfied) before READ waits for input. The zero-length check runs last
+/// so that if it wrongly blocks, the probe never exits and the kernel-side
+/// test names that as the likely cause.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_read_probe() {
+    use ease_abi::Error;
+    let mut buf = core::mem::MaybeUninit::<[u8; 8]>::uninit();
+    let buf_addr = buf.as_mut_ptr().cast::<u8>() as usize;
+    // Our own code: readable and executable by U-mode, but not writable
+    let text_addr = user_read_probe as *const () as usize;
+    let mut fail: usize = 0;
+    // 0: stdout is an open fd of the wrong kind (console output)
+    if user_read(1, buf_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 0;
+    }
+    // 1: stderr is an open fd of the wrong kind (debug console)
+    if user_read(2, buf_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 1;
+    }
+    // 2: an in-range but empty fd slot is refused
+    if user_read(7, buf_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 2;
+    }
+    // 3: the first fd past the kernel's table (fd::MAX_OPEN = 8) is refused
+    if user_read(8, buf_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 3;
+    }
+    // 4: a wildly out-of-range fd is refused, not a kernel panic
+    if user_read(usize::MAX, buf_addr, 8) != (Error::BadFd as usize, 0) {
+        fail |= 1 << 4;
+    }
+    // 5: a buffer outside the process's memory is refused
+    if user_read(0, 0x1000, 8) != (Error::BadBuffer as usize, 0) {
+        fail |= 1 << 5;
+    }
+    // 6: a readable but not writable buffer (our own text) is refused:
+    // READ writes into the buffer, so it must demand W, not R
+    if user_read(0, text_addr, 8) != (Error::BadBuffer as usize, 0) {
+        fail |= 1 << 6;
+    }
+    // 7: zero length succeeds at once with nothing read (must not block)
+    if user_read(0, buf_addr, 0) != (0, 0) {
+        fail |= 1 << 7;
+    }
+    user_put_char(b'\n' as usize);
+    if fail == 0 {
+        const OK: [u8; 8] = *b"READ OK\n";
+        let mut i = 0;
+        while i < 8 {
+            user_put_char(OK[i] as usize);
+            i += 1;
+        }
+    } else {
+        const MSG: [u8; 12] = *b"READ FAIL 0x";
+        const HEX: [u8; 16] = *b"0123456789abcdef";
+        let mut i = 0;
+        while i < 12 {
+            user_put_char(MSG[i] as usize);
+            i += 1;
+        }
+        let mut shift = 12;
+        while shift > 0 {
+            shift -= 4;
+            user_put_char(HEX[(fail >> shift) & 0xf] as usize);
+        }
+        user_put_char(b'\n' as usize);
+    }
+    user_exit();
+}
+
+/// Reads fd 0 twice with 4-byte requests, after the kernel-side test has
+/// injected 6 bytes, then echoes what it got and prints a verdict.
+///
+/// Expected: the first READ returns 4 bytes, the second the remaining 2,
+/// so `<abcdef>` is echoed and `READ SPLIT OK` printed. Bytes the kernel
+/// takes from the ring but cannot fit in the user buffer must not be lost.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_read_split_probe() {
+    let mut buf = core::mem::MaybeUninit::<[u8; 8]>::uninit();
+    let buf_ptr = buf.as_mut_ptr().cast::<u8>();
+    let buf_addr = buf_ptr as usize;
+    let first = user_read(0, buf_addr, 4);
+    let second = user_read(0, buf_addr + 4, 4);
+    user_put_char(b'<' as usize);
+    let got = first.1 + second.1;
+    if got <= 8 {
+        let _ = user_write(1, buf_addr, got);
+    }
+    user_put_char(b'>' as usize);
+    user_put_char(b'\n' as usize);
+    if first == (0, 4) && second == (0, 2) {
+        const OK: [u8; 14] = *b"READ SPLIT OK\n";
+        let mut i = 0;
+        while i < 14 {
+            user_put_char(OK[i] as usize);
+            i += 1;
+        }
+    } else {
+        const FAIL: [u8; 16] = *b"READ SPLIT FAIL\n";
+        let mut i = 0;
+        while i < 16 {
+            user_put_char(FAIL[i] as usize);
+            i += 1;
+        }
+    }
+    user_exit();
+}
+
 /// Prints `PRINT OK` through [`user_put_char`] and exits: a smoke test for
 /// the helper every other probe uses to report its verdict, so a broken
 /// print path fails here by name rather than as a confusing probe failure.
@@ -479,6 +600,23 @@ fn user_write(fd: usize, addr: usize, len: usize) -> (usize, usize) {
             inout("a1") addr => value,
             in("a2") len,
             in("a7") syscall::WRITE,
+        );
+    }
+    (error, value)
+}
+
+/// Raw READ syscall returning the kernel's (error, value) pair unchanged
+#[unsafe(link_section = ".user_text")]
+fn user_read(fd: usize, addr: usize, len: usize) -> (usize, usize) {
+    let error: usize;
+    let value: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") fd => error,
+            inout("a1") addr => value,
+            in("a2") len,
+            in("a7") syscall::READ,
         );
     }
     (error, value)

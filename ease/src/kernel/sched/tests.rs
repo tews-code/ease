@@ -2904,6 +2904,69 @@ fn write_syscall_reports_counts_and_errors() {
     );
 }
 
+// READ refusal paths end to end from U-mode: user_read_probe reads from
+// open fds of the wrong kind (1, 2), an empty slot (7), out-of-range fds
+// (8, usize::MAX), a buffer outside its memory, a read-only buffer (its own
+// text: READ must demand W) and a zero-length buffer, checking each
+// (error, value) pair itself and printing READ OK or READ FAIL <mask>.
+// None of these may block, so a probe that never exits points at the
+// zero-length case (checked last) waiting for input.
+#[test_case]
+fn read_syscall_refuses_bad_fds_and_buffers() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(
+        run_to_exit("user_read_probe"),
+        "read probe never exited: a refused or zero-length READ blocked waiting for input"
+    );
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("READ OK"),
+        "read probe did not print READ OK (see READ FAIL <mask> on the console)"
+    );
+}
+
+// READ blocking path from U-mode: user_read_split_probe must block on fd 0
+// until input arrives, then two 4-byte READs over 6 injected bytes must
+// return 4 then 2, with nothing lost in between.
+#[test_case]
+fn read_syscall_blocks_then_splits_input_without_loss() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle = crate::kernel::sched::spawn_process("user_read_split_probe")
+        .expect("read split probe spawn should succeed");
+    // With no input queued, the first READ must park the probe
+    crate::kernel::sched::sleep(50);
+    assert!(
+        process_alive(handle),
+        "read split probe exited before any input: READ did not block"
+    );
+    crate::drivers::uart::inject_rx(b"abcdef");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        drained,
+        "read split probe never exited: the second READ is still waiting, so injected bytes were lost"
+    );
+    #[cfg(feature = "test-io")]
+    {
+        assert!(
+            crate::io::test_io::contains("<abcdef>"),
+            "read split probe did not echo <abcdef>"
+        );
+        assert!(
+            crate::io::test_io::contains("READ SPLIT OK"),
+            "read split probe did not print READ SPLIT OK (wrong counts)"
+        );
+    }
+}
+
 // Exercises the user-stack canary response: user_canary_stomp overwrites
 // the canary word at the base of its own stack (its own memory — PMP
 // permits it) and spins. The trap handler's post-match canary check must

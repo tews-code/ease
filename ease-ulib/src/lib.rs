@@ -20,6 +20,7 @@ pub fn put_char(ch: u8) -> Result<(), Error> {
     let buf = [ch; 1];
     ecall3(syscall::WRITE, fds::STDOUT, buf.as_ptr().addr(), 1).map(|_| () )
 }
+
 /// Get a key from the keyboard
 ///
 /// Returns `None` if no key has been pressed
@@ -29,6 +30,13 @@ pub fn put_char(ch: u8) -> Result<(), Error> {
 pub fn get_key() -> Result<Option<usize>, Error> {
     ecall0(syscall::GET_CHAR).map(|v| if v == 0 { None } else { Some(v) })
 }
+
+/// Fill a user slice buffer from the file descriptor `fd`.
+/// Returns the number of bytes received.
+pub fn read(fd: usize, buf: &mut [u8]) -> Result<usize, Error> {
+    ecall3(syscall::READ, fd, buf.as_mut_ptr().addr(), buf.len())
+}
+
 /// Write a buffer from a user slice to file descriptor `fd`.
 ///
 /// Writes as many bytes as permitted by the syscall.
@@ -37,6 +45,7 @@ pub fn get_key() -> Result<Option<usize>, Error> {
 pub fn write(fd: usize, buf: &[u8]) -> Result<usize, Error> {
     ecall3(syscall::WRITE, fd, buf.as_ptr().addr(), buf.len())
 }
+
 /// Writes the complete buffer in a user slice to file descriptor `fd`.
 /// Loops over [write] until the buffer is empty.
 ///
