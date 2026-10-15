@@ -44,6 +44,7 @@ pub(crate) enum Error {
 pub(crate) struct UserEntry(usize);
 
 impl UserEntry {
+    #[cfg(test)]
     pub(crate) fn from_fn(f: extern "C" fn()) -> Self {
         Self(f as usize)
     }
@@ -81,6 +82,7 @@ impl Plan {
     /// Create a program map to load the image
     fn from_image(image: programs::Image) -> Result<Self, Error> {
         match image {
+            #[cfg(test)]
             programs::Image::Flash(_) => Ok(Self {
                 text: Segment {
                     addr: Some(&raw const __user_text_lma),
@@ -213,6 +215,7 @@ pub(crate) fn load_user_image(image: programs::Image) -> Result<LoadedImage, Err
                 .addr()
                 .into(),
         ),
+        #[cfg(test)]
         programs::Image::Flash(f) => UserEntry::from_fn(f),
     };
     // Fence both HARTs so the new instructions are visible
@@ -236,6 +239,7 @@ pub(crate) fn load_user_image(image: programs::Image) -> Result<LoadedImage, Err
         user_mem_map,
         entry,
         entry_ra: match image {
+            #[cfg(test)]
             programs::Image::Flash(_) => programs::test_programs::user_exit as *const () as usize,
             programs::Image::Blob(_) => 0, // Any attempt to return via `ra` will fault on accessing address zero which is PMP protected
         },

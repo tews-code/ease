@@ -1,5 +1,6 @@
 //! User mode functions
 
+#[cfg(test)]
 pub(crate) mod test_programs;
 
 pub(crate) const PROGRAMS: Programs = Programs(&[Program {
@@ -15,7 +16,8 @@ pub(crate) const PROGRAMS: Programs = Programs(&[Program {
 /// or binary blobs created by the ease-user package and loaded as bytes
 #[derive(Clone, Copy)]
 pub(crate) enum Image {
-    Blob(&'static [u8]),    // The blob holds the entire user program as a byte array
+    Blob(&'static [u8]), // The blob holds the entire user program as a byte array
+    #[cfg(test)]
     Flash(extern "C" fn()), // Function linked into the kernel image
 }
 /// A program and its name for lookup
@@ -29,7 +31,10 @@ pub(crate) struct Programs(&'static [Program]);
 impl Programs {
     /// Searches the production table, then the test table
     pub(crate) fn find(&self, name: &str) -> Option<Image> {
-        find_in(self.0, name).or_else(|| find_in(test_programs::PROGRAMS, name))
+        let found = find_in(self.0, name);
+        #[cfg(test)]
+        let found = found.or_else(|| find_in(test_programs::PROGRAMS, name));
+        found
     }
 }
 
