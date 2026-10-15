@@ -2433,10 +2433,10 @@ fn seventh_thread_never_joins_a_process() {
 // Two threads in a BLOB process: the second thread enters at the window
 // base — the only address the kernel knows for a blob image, which is
 // ulib's `_start` — so both threads run main on separate stacks and exit
-// independently. wait-exit's main parks in GET_CHAR, so each thread's
+// independently. wait-exit's main parks in READ on stdin, so each thread's
 // lifetime is under the test's control: the second spawn lands while the
-// first thread is provably blocked, then one injected key releases each
-// thread in turn. The process must tear down only once BOTH threads have
+// first thread is provably blocked, then one injected byte releases each
+// thread in turn (both wake; one takes the byte, the other parks again). The process must tear down only once BOTH threads have
 // exited (thread-count accounting for blobs), observed as the PCB slot
 // going stale.
 #[test_case]
@@ -2444,7 +2444,7 @@ fn blob_process_second_thread_at_start_then_teardown() {
     unsafe extern "C" {
         static __user_text_start: u8;
     }
-    // Number of this process's threads currently parked in GET_CHAR.
+    // Number of this process's threads currently parked in READ.
     fn blocked_threads(handle: super::process::Handle) -> usize {
         let sched = super::SCHEDULER.sched.lock();
         sched
@@ -2467,26 +2467,24 @@ fn blob_process_second_thread_at_start_then_teardown() {
         false
     }
     fn release_one() {
-        crate::drivers::keyboard::inject_key(crate::drivers::keyboard::DecodedKey::from_code(
-            b'k' as usize,
-        ));
+        crate::drivers::uart::inject_rx(b"k");
     }
 
     let handle = crate::kernel::sched::spawn_process("wait-exit")
         .expect("blob process spawn should succeed");
     assert!(
         wait_for_blocked(handle, 1),
-        "first thread never parked in GET_CHAR"
+        "first thread never parked in READ"
     );
     let start = UserEntry::from_addr(&raw const __user_text_start as usize);
     crate::kernel::sched::spawn_user(handle, start)
         .expect("second thread should join the blob process at _start");
     assert!(
         wait_for_blocked(handle, 2),
-        "second thread never parked in GET_CHAR"
+        "second thread never parked in READ"
     );
-    // Release the threads one at a time, so the test does not depend on
-    // how many waiters a single Completion signal wakes. The process must
+    // Release the threads one at a time: each byte can satisfy only one
+    // reader, however many the wake-up rouses. The process must
     // still be alive after the first exit.
     release_one();
     assert!(

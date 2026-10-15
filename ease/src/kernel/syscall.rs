@@ -1,11 +1,9 @@
 //! Handle syscalls
 
 use crate::arch::{trap, umode};
-use crate::drivers::{keyboard, uart};
-use crate::kernel::{
-    self, fd, interrupts, sync,
-    validate::{Untrusted, Validate},
-};
+use crate::drivers::uart;
+use crate::kernel::validate::{Untrusted, Validate};
+use crate::kernel::{self, fd, interrupts};
 use crate::sched::{self, process, thread, usermem};
 use ease_abi::syscall;
 #[cfg(feature = "profile")]
@@ -30,7 +28,7 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             umode::EcallResult::Diverted
         }
-        syscall::READ | syscall::WRITE | syscall::GET_CHAR => {
+        syscall::READ | syscall::WRITE => {
             kernel::trap::divert_work_to_kernel(
                 frame,
                 frame.mepc + 4,
@@ -72,7 +70,6 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
         interrupts::with_interrupts_enabled(|| {
             match syscall {
                 syscall::READ => read(frame),
-                syscall::GET_CHAR => get_char(frame),
                 syscall::WRITE => write(frame),
                 // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
                 // discipline. The guard lives in an inner scope: on Err(Interrupted)
@@ -183,32 +180,6 @@ fn write(frame: &mut trap::Frame) {
         frame.a0 = ease_abi::Error::BadBuffer.into();
         frame.a1 = 0;
     }
-}
-
-fn get_char(frame: &mut trap::Frame) {
-    // GET_CHAR holds nothing across its waits, so exit-on-the-spot is legal here
-    sched::exit_user_thread_if_needs_exit();
-    // Block using a wait queue, with a closure to evalute the key press
-    let mut key = None;
-    let result = keyboard::queue::KEYS_PENDING.wait_with_interruptible(
-        &keyboard::queue::CONSUMER,
-        |consumer| {
-            key = consumer
-                .as_mut()
-                .expect("decoded key queue must be initialised")
-                .pop();
-            key.is_some()
-        },
-    );
-    match result {
-        Ok(guard) => drop(guard),
-        Err(sync::Interrupted) => sched::exit_current_user_thread(thread::ExitReason::Fault),
-    }
-    // Return the key in the frame's value field
-    frame.a0 = 0;
-    frame.a1 = key
-        .expect("wait should only have returned on a valid key popped")
-        .code();
 }
 
 #[cfg(all(test, feature = "test-sched"))]

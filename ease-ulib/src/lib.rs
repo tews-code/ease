@@ -4,9 +4,10 @@
 
 use core::arch::asm;
 
-use ease_abi::{fds, syscall};
-use ease_abi::Error;
+use ease_abi::syscall;
 pub use ease_abi::ascii;
+pub use ease_abi::fds;
+pub use ease_abi::Error;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -19,16 +20,6 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 pub fn put_char(ch: u8) -> Result<(), Error> {
     let buf = [ch; 1];
     ecall3(syscall::WRITE, fds::STDOUT, buf.as_ptr().addr(), 1).map(|_| () )
-}
-
-/// Get a key from the keyboard
-///
-/// Returns `None` if no key has been pressed
-/// Keys are returned as `Some(usize)` to cater for
-/// ASCII keys (below 0xFF) and special keys (above 0xFF)
-/// See [ease_abi::special_key] for details
-pub fn get_key() -> Result<Option<usize>, Error> {
-    ecall0(syscall::GET_CHAR).map(|v| if v == 0 { None } else { Some(v) })
 }
 
 /// Fill a user slice buffer from the file descriptor `fd`.
@@ -73,6 +64,7 @@ pub fn exit() -> ! {
 }
 /// Common syscall asm and error decoded for zero argument syscalls
 /// `error` in a0, `value` in a1, zero means success
+#[expect(dead_code)]
 fn ecall0(syscall: usize) -> Result<usize, Error> {
     let error: usize;
     let value: usize;
