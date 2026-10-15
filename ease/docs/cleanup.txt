@@ -46,3 +46,35 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     - Don't lose that coverage: move the test onto a real syscall that
       holds a lock across an interruptible wait, or decide (and note
       why) that the property is covered elsewhere, before deleting.
+
+[ ] Split user.rs into a production program registry and test-only
+    programs (do after READ step 2, which also touches user.rs).
+    - Production (rename, e.g. programs.rs): PROGRAMS/Program/Programs::find,
+      Image, user_exit (userloader uses it as the Flash-image return
+      address), and the production table (just the shell blob today;
+      main.rs spawns "shell").
+    - #[cfg(test)] module (e.g. programs/test_programs.rs): every Flash
+      probe and echo, the raw helpers (user_read, user_write,
+      user_put_char, user_get_char), and the test blob entries
+      (wait-exit, print-probe, flood-probe, ...). Today all of these,
+      including the include_bytes! blobs, ship in the production binary.
+    - find() searches the production table, plus a test table in test
+      builds: two const slices, not one conditionally built slice.
+    - Plain #[cfg(test)], not per test-* feature: probes serve several
+      suites and finer gating gives dead-code warnings in focused runs.
+    - Update the doc link in arch/umode.rs (crate::user::PROGRAMS).
+    - Two commits: move-only split/rename first, then the cfg(test)
+      gating; check a plain `cargo build` still works and the binary
+      shrinks.
+
+[ ] Replace re-stated standard fd numbers with ease_abi::fds::{STDIN,
+    STDOUT, STDERR} (ulib re-export them as lib::fds; kernel/user.rs use
+    ease_abi directly). Known places (2026-10-13 grep; re-grep first):
+    - user.rs user_write_probe: user_write(1|2|0, ...) (lines ~419-444)
+    - user.rs user_read_probe: user_read(1|2|0, ...) (lines ~500-525)
+    - user.rs user_put_char: inout("a0") 1 (stdout), and its asm callers
+    - Also search the ease-user blobs, ulib, sched/tests.rs and comments
+      for bare 0/1/2 meaning a standard fd.
+    - Judgement call: where a number means "a slot" rather than "the
+      standard stream" (e.g. fd.rs open_fills_lowest_free_slot... reusing
+      slot 1, the empty slot 7, out-of-range 8), keep the bare number.
