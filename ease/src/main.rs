@@ -33,11 +33,11 @@ mod board;
 mod drivers;
 mod fs;
 mod kernel;
+mod programs;
 mod qemu;
 mod shell;
 #[cfg(test)]
 mod testrunner;
-mod user;
 
 use drivers::ramfb::FrameBuffer;
 use kernel::alloc::Order;

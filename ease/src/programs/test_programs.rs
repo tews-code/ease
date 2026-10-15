@@ -1,18 +1,12 @@
-//! User mode functions
+//! User programs used only by the kernel tests
 
 use core::arch::naked_asm;
 
 use ease_abi::{fds::STDIN, syscall};
 
-pub(crate) const PROGRAMS: Programs = Programs(&[
-    Program {
-        name: "shell",
-        image: Image::Blob(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
-            "shell.bin"
-        ))),
-    },
+use super::{Image, Program};
+
+pub(super) const PROGRAMS: &[Program] = &[
     Program {
         name: "wait-exit",
         image: Image::Blob(include_bytes!(concat!(
@@ -85,33 +79,7 @@ pub(crate) const PROGRAMS: Programs = Programs(&[
             "flood-probe.bin"
         ))),
     },
-]);
-
-/// User programs are either built into the OS binary as functions and loaded from flash
-/// or binary blobs created by the ease-user package and loaded as bytes
-#[derive(Clone, Copy)]
-pub(crate) enum Image {
-    Blob(&'static [u8]),    // The blob holds the entire user program as a byte array
-    Flash(extern "C" fn()), // Function linked into the kernel image
-}
-/// A program and its name for lookup
-struct Program {
-    name: &'static str,
-    image: Image,
-}
-/// Table of user programs
-pub(crate) struct Programs(&'static [Program]);
-
-impl Programs {
-    pub(crate) fn find(&self, name: &str) -> Option<Image> {
-        for program in self.0.iter() {
-            if program.name == name {
-                return Some(program.image); // Only return the first if there are duplicate names
-            }
-        }
-        None
-    }
-}
+];
 
 /// Echos character read from std in until `x` at which point it quits
 #[unsafe(link_section = ".user_text")]

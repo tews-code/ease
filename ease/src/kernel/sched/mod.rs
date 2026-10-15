@@ -20,7 +20,7 @@ use crate::board::HARTS_MAX;
 use crate::kernel::alloc::{MemRegion, Order};
 use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::percpu;
-use crate::user;
+use crate::programs;
 pub(crate) use deadline::Deadline;
 use stride::SCHEDULER;
 #[expect(unused_imports)]
@@ -276,7 +276,9 @@ pub fn current_wake_overshoot() -> u64 {
 /// Spawn a user process
 pub fn spawn_process(name: &'static str) -> Result<process::Handle, spawn::Error> {
     // Look up this program in the table
-    let image = user::PROGRAMS.find(name).ok_or(spawn::Error::NotFound)?;
+    let image = programs::PROGRAMS
+        .find(name)
+        .ok_or(spawn::Error::NotFound)?;
     // Load the image into memory
     let loaded_image = userloader::load_user_image(image)?;
     // Spawn the process

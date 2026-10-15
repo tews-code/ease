@@ -9,7 +9,7 @@ use crate::arch;
 use crate::kernel::sched::usermem;
 use crate::kernel::sync::Mutex;
 use crate::kernel::{ipi, panic, percpu};
-use crate::user;
+use crate::programs;
 
 // All programs are currently forced to have the same layout by linker script
 unsafe extern "C" {
@@ -79,9 +79,9 @@ struct Plan {
 
 impl Plan {
     /// Create a program map to load the image
-    fn from_image(image: user::Image) -> Result<Self, Error> {
+    fn from_image(image: programs::Image) -> Result<Self, Error> {
         match image {
-            user::Image::Flash(_) => Ok(Self {
+            programs::Image::Flash(_) => Ok(Self {
                 text: Segment {
                     addr: Some(&raw const __user_text_lma),
                     size: &raw const __user_text_end as usize
@@ -97,7 +97,7 @@ impl Plan {
                     size: &raw const __user_bss_end as usize - &raw const __user_bss_start as usize,
                 },
             }),
-            user::Image::Blob(blob_bytes) => {
+            programs::Image::Blob(blob_bytes) => {
                 let text_size =
                     &raw const __user_text_end as usize - &raw const __user_text_start as usize;
                 let data_size =
@@ -190,7 +190,7 @@ impl Plan {
 /// Returns the loaded image with the user memory map and entry point.
 /// Loading is serialised with a mutex, so that one program is loaded at a time.
 /// The required fence call is also handled across the HARTs by this loader.
-pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> {
+pub(crate) fn load_user_image(image: programs::Image) -> Result<LoadedImage, Error> {
     // To enforce serialisation on user load we use the mutex
     let busy_loading = LOAD_LOCK.lock();
     // Create a load plan for this program
@@ -204,7 +204,7 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
     load_plan.copy_user_image(&user_mem_map);
     // Set the user entry address
     let entry = match image {
-        user::Image::Blob(_) => UserEntry(
+        programs::Image::Blob(_) => UserEntry(
             // The linker script puts the _start entry point at the beginning of .text
             user_mem_map
                 .region(usermem::Role::Text)
@@ -213,7 +213,7 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
                 .addr()
                 .into(),
         ),
-        user::Image::Flash(f) => UserEntry::from_fn(f),
+        programs::Image::Flash(f) => UserEntry::from_fn(f),
     };
     // Fence both HARTs so the new instructions are visible
     arch::fence_instruction();
@@ -236,8 +236,8 @@ pub(crate) fn load_user_image(image: user::Image) -> Result<LoadedImage, Error> 
         user_mem_map,
         entry,
         entry_ra: match image {
-            user::Image::Flash(_) => user::user_exit as *const () as usize,
-            user::Image::Blob(_) => 0, // Any attempt to return via `ra` will fault on accessing address zero which is PMP protected
+            programs::Image::Flash(_) => programs::test_programs::user_exit as *const () as usize,
+            programs::Image::Blob(_) => 0, // Any attempt to return via `ra` will fault on accessing address zero which is PMP protected
         },
     })
 }

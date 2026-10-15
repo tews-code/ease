@@ -40,6 +40,7 @@
 // and the bounds can be tightened then.
 
 use crate::kernel::sched::{Order, Qos, thread};
+use crate::programs::test_programs;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // The partner thread and its progress counter (PARTNER_COUNT) live in
@@ -2024,7 +2025,7 @@ fn user_process_exits_and_releases_slot() {
     let mut released = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             released = true;
@@ -2052,7 +2053,7 @@ fn user_thread_plain_return_exits_via_ra_shim() {
         if matches!(
             crate::kernel::sched::spawn_user(
                 handle,
-                UserEntry::from_fn(crate::user::user_return_test),
+                UserEntry::from_fn(test_programs::user_return_test),
             ),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
@@ -2076,7 +2077,7 @@ fn process_slot_recycle_rejects_stale_handle() {
     let mut released = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             released = true;
@@ -2099,7 +2100,7 @@ fn process_slot_recycle_rejects_stale_handle() {
     // empty or holds the second process.
     assert!(
         matches!(
-            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(first, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ),
         "stale process handle must be rejected"
@@ -2110,7 +2111,7 @@ fn process_slot_recycle_rejects_stale_handle() {
     let mut drained = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(second, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(second, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             drained = true;
@@ -2134,13 +2135,13 @@ fn process_slot_recycle_rejects_stale_handle() {
 fn fault_kills_whole_process() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2164,13 +2165,13 @@ fn fault_kills_whole_process() {
 fn illegal_instruction_fault_kills_whole_process() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_illegal_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_illegal_now))
         .expect("illegal-instruction thread should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2199,13 +2200,13 @@ fn fault_waits_for_running_sibling_before_release() {
     // hart by sleeping, so after a few slices the spinner is Running on
     // the other hart and stays there.
     crate::kernel::sched::sleep(50);
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2229,17 +2230,17 @@ fn voluntary_exit_does_not_block_later_fault_kill() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
     // user_test issues the EXIT syscall, so this thread exits voluntarily.
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test))
         .expect("voluntary exiter should join the process");
     // Let it pass all the way through user_thread_exit and be released.
     crate::kernel::sched::sleep(50);
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2264,18 +2265,18 @@ fn voluntary_exit_does_not_block_later_fault_kill() {
 fn fault_waits_for_two_running_siblings() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_spin_forever))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_spin_forever))
         .expect("second spinner should join the process");
     // Let both spinners settle into the run queue before the fault arrives, so
     // eviction has real siblings to chase rather than a just-spawned process.
     crate::kernel::sched::sleep(50);
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2303,15 +2304,15 @@ fn fault_kill_races_a_voluntary_exit() {
     // Settle the spinner onto the other hart first, so the exiter and the
     // faulter are the two threads actually contending here.
     crate::kernel::sched::sleep(50);
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test))
         .expect("voluntary exiter should join the process");
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2343,7 +2344,7 @@ fn spawn_user_refused_once_teardown_claimed() {
     assert!(claimed, "fresh process must have no teardown claimant");
     assert!(
         matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ),
         "a thread joined a process whose teardown had been claimed"
@@ -2362,7 +2363,7 @@ fn spawn_user_refused_once_teardown_claimed() {
         .get_mut(handle)
         .expect("process is still alive")
         .teardown_thread = None;
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join once the role is free again");
     let mut killed = false;
     for _ in 0..200 {
@@ -2405,15 +2406,15 @@ fn seventh_thread_never_joins_a_process() {
     for _ in 0..4 {
         crate::kernel::sched::spawn_user(
             handle,
-            UserEntry::from_fn(crate::user::user_spin_forever),
+            UserEntry::from_fn(test_programs::user_spin_forever),
         )
         .expect("spinner should join the process");
     }
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join as the sixth, cap-reaching thread");
     assert!(
         matches!(
-            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::TooManyThreadsInProcess
                 | super::spawn::Error::ProcessNotAvailable)
         ),
@@ -2525,13 +2526,13 @@ fn blob_process_second_thread_at_start_then_teardown() {
 fn process_slot_reused_after_fault_kill() {
     let faulted = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the process");
 
     let mut killed = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             killed = true;
@@ -2551,7 +2552,7 @@ fn process_slot_reused_after_fault_kill() {
     let mut drained = false;
     for _ in 0..200 {
         if matches!(
-            crate::kernel::sched::spawn_user(reused, UserEntry::from_fn(crate::user::user_test)),
+            crate::kernel::sched::spawn_user(reused, UserEntry::from_fn(test_programs::user_test)),
             Err(super::spawn::Error::ProcessNotAvailable)
         ) {
             drained = true;
@@ -2705,7 +2706,7 @@ fn blocked_user_thread_frames_on_kernel_stack() {
         user_size
     );
     // Fault-kill the process so the parked thread doesn't leak.
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the echo process");
     let mut drained = false;
     for _ in 0..200 {
@@ -2758,7 +2759,7 @@ fn echo_prints_input_and_exits_on_x() {
     }
     if !drained {
         // Don't leak a parked echo into later tests
-        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
             .expect("faulter should join the echo process");
     }
     assert!(drained, "echo did not exit after reading 'x'");
@@ -2769,7 +2770,7 @@ fn echo_prints_input_and_exits_on_x() {
 // loads a distinctive value into s0-s11, t0-t6 and a3-a6, blocks in
 // READ on stdin (a2 and a7 carry READ's length and number, which must
 // also survive), and after the kernel injects a byte compares all 25 (see
-// user::user_register_probe). REG OK on the console plus a clean exit
+// test_programs::user_register_probe). REG OK on the console plus a clean exit
 // is the pass signal; any mismatch prints REG MISMATCH <bitmask> and
 // spins, so the drain timeout below is the failure. Before the syscall path went
 // through the trampoline's full Frame, the s registers survived only by
@@ -3077,7 +3078,7 @@ fn fault_kill_frees_mutex_held_across_interruptible_wait() {
     }
     assert!(parked, "mutex holder never parked on the completion");
     // Condemn the process via a faulting sibling.
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(crate::user::user_fault_now))
+    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
         .expect("faulter should join the mutex-block process");
     let mut drained = false;
     for _ in 0..200 {
