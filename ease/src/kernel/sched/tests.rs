@@ -2436,9 +2436,10 @@ fn seventh_thread_never_joins_a_process() {
 // independently. wait-exit's main parks in READ on stdin, so each thread's
 // lifetime is under the test's control: the second spawn lands while the
 // first thread is provably blocked, then one injected byte releases each
-// thread in turn (both wake; one takes the byte, the other parks again). The process must tear down only once BOTH threads have
-// exited (thread-count accounting for blobs), observed as the PCB slot
-// going stale.
+// thread in turn (both wake; one takes the byte, the other parks again).
+// The process must tear down only once BOTH threads have exited
+// (thread-count accounting for blobs), observed as the PCB slot going
+// stale.
 #[test_case]
 fn blob_process_second_thread_at_start_then_teardown() {
     unsafe extern "C" {

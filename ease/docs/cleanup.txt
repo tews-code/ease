@@ -50,22 +50,29 @@ Planned features and roadmap work live in docs/todo.txt, not here.
 [ ] Split user.rs into a production program registry and test-only
     programs (do after READ step 2, which also touches user.rs).
     - Production (rename, e.g. programs.rs): PROGRAMS/Program/Programs::find,
-      Image, user_exit (userloader uses it as the Flash-image return
-      address), and the production table (just the shell blob today;
-      main.rs spawns "shell").
+      Image (Blob only), and the production table (just the shell blob
+      today; main.rs spawns "shell").
     - #[cfg(test)] module (e.g. programs/test_programs.rs): every Flash
       probe and echo, the raw helpers (user_read, user_write,
-      user_put_char, user_get_char), and the test blob entries
-      (wait-exit, print-probe, flood-probe, ...). Today all of these,
-      including the include_bytes! blobs, ship in the production binary.
+      user_put_char), user_exit (only the Flash-image return address
+      uses it), and the test blob entries (wait-exit, print-probe,
+      flood-probe, ...). Today all of these, including the include_bytes!
+      blobs, ship in the production binary.
+    - Gate Image::Flash with #[cfg(test)] (decided 2026-10-15): no
+      production program is a Flash image, and an ungated variant warns
+      as never constructed. The cascade, all test-only: the three Flash
+      match arms in userloader.rs (from_image segment plan, entry,
+      entry_ra) and UserEntry::from_fn (its only production caller is the
+      Flash entry arm). The .user_text/.user_data windows are padded to
+      fixed sizes, so empty windows still link.
     - find() searches the production table, plus a test table in test
       builds: two const slices, not one conditionally built slice.
     - Plain #[cfg(test)], not per test-* feature: probes serve several
       suites and finer gating gives dead-code warnings in focused runs.
     - Update the doc link in arch/umode.rs (crate::user::PROGRAMS).
     - Two commits: move-only split/rename first, then the cfg(test)
-      gating; check a plain `cargo build` still works and the binary
-      shrinks.
+      gating (including Image::Flash); check a plain `cargo build` still
+      works and the binary shrinks.
 
 [ ] Replace re-stated standard fd numbers with ease_abi::fds::{STDIN,
     STDOUT, STDERR} (ulib re-export them as lib::fds; kernel/user.rs use

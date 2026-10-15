@@ -26,12 +26,12 @@ Tick with [x] when done, or delete the line.
       - Known limitation: simultaneous typing on both sources can interleave
         an escape sequence. One human types; note it, don't engineer it.
     Steps:
-    [ ] 1. READ syscall with console input backed by the UART only: rename
+    [x] 1. READ syscall with console input backed by the UART only: rename
            the fd Entry/Kind to console input, READ has one arm, UART RX
            IRQ wakes the console-input queue. Error-path tests (bad fd,
            fd 1, bad/read-only buffer, zero length); blocking test needs a
            way to inject RX bytes.
-    [ ] 2. Retire GET_CHAR; move the echo user program to READ.
+    [x] 2. Retire GET_CHAR; move the echo user program to READ.
     [ ] 3. Virtio keyboard as the second source, ASCII only: its consumer
            moves into the console-input struct, the decoder thread notifies
            console input.
