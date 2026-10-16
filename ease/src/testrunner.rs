@@ -69,6 +69,7 @@ pub(super) fn test_runner(tests: &[&dyn Testable]) {
         crate::kernel::irqsoff::test_boundary("(end of run)");
         crate::kernel::irqsoff::print_report();
     }
+    // Under trace, the dump exits QEMU itself, with interrupts still off
     #[cfg(feature = "trace")]
     dump_trace_at_end_of_run();
     crate::qemu::exit_success();
@@ -81,6 +82,11 @@ pub(super) fn test_runner(tests: &[&dyn Testable]) {
 /// `dump_trace` must run single-threaded with no concurrent snapshot writers,
 /// so this freezes the system the way the panic handler does: park the other
 /// hart via STOP + IPI and keep this hart's interrupts off for the dump.
+///
+/// Exits QEMU without re-enabling interrupts: STOP stays set, so any trap
+/// taken on this hart afterwards (a timer tick, or the THRE interrupt that
+/// `uart::flush` enables) would park it too, and with both harts parked
+/// the finisher write never happens and the run hangs.
 #[cfg(all(test, feature = "trace"))]
 fn dump_trace_at_end_of_run() {
     use crate::kernel::panic::{PARKED, STOP};
@@ -104,5 +110,6 @@ fn dump_trace_at_end_of_run() {
         // dump's light-row rendering then runs on every trace run.
         crate::kernel::sched::trace::take_light_snapshot_for_test("end-of-run");
         crate::kernel::sched::trace::dump_trace();
+        crate::qemu::exit_success();
     });
 }
