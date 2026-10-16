@@ -1,4 +1,10 @@
-//! User mode functions
+//! User program registry
+//!
+//! [`PROGRAMS`] maps a program name to its image, so [crate::sched::spawn_process]
+//! can load and run it by name. Production builds hold only blob images
+//! built by the ease-user package (just the shell today); test builds also
+//! search the test table in `test_programs`, which adds Flash images and
+//! the test blobs.
 
 #[cfg(test)]
 pub(crate) mod test_programs;
@@ -12,8 +18,9 @@ pub(crate) const PROGRAMS: Programs = Programs(&[Program {
     ))),
 }]);
 
-/// User programs are either built into the OS binary as functions and loaded from flash
-/// or binary blobs created by the ease-user package and loaded as bytes
+/// A user program's image: a binary blob created by the ease-user package
+/// and loaded as bytes or, in test builds only, a function built into the
+/// OS binary and loaded from flash
 #[derive(Clone, Copy)]
 pub(crate) enum Image {
     Blob(&'static [u8]), // The blob holds the entire user program as a byte array
@@ -25,7 +32,7 @@ struct Program {
     name: &'static str,
     image: Image,
 }
-/// Table of user programs
+/// Table of production user programs
 pub(crate) struct Programs(&'static [Program]);
 
 impl Programs {

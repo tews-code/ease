@@ -15,8 +15,9 @@
 //!
 //! In order to spawn a user thread, the user program must first be loaded from its initial
 //! storage location to the active memory locations. EASE currently supports
-//! - "flash" programs - compiled within EASE and loaded from LMA to VMA. See [crate::programs::test_programs].
 //! - "blob" programs - written and compiled against the EASE user library and stored within EASE as a series of bytes.
+//! - "flash" programs (test builds only) - compiled within EASE and loaded from LMA to VMA.
+//!   See `crate::programs::test_programs`.
 //!
 //! See [crate::programs::PROGRAMS] for the list of available programs.
 //!

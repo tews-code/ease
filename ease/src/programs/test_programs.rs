@@ -1,4 +1,14 @@
 //! User programs used only by the kernel tests
+//!
+//! Flash programs are `extern "C"` functions placed in `.user_text`, which
+//! the loader copies into the user text window. They run in U-mode, so
+//! they must not call into `core` or any other kernel text: fixed-size
+//! arrays and index loops only, and syscalls through the raw helpers at
+//! the end of this file. A Flash program that returns lands in
+//! [`user_exit`]. The table also lists the test blobs built by ease-user.
+//!
+//! This whole module, and with it [`Image::Flash`], is compiled only in
+//! test builds.
 
 use core::arch::naked_asm;
 

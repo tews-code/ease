@@ -369,7 +369,7 @@ impl Scheduler {
         sched.threads.mark_resources_released(current_thread);
         let fd_table = sched.take_fds_if_last(process);
         drop(sched);
-        // Drop the file descriptors for this process, bearing in mind this could take some time
+        // Drop the file descriptors for this process.
         // Where this is not the last thread, we are dropping `None` which leaves the files in
         // place until the last threads makes the call on `Some(fd_table)` and actually closes the
         // files.
