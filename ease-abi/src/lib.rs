@@ -42,6 +42,8 @@ pub enum Error {
     BadFd = 3,
     /// Attempt to write but zero bytes written; Produced by `ulib` not kernel.
     WriteZero = 4,
+    /// Syscall refused
+    Interrupted = 5,
 }
 /// Convert an error number into the Error enum.
 ///
@@ -55,6 +57,7 @@ impl TryFrom<usize> for Error {
             v if v == Error::BadBuffer as usize => Ok(Error::BadBuffer),
             v if v == Error::BadFd as usize => Ok(Error::BadFd),
             v if v == Error::WriteZero as usize => Ok(Error::WriteZero),
+            v if v == Error::Interrupted as usize => Ok(Error::Interrupted),
             _ => Err(value),
         }
     }

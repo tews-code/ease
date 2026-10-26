@@ -10,11 +10,15 @@ use crate::kernel::collection::Arena;
 use crate::kernel::stack::print_watermark;
 use crate::kernel::timer;
 
-/// Alias to simplify the thread handle definition
-pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
-
 /// Maximum number of simultaneous threads. Includes two slots used for idle threads
 pub(crate) const MAX_COUNT: usize = 16;
+
+#[derive(Debug)]
+pub(crate) enum Error {
+    /// The thread arena is full. See [MAX_COUNT] for the number of simultaneous threads
+    NotEnoughThreadSlots,
+}
+
 /// Thread exit reason
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -24,6 +28,7 @@ pub(crate) enum ExitReason {
 }
 const _: () = assert!(ExitReason::Exit as u8 == 0); // Must be zero as used in assembly
 const _: () = assert!(ExitReason::Fault as u8 == 1); // Must be one as used in assembly
+
 /// The state the thread will be put into in post-switch cleanup
 #[derive(PartialEq, Debug, Copy, Clone)]
 pub(crate) enum PostSwitch {
@@ -152,15 +157,18 @@ pub(super) struct Threads {
     pub(super) tcbs: Arena<ControlBlock, MAX_COUNT>,
 }
 
+/// Alias to simplify the thread handle definition
+pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
+
 impl Threads {
-    // Acquire a free slot and set up a valid thread control block
+    /// Acquire a free slot and set up a valid thread control block for a thread
     pub(super) fn acquire(
         &mut self,
         forge_stack: impl FnOnce(&mut MemRegion) -> NonNull<u8>,
         spec: ControlBlockSpec,
-    ) -> Option<Handle> {
+    ) -> Result<Handle, Error> {
         if self.tcbs.is_full() {
-            return None;
+            return Err(Error::NotEnoughThreadSlots);
         }
         let pass_baseline = self.pass_baseline();
         let ControlBlockSpec {
@@ -172,22 +180,26 @@ impl Threads {
         } = spec;
         let sp = forge_stack(&mut kernel_stack);
         let now = timer::elapsed();
-        self.tcbs.add(ControlBlock {
-            state: State::Ready,
-            kernel_stack,
-            sp,
-            qos,
-            priority,
-            affinity,
-            user,
-            pass: pass_baseline,
-            last_started_cycles: now,
-            next_waiter: None,
-            resources_released: false,
-            #[cfg(feature = "trace")]
-            ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
-        })
+        Ok(self
+            .tcbs
+            .add(ControlBlock {
+                state: State::Ready,
+                kernel_stack,
+                sp,
+                qos,
+                priority,
+                affinity,
+                user,
+                pass: pass_baseline,
+                last_started_cycles: now,
+                next_waiter: None,
+                resources_released: false,
+                #[cfg(feature = "trace")]
+                ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
+            })
+            .unwrap())
     }
+
     /// Release a TCB slot based on the given thread handle
     ///
     /// # Panics #
@@ -330,6 +342,18 @@ impl Threads {
             }
         }
     }
+}
+
+/// Threads methods for supporting user processes
+impl Threads {
+    /// Get the current thread count of a process.
+    pub(super) fn thread_count_of(&self, process: process::Handle) -> usize {
+        self.tcbs
+            .iter()
+            .filter(|tcb| tcb.user.as_ref().is_some_and(|uc| uc.process == process))
+            .count()
+    }
+
     /// Get the process handle of a given thread handle
     ///
     /// Returns `None` if:

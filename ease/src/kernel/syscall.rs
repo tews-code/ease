@@ -4,7 +4,7 @@ use crate::arch::{trap, umode};
 use crate::drivers::uart;
 use crate::kernel::validate::{Untrusted, Validate};
 use crate::kernel::{self, fd, interrupts};
-use crate::sched::{self, process, thread, usermem};
+use crate::sched::{self, process::SyscallContext, thread, usermem};
 use ease_abi::syscall;
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -99,7 +99,11 @@ fn read(frame: &mut trap::Frame) {
         }
     };
     // Validate the file descriptor kind
-    let syscall_context = process::SyscallContext::current();
+    let Ok(syscall_context) = SyscallContext::current() else {
+        frame.a0 = ease_abi::Error::Interrupted.into();
+        frame.a1 = 0;
+        return;
+    };
     if !matches!(
         fd::kind(syscall_context.fds(), fd),
         Some(fd::Kind::ConsoleInput)
@@ -138,7 +142,6 @@ fn write(frame: &mut trap::Frame) {
     // No wait loop, so no need to call [sched::exit_user_thread_if_needs_exit].
     // Get the (untrusted) file descriptor from the frame
     let fd = Untrusted::new(frame.a0);
-    // Check if the fd is valid
     let fd = match fd::ValidFd::validate(fd) {
         Ok(fd) => fd,
         Err(_) => {
@@ -148,7 +151,12 @@ fn write(frame: &mut trap::Frame) {
         }
     };
     // Check what kind the fd is indexing
-    let syscall_context = process::SyscallContext::current();
+    let Ok(syscall_context) = SyscallContext::current() else {
+        // The fd is not valid - syscall has been interrupted
+        frame.a0 = ease_abi::Error::Interrupted.into();
+        frame.a1 = 0;
+        return;
+    };
     if !matches!(
         fd::kind(syscall_context.fds(), fd),
         Some(fd::Kind::ConsoleOutput | fd::Kind::DebugConsole)

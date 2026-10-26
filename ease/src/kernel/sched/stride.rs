@@ -13,7 +13,7 @@ use crate::kernel::sched::process;
 use crate::kernel::sched::thread;
 #[cfg(feature = "paint-stack")]
 use crate::kernel::stack::print_watermark;
-use crate::kernel::sync::{CounterU64, IrqSpinLock, IrqSpinLockGuard};
+use crate::kernel::sync::{CounterU64, IrqSpinLock};
 use crate::kernel::{interrupts, percpu, timer};
 
 #[cfg(feature = "profile")]
@@ -194,10 +194,7 @@ impl SchedInner {
             // For user thread merge the thread's stack and set pmp
             let pmp_config = self
                 .processes
-                .pcbs
-                .get(user_context.process)
-                .expect("process should be configured before this thread is scheduled")
-                .mem_map
+                .mem_map(user_context.process)
                 .to_pmp(&user_context.stack);
             pmp_config.activate();
         }
@@ -236,7 +233,7 @@ impl Scheduler {
         Self {
             sched: IrqSpinLock::new(SchedInner {
                 threads: thread::Threads { tcbs: Arena::new() },
-                processes: process::Processes { pcbs: Arena::new() },
+                processes: process::Processes::new(),
                 #[cfg(feature = "trace")]
                 wake_overshoot: [0; thread::MAX_COUNT],
                 _private: (),
@@ -300,7 +297,7 @@ impl Scheduler {
     /// catches up with threads that were running
     ///
     /// Returns a count of the ready threads
-    pub(super) fn wake_sleeping_threads(&self, sched: &mut IrqSpinLockGuard<SchedInner>) -> bool {
+    pub(super) fn wake_sleeping_threads(&self, sched: &mut SchedInner) -> bool {
         let now = timer::elapsed();
         let current_thread = percpu::current_thread();
         let other_current_thread = percpu::try_other_current_thread(sched); // Note - could be `None` if other hart not yet installed
@@ -387,10 +384,12 @@ impl Scheduler {
             }
             // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
             // Set the dead thread to None and return early
-            if let Some(process) = sched.threads.process_handle_of(switched_from_thread) {
-                self.release_process_thread(&mut sched, process, switched_from_thread);
-            }
+            let process = sched.threads.process_handle_of(switched_from_thread);
             sched.threads.tcbs.take(switched_from_thread);
+            if let Some(process) = process {
+                sched.release_user_thread(process, switched_from_thread);
+                sched.release_process_if_empty(process);
+            }
             self.clear_thread_flags(switched_from_thread); // Make sure we also clear the flags of the TCB that has been removed
             return;
         }

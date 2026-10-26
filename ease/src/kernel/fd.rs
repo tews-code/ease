@@ -17,6 +17,17 @@ pub(super) const MAX_OPEN: usize = 8; // We let each process open up to MAX_OPEN
 static FILE_DESCRIPTORS: IrqSpinLock<Arena<Table, { process::MAX_COUNT }>> =
     IrqSpinLock::new(Arena::new());
 
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(super) enum Error {
+    /// When the file descriptor within the table range finds a `None` in the slot
+    StaleFileDescriptor,
+    /// A file descriptor that isn't within the range bounded by `MAX_OPEN` concurrent file descriptor indices
+    UnknownFileDescriptor,
+    /// The process has too many open files, see [MAX_OPEN]. The rejected entry is returned to the caller to be dropped outside the lock
+    TooManyOpenFiles(Entry),
+}
+
 /// Alias of the file descriptor table handle
 pub(super) type Handle = crate::kernel::collection::Handle<Table>;
 
@@ -42,17 +53,17 @@ impl Validate<usize> for ValidFd {
         }
     }
 }
-/// Create a new fd table for a new process and returns a handle.
+/// Acquire a new fd table slot for a new process and returns a handle.
 /// Takes a lock on FILE_DESCRIPTORS.
 ///
 /// # Panics
-/// Panics if there is no slot free - the table is sized by the number of processes so this should never
-/// occur.
-pub(super) fn new() -> Handle {
+/// Panics if there is no available file descriptor table slot. This should
+/// never happen as each process has its slot.
+pub(super) fn acquire() -> Handle {
     FILE_DESCRIPTORS
         .lock()
         .add(Table::new())
-        .expect("number of processes must match number of slots in FILE_DESCRIPTORS arena")
+        .expect("there should be a free slot for each process")
 }
 
 /// Set up the standard file descriptors.
@@ -121,17 +132,6 @@ pub(super) fn kind(fds: Handle, fd: ValidFd) -> Option<Kind> {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
-pub(super) enum Error {
-    /// When the `MAX_OPEN` concurrent file descriptor limit is reached
-    NotEnoughSlots(Entry),
-    /// When the file descriptor within the table range finds a `None` in the slot
-    StaleFileDescriptor,
-    /// A file descriptor that isn't within the range bounded by `MAX_OPEN` concurrent file descriptor indices
-    UnknownFileDescriptor,
-}
-
-#[derive(Debug)]
 pub(super) enum Entry {
     ConsoleInput,
     ConsoleOutput,
@@ -195,7 +195,7 @@ impl Table {
             *slot = Some(entry);
             Ok(i)
         } else {
-            Err(Error::NotEnoughSlots(entry))
+            Err(Error::TooManyOpenFiles(entry))
         }
     }
 
@@ -334,7 +334,7 @@ mod host_tests {
         // Full: the entry comes back to the caller rather than being dropped
         assert!(matches!(
             table.open(Entry::ConsoleInput),
-            Err(Error::NotEnoughSlots(Entry::ConsoleInput))
+            Err(Error::TooManyOpenFiles(Entry::ConsoleInput))
         ));
     }
 }

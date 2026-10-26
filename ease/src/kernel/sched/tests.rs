@@ -649,6 +649,26 @@ fn park_blocks_until_unpark() {
     // tail out under partner load + QEMU jitter (see await_progress).
     let progress = await_progress(&CHILD_PROGRESS, 1, 120);
     assert_eq!(progress, 1, "child did not reach park (progress != 1)");
+    // progress == 1 is stored just BEFORE park(), so it doesn't prove the
+    // child has parked. park() has no Blocked precondition: an unpark that
+    // lands while the child is still Running finds nothing to wake
+    // (NotBlocked), and the child then parks for good. Wait until the TCB
+    // is actually Blocked so the unpark below can't be lost.
+    let start = crate::kernel::timer::elapsed_ms();
+    while super::SCHEDULER
+        .sched
+        .lock()
+        .threads
+        .tcbs
+        .get(handle)
+        .is_some_and(|tcb| tcb.state != thread::State::Blocked)
+    {
+        assert!(
+            crate::kernel::timer::elapsed_ms().saturating_sub(start) <= 120,
+            "child reached park() but never became Blocked"
+        );
+        crate::kernel::sched::sleep(5);
+    }
     crate::kernel::sched::unpark(handle);
     // Poll for the child to resume past park() after the unpark.
     let progress = await_progress(&CHILD_PROGRESS, 2, 120);
@@ -2006,7 +2026,7 @@ fn forced_preempt_preserves_computation() {
 // synchronous excursion path in arch/usermode.rs). `user_test` issues
 // the EXIT ecall immediately, so each spawned thread dies through
 // exit_from_user -> user_thread_exit -> PostSwitch::Dead, exercising
-// release_process_thread on the way out.
+// release_user_thread and release_process_if_empty on the way out.
 //
 // Liveness is observed through the public API only: spawn_user against
 // a handle returns None once the process is gone (slot empty or pid
@@ -2026,7 +2046,9 @@ fn user_process_exits_and_releases_slot() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             released = true;
             break;
@@ -2055,7 +2077,9 @@ fn user_thread_plain_return_exits_via_ra_shim() {
                 handle,
                 UserEntry::from_fn(test_programs::user_return_test),
             ),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             released = true;
             break;
@@ -2078,7 +2102,9 @@ fn process_slot_recycle_rejects_stale_handle() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(first, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             released = true;
             break;
@@ -2101,7 +2127,9 @@ fn process_slot_recycle_rejects_stale_handle() {
     assert!(
         matches!(
             crate::kernel::sched::spawn_user(first, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ),
         "stale process handle must be rejected"
     );
@@ -2112,7 +2140,9 @@ fn process_slot_recycle_rejects_stale_handle() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(second, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             drained = true;
             break;
@@ -2142,7 +2172,9 @@ fn fault_kills_whole_process() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2172,7 +2204,9 @@ fn illegal_instruction_fault_kills_whole_process() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2191,7 +2225,7 @@ fn illegal_instruction_fault_kills_whole_process() {
 // thread's wait-for-siblings loop in user_thread_exit actually iterates
 // (with an immediately-reaped sibling the count is already down when the
 // loop first checks). A double-release of the straggler would panic in
-// release_process_thread and fail the run.
+// Threads::release and fail the run.
 #[test_case]
 fn fault_waits_for_running_sibling_before_release() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
@@ -2207,7 +2241,9 @@ fn fault_waits_for_running_sibling_before_release() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2241,7 +2277,9 @@ fn voluntary_exit_does_not_block_later_fault_kill() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2277,7 +2315,9 @@ fn fault_waits_for_two_running_siblings() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2294,8 +2334,8 @@ fn fault_waits_for_two_running_siblings() {
 // user_thread_exit when the eviction sweep reaches it — including between
 // claiming the fd table and dying — so this is the interleaving where the
 // table could be claimed twice or abandoned. Either way the process must die,
-// and release_process_thread's "still has open file descriptors" assert must
-// not fire. Deliberately no sleep between the two spawns: the overlap is the
+// and take_fds_if_last_resource_holder's "must be in Alive or Teardown" expect
+// must not fire. Deliberately no sleep between the two spawns: the overlap is the
 // point, and which side wins varies across runs.
 #[test_case]
 fn fault_kill_races_a_voluntary_exit() {
@@ -2313,7 +2353,9 @@ fn fault_kill_races_a_voluntary_exit() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2331,21 +2373,36 @@ fn fault_kill_races_a_voluntary_exit() {
 // release would aim a wakeup at the teardown thread's slot after that slot
 // has been freed (the "invalid TCB" tick-sweep panic seen under
 // --paint-stack). The race window is short, so this claims the role
-// directly under the scheduler lock rather than trying to hit it, then
-// hands the role back and kills the process for real to clean up.
+// directly under the scheduler lock rather than trying to hit it. The
+// claimant must belong to the process, so the process's own spinner is
+// named as teardown thread. Teardown can't be undone, so cleanup condemns
+// the spinner instead: its next U-mode trap exits it as a fault, and as the
+// last resource holder it takes the process from Teardown to Exiting.
 #[test_case]
 fn spawn_user_refused_once_teardown_claimed() {
     let handle = crate::kernel::sched::spawn_process("user_spin_forever")
         .expect("process spawn should succeed");
-    let claimed = super::SCHEDULER
-        .sched
-        .lock()
-        .claim_teardown_role(handle, crate::kernel::percpu::current_thread());
-    assert!(claimed, "fresh process must have no teardown claimant");
+    let spinner = {
+        let mut sched = super::SCHEDULER.sched.lock();
+        let spinner = sched
+            .threads
+            .tcbs
+            .iter_with_handles()
+            .find(|(_, tcb)| tcb.user.as_ref().is_some_and(|uc| uc.process == handle))
+            .map(|(thread, _)| thread)
+            .expect("process should have its first thread");
+        assert!(
+            sched.claim_teardown_role(handle, spinner).is_ok(),
+            "fresh process must have no teardown claimant"
+        );
+        spinner
+    };
     assert!(
         matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessNotInAliveState
+            ))
         ),
         "a thread joined a process whose teardown had been claimed"
     );
@@ -2354,17 +2411,8 @@ fn spawn_user_refused_once_teardown_claimed() {
         "refusing the join must not itself tear the process down"
     );
 
-    // Cleanup: give the role back so a real faulter can claim it.
-    super::SCHEDULER
-        .sched
-        .lock()
-        .processes
-        .pcbs
-        .get_mut(handle)
-        .expect("process is still alive")
-        .teardown_thread = None;
-    crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
-        .expect("faulter should join once the role is free again");
+    // Cleanup: condemn the spinner so it exits on its next U-mode trap.
+    super::SCHEDULER.needs_user_exit.set(spinner.idx());
     let mut killed = false;
     for _ in 0..200 {
         if !process_alive(handle) {
@@ -2380,13 +2428,7 @@ fn spawn_user_refused_once_teardown_claimed() {
 /// handle's pid. Reads the scheduler tables directly (tests live inside
 /// the sched module) so polling doesn't have to spawn probe threads.
 fn process_alive(handle: super::process::Handle) -> bool {
-    super::SCHEDULER
-        .sched
-        .lock()
-        .processes
-        .pcbs
-        .get(handle)
-        .is_some()
+    super::SCHEDULER.sched.lock().processes.contains(handle)
 }
 
 // A process is capped at MAX_THREADS_PER_PROC (6) threads. Fill one to the
@@ -2415,8 +2457,11 @@ fn seventh_thread_never_joins_a_process() {
     assert!(
         matches!(
             crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::TooManyThreadsInProcess
-                | super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::TooManyThreadsInProcess
+                    | super::process::Error::ProcessNotInAliveState
+                    | super::process::Error::ProcessHandleIsStale
+            ))
         ),
         "a seventh thread joined a process at the thread cap"
     );
@@ -2515,9 +2560,7 @@ fn blob_process_second_thread_at_start_then_teardown() {
 // The teardown thread must actually empty the fd table, not just abandon it
 // with the PCB. Every process starts with three descriptors (keyboard,
 // console, debug console), so a slot is never trivially clean: if the fault
-// path skipped the close, either release_process_thread trips its
-// "still has open file descriptors" assert on the way out, or the next
-// process to claim that slot trips Table::new_process's "previous process
+// path skipped the close, the next process to claim that slot trips Table::new_process's "previous process
 // teardown didn't clear file descriptor table". The replacement takes the
 // first free slot, which is the one just recycled unless another test's
 // process is still draining — in which case this still exercises spawn after
@@ -2533,7 +2576,9 @@ fn process_slot_reused_after_fault_kill() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(faulted, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             killed = true;
             break;
@@ -2553,7 +2598,9 @@ fn process_slot_reused_after_fault_kill() {
     for _ in 0..200 {
         if matches!(
             crate::kernel::sched::spawn_user(reused, UserEntry::from_fn(test_programs::user_test)),
-            Err(super::spawn::Error::ProcessNotAvailable)
+            Err(super::spawn::Error::Process(
+                super::process::Error::ProcessHandleIsStale
+            ))
         ) {
             drained = true;
             break;

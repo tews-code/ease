@@ -17,18 +17,28 @@ use super::userloader;
 /// Process spawn errors
 #[derive(Debug)]
 pub(crate) enum Error {
-    Load(userloader::Error),
-    ProcessNotAvailable,
+    Thread(thread::Error),
+    Process(process::Error),
+    UserLoader(userloader::Error),
     NotEnoughMemory,
-    NotEnoughThreadSlots,
-    NotEnoughProcessSlots,
     NotFound,
-    TooManyThreadsInProcess,
+}
+
+impl From<thread::Error> for Error {
+    fn from(value: thread::Error) -> Self {
+        Error::Thread(value)
+    }
+}
+
+impl From<process::Error> for Error {
+    fn from(value: process::Error) -> Self {
+        Error::Process(value)
+    }
 }
 
 impl From<userloader::Error> for Error {
     fn from(value: userloader::Error) -> Self {
-        Error::Load(value)
+        Error::UserLoader(value)
     }
 }
 
@@ -75,26 +85,23 @@ impl Scheduler {
         let mut sched = self.sched.lock();
         // Acquire a valid initialised thread control block slot with sp
         // pointing to a forged stack.
-        let thread = sched
-            .threads
-            .acquire(
-                |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
-                thread::ControlBlockSpec {
-                    kernel_stack,
-                    qos,
-                    priority,
-                    affinity,
-                    user: None,
-                },
-            )
-            .ok_or(Error::NotEnoughThreadSlots)?;
+        let thread = sched.threads.acquire(
+            |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
+            thread::ControlBlockSpec {
+                kernel_stack,
+                qos,
+                priority,
+                affinity,
+                user: None,
+            },
+        )?;
         // Make sure threads don't launch with stale flags
         self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
         Ok(thread)
     }
 
-    // Add an additional user thread to a process
+    /// Add an additional user thread to a process
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_user_thread(
@@ -116,59 +123,32 @@ impl Scheduler {
                 .ok_or(Error::NotEnoughMemory)?;
         // Now lock the scheduler
         let mut sched = self.sched.lock();
-        // We should have a process control block already set up
-        // and it should not already be in the process of being torn down
-        let Some(pcb) = sched
-            .processes
-            .pcbs
-            .get(process)
-            .filter(|pcb| pcb.teardown_thread.is_none())
-        else {
-            drop(sched);
-            return Err(Error::ProcessNotAvailable);
-        };
+        // See if this process can accept another thread - in which case use the given entry return address
+        let user_exit = sched.new_thread_entry_ra(process)?;
         let user_stack_top = user_stack.top();
         let user_stack_base = user_stack.base();
-        let user_exit = pcb.entry_ra;
-        let thread = sched
-            .threads
-            .acquire(
-                |kernel_stack| unsafe {
-                    umode::init_stack_for_user_thread(
-                        kernel_stack,
-                        user_stack_base,
-                        user_stack_top,
-                        entry,
-                        user_exit,
-                    )
-                },
-                thread::ControlBlockSpec {
+        let thread = sched.threads.acquire(
+            |kernel_stack| unsafe {
+                umode::init_stack_for_user_thread(
                     kernel_stack,
-                    qos,
-                    priority,
-                    affinity,
-                    user: Some(thread::UserContext {
-                        stack: user_stack,
-                        entry,
-                        process,
-                    }),
-                },
-            )
-            .ok_or(Error::NotEnoughThreadSlots)?;
-        // Increment this process's thread count
-        if sched
-            .processes
-            .pcbs
-            .get_mut(process)
-            .expect("still holding the lock and verified this is Some above")
-            .add_thread_count()
-            .is_err()
-        {
-            // Too many threads requested, need to exit
-            sched.threads.release(thread);
-            drop(sched);
-            return Err(Error::TooManyThreadsInProcess);
-        }
+                    user_stack_base,
+                    user_stack_top,
+                    entry,
+                    user_exit,
+                )
+            },
+            thread::ControlBlockSpec {
+                kernel_stack,
+                qos,
+                priority,
+                affinity,
+                user: Some(thread::UserContext {
+                    stack: user_stack,
+                    entry,
+                    process,
+                }),
+            },
+        )?;
         // Make sure threads don't launch with stale flags
         self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
@@ -210,15 +190,11 @@ impl Scheduler {
         // Take the lock
         let mut sched = self.sched.lock();
         // Start with the process control block as we need the handle for the thread
-        let process = sched
-            .processes
-            .pcbs
-            .add(process::ControlBlock::new(name, user_mem_map, entry_ra))
-            .ok_or(Error::NotEnoughProcessSlots)?;
-        // Create the thread
+        let process = sched.processes.acquire(name, user_mem_map)?;
+        // Create the first thread for this process
         let user_stack_base = user_stack.base();
         let user_stack_top = user_stack.top();
-        let Some(thread) = sched.threads.acquire(
+        let thread = match sched.threads.acquire(
             |kernel_stack| unsafe {
                 umode::init_stack_for_user_thread(
                     kernel_stack,
@@ -239,26 +215,21 @@ impl Scheduler {
                     process,
                 }),
             },
-        ) else {
-            // Not enough thread slots, need to remove the process and return
-            sched.processes.pcbs.take(process);
-            return Err(Error::NotEnoughThreadSlots);
+        ) {
+            Ok(thread) => thread,
+            Err(e) => {
+                // Release the PCB - there are no threads successfully created so safe to exit
+                sched.processes.release(process);
+                return Err(Error::Thread(e));
+            }
         };
         // Clear all stale flags
         self.clear_thread_flags(thread);
-        // Update the process control block with the thread count and file descriptor
-        let pcb = sched
-            .processes
-            .pcbs
-            .get_mut(process)
-            .expect("just installed and still hold the lock");
-        pcb.add_thread_count()
-            .expect("adding the first thread is always valid");
         // Add the file descriptors just before launching the user thread - this is the "commit point" after which we don't revert
         // Get a handle to a file descriptor table for this process
-        let fds = fd::new();
-        pcb.fds = Some(fds);
+        let fds = fd::acquire();
         fd::add_standard(fds);
+        sched.commit_alive(process, fds, entry_ra);
         self.finish_spawn(sched, affinity);
         Ok(process)
     }

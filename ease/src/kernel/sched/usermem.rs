@@ -199,11 +199,13 @@ impl Map {
         }
     }
     /// Determines whether the whole buffer is contained within a single memory region with the right access type.
+    ///
     /// The access type ensures that the kernel is not using the user memory in a way not permitted as if PMP were
     /// still active.
     ///
     /// Returns `None` if the user buffer doesn't match any of the process and thread memory regions (including access type).
     /// Returns `Some(NonNull<[u8]>)` if the user buffer is valid.
+    ///
     /// A zero-length buffer is always `Some`.
     pub(crate) fn validate(
         &self,
