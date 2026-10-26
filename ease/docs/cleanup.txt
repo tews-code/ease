@@ -93,6 +93,36 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     they are dropped inside it with the lock held. spawn_process's
     back-out also drops the Starting PCB's usermem::Map (its MemRegions)
     under the lock via Processes::release. Pre-existing (seen 2026-10-26
-    during the process State refactor). Fix: have the failure paths hand
-    the regions back to the caller (as fd::Error::TooManyOpenFiles does
-    with its Entry) so they drop after the guard.
+    during the process State refactor). Fix (check first, then commit):
+    right after taking the lock, check that the process arena (spawn_process
+    only) and the thread arena have a free slot, and return the error
+    before moving anything in. Capacity can't change while the lock is
+    held, so the later acquires can't fail: replace their Err arms with
+    expects ("capacity checked under this lock"), which removes the
+    Starting-PCB back-out entirely. The stacks and memory map are still
+    spawn's own locals, declared before the guard, so on the early return
+    they drop after it (locals drop in reverse declaration order).
+    spawn_user_thread: same check after new_thread_entry_ra. Needs a
+    one-line "is full" query on Processes (Threads has tcbs.is_full()).
+    spawn_process_releases_pcb_when_thread_slots_full still applies
+    unchanged.
+
+[ ] Exit path frees stacks and the PCB memory map under the scheduler
+    lock. Three places drop memory while SCHEDULER is held:
+    - post-switch cleanup (stride.rs, dead-thread branch):
+      threads.tcbs.take(switched_from_thread) discards the TCB, freeing
+      its kernel stack and (user thread) user stack.
+    - Processes::release (via release_process_if_empty): take(process)
+      discards the PCB, freeing its usermem::Map regions.
+    - Threads::release (eviction): the taken TCB is dropped inside it.
+    Unlike the spawn item above, check-first doesn't apply (the free is
+    the point, not a failure). Fix: have Threads::release and
+    Processes::release return what they remove (#[must_use], as with
+    fd::Table), and have callers drop(sched) before dropping it
+    (locals bound after the guard otherwise drop first, under the lock);
+    eviction collects removed TCBs in a StackVec. Post-switch still runs
+    with interrupts off after drop(sched), so this shortens scheduler
+    lock hold time but not irqs-off; if the irqsoff tracer shows the free
+    is long, consider deferring it to thread context (cf. Linux freeing a
+    dead task's stack in finish_task_switch). Separate commit from the
+    spawn item; irqsoff run before and after. Seen 2026-10-26.
