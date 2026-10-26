@@ -214,13 +214,19 @@ impl Threads {
             .expect("already checked there was a free slot while holding the exclusive borrow on Threads"))
     }
 
-    /// Release a TCB slot based on the given thread handle
+    /// Release a thread control block slot based on the given thread handle.
     ///
-    /// # Panics #
+    /// Returns the control block so that the caller can release it outside of the lock.
+    ///
+    /// # Panics
     /// Panics if the slot is already released.
-    pub(super) fn release(&mut self, handle: Handle) {
-        self.tcbs.take(handle).expect("could not release thread");
+    #[must_use = "dropping the thread::ControlBlock frees the thread stack memory under the scheduler lock"]
+    pub(super) fn release(&mut self, handle: Handle) -> ControlBlock {
+        self.tcbs
+            .take(handle)
+            .expect("thread control block has already been released")
     }
+
     /// Make a blocked thread ready, returning the `UnblockedResult`.
     /// Works for threads that are currently blocked or switching to blocked.
     /// If the thread is not blocked no action is taken and returns

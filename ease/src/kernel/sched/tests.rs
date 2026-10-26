@@ -2712,11 +2712,12 @@ fn spawn_process_fails_on_process_slot_when_process_slots_full() {
     let result = crate::kernel::sched::spawn_process("user_test");
     let tcbs_after = super::SCHEDULER.sched.lock().threads.tcbs.iter().count();
 
-    // Release the placeholders before asserting.
+    // Release the placeholders before asserting. Their memory maps are
+    // empty, so dropping the PCBs under the lock frees nothing.
     {
         let mut sched = super::SCHEDULER.sched.lock();
         for &handle in placeholders.iter() {
-            sched.processes.release(handle);
+            drop(sched.processes.release(handle));
         }
     }
     assert!(

@@ -18,7 +18,7 @@ use core::marker::PhantomData;
 use core::ptr::NonNull;
 
 pub(crate) const MAX_COUNT: usize = thread::MAX_COUNT - 2; // Two threads are for idle. All other processes could be single-thread
-const MAX_THREADS_PER_PROC: usize = 6;
+pub(super) const MAX_THREADS_PER_PROC: usize = 6;
 
 /// A token to ensure the current thread's process is in Alive state at the
 /// start of a syscall.
@@ -314,15 +314,21 @@ impl Processes {
     ///
     /// The caller guarantees that there are _no_ threads left in the process.
     ///
+    /// Returns the process control block so the caller can release outside of a lock.
+    ///
     /// # Panics
     /// - If the given process handle is stale
+    /// - If the process control block slot is empty
     /// - If the process is not in Starting or Exiting state
-    pub(super) fn release(&mut self, process: Handle) {
+    #[must_use = "dropping the process::ControlBlock frees its memory map under the scheduler lock"]
+    pub(super) fn release(&mut self, process: Handle) -> ControlBlock {
         assert!(
             matches!(self.pcb(process).state, State::Starting | State::Exiting),
             "process must be in Starting or Exiting state"
         );
-        self.0.take(process);
+        self.0
+            .take(process)
+            .expect("process should not have been previously released")
     }
 
     /// Get the memory map for the given process
@@ -455,28 +461,29 @@ impl SchedInner {
     ///
     /// The process is released if no threads remain.
     ///
+    /// Returns the process control block if the process has been released, otherwise `None`.
+    ///
     /// # Panics
     /// - If the given process handle is stale
     /// - If there are zero threads left in the process but the process is not in Starting or Exiting state
-    pub(super) fn release_process_if_empty(&mut self, process: Handle) {
-        if self.threads.thread_count_of(process) == 0 {
-            // This process is done
-            self.processes.release(process);
-        }
+    #[must_use = "dropping the process::ControlBlock frees its memory map under the scheduler lock"]
+    pub(super) fn release_process_if_empty(&mut self, process: Handle) -> Option<ControlBlock> {
+        (self.threads.thread_count_of(process) == 0).then(|| self.processes.release(process))
     }
 }
 
 impl Scheduler {
     /// Evict sibling threads for a faulting multi-thread user process
+    #[must_use = "dropping the thread::ControlBlock array frees each sibling thread's memory under the scheduler lock"]
     pub(super) fn evict_sibling_threads(
         &self,
         sched: &mut IrqSpinLockGuard<SchedInner>,
         exit_reason: thread::ExitReason,
         process: Handle,
         surviving_thread: thread::Handle,
-    ) {
-        let mut sibling_threads: StackVec<thread::Handle, { thread::MAX_COUNT - 3 }> =
-            StackVec::new(); // Exclude 2 idle threads and ourselves = 3 threads
+    ) -> [Option<thread::ControlBlock>; MAX_THREADS_PER_PROC - 1] {
+        let mut sibling_threads: StackVec<thread::Handle, { MAX_THREADS_PER_PROC - 1 }> =
+            StackVec::new(); // Exclude ourselves
         for (thread, tcb) in sched.threads.tcbs.iter_with_handles() {
             if thread == surviving_thread {
                 continue;
@@ -487,7 +494,9 @@ impl Scheduler {
                     .expect("should be enough space on the StackVec");
             }
         }
-        for thread in sibling_threads.iter() {
+        let mut tcb_array: [Option<thread::ControlBlock>; MAX_THREADS_PER_PROC - 1] =
+            [const { None }; MAX_THREADS_PER_PROC - 1];
+        for (idx, thread) in sibling_threads.iter().enumerate() {
             let mut release = false;
             match sched.threads.tcbs.get(*thread).unwrap().state {
                 thread::State::Blocked | thread::State::BlockedUntil(_) => {
@@ -523,10 +532,11 @@ impl Scheduler {
                 }
             }
             if release {
-                sched.threads.release(*thread);
+                tcb_array[idx] = Some(sched.threads.release(*thread));
                 sched.release_user_thread(process, *thread);
             }
         }
+        tcb_array
     }
 
     /// Exits the current user thread. If the process is faulting the thread will attempt to take the teardown
@@ -552,10 +562,13 @@ impl Scheduler {
         // Set this thread to be the teardown thread for the entire process, if that role isn't already taken
         let claimed_role = reason == thread::ExitReason::Fault
             && sched.claim_teardown_role(process, current_thread).is_ok();
-        if claimed_role {
-            self.evict_sibling_threads(&mut sched, reason, process, current_thread);
-        }
+        let tcb_array = if claimed_role {
+            Some(self.evict_sibling_threads(&mut sched, reason, process, current_thread))
+        } else {
+            None
+        };
         drop(sched);
+        drop(tcb_array);
         // If I am the teardown thread, firstly loop waiting for other threads to finish their exits
         if claimed_role {
             // Set a wait timeout in case the user thread hangs; No leeway on this wakeup

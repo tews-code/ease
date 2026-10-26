@@ -332,9 +332,13 @@ impl Scheduler {
         }
         sched.threads.is_under_contention()
     }
-    /// Clean up a thread post switch
-    /// Called by _every_ thread, even spawned threads (or
-    /// threads returning from a forged trap).
+
+    /// Cleans up after the previous thread's run.
+    ///
+    /// There are many activities a running thread cannot perform on itself
+    /// and it cannot accurately capture its own bookkeeping. Any thread that
+    /// starts its run (even newly spawned ones) must first clean up the previous
+    /// thread's activity.
     pub(super) fn post_switch_cleanup(&self) {
         let mut sched = self.sched.lock();
         let switched_from_thread = percpu::take_switching_from_thread(&sched)
@@ -343,8 +347,7 @@ impl Scheduler {
             switched_from_thread != percpu::current_thread(),
             "post_switch_cleanup marking working on the live thread control block: idx={switched_from_thread:?}"
         );
-        // If the thread is dead then clean up and end the routine
-        // `state` is Copy so lift this out of the Threads array
+        // Keep the previous thread's `state`. It is Copy so we can copy out of the arena.
         let state = sched
             .threads
             .tcbs
@@ -385,12 +388,15 @@ impl Scheduler {
             // For user processes we have already evicted all but the last thread in usermode::user_thread_exit
             // Set the dead thread to None and return early
             let process = sched.threads.process_handle_of(switched_from_thread);
-            sched.threads.tcbs.take(switched_from_thread);
-            if let Some(process) = process {
-                sched.release_user_thread(process, switched_from_thread);
-                sched.release_process_if_empty(process);
-            }
+            let switched_from_thread_tcb = sched.threads.tcbs.take(switched_from_thread);
             self.clear_thread_flags(switched_from_thread); // Make sure we also clear the flags of the TCB that has been removed
+            let pcb = process.and_then(|p| {
+                sched.release_user_thread(p, switched_from_thread);
+                sched.release_process_if_empty(p)
+            });
+            drop(sched);
+            drop(pcb);
+            drop(switched_from_thread_tcb);
             return;
         }
         // All other post switch cleanup for living thread
@@ -460,6 +466,7 @@ impl Scheduler {
             }
         }
     }
+
     /// Set current thread state to `new_state` and next thread to `Ready` in round robin
     /// If `currrent_state` is Some(State), reschedule only takes place if the
     /// current thread state matches; if `current_state` is None then reschedule
