@@ -39,6 +39,26 @@ Tick with [x] when done, or delete the line.
            reads: only take a key if its whole sequence fits (needs a peek
            on the SPSC queue). Fixes the >0xFF special-key truncation.
 
+[ ] Move the shell's line_editor and vt_parse to user space, on a user
+    heap instead of large stack buffers (LineEditor holds the line, the
+    saved line and HISTORY_SIZE + 1 history lines as StackVec<u8, 74>).
+    The kernel shell's entry point (shell_main) and read_key are removed
+    (console-input step 3); Shell::run stays, taking its input source as
+    a parameter, as the reference loop for the port. src/shell has no
+    caller until this lands, then goes.
+    Prerequisite: user space has no heap today (no allocator in
+    ease-ulib, no syscall that gives a process memory). Needs:
+      - a heap region in the process memory map (usermem Role + PMP
+        entry; mind the 6 U-mode PMP entries), fixed-size at spawn
+        first, growable later only if needed;
+      - a #[global_allocator] in ease-ulib over that region, so user
+        programs can use alloc's Vec/String.
+    Then port line_editor and vt_parse (and their tests) to ease-ulib
+    or ease-user, swapping StackVec for Vec, and rebuild Shell::run's
+    loop on READ/WRITE (its framebuffer redraw, direct UART echo and
+    direct fs calls become syscalls). vt_parse's escape parsing
+    pairs with console-input step 4 (special keys as ESC sequences).
+
 [ ] Board role table in board.rs, once a second board makes it pay off.
     - board.rs stays data only: its own small enum of the devices the board
       has (do not import driver types; drivers depend on board, not the

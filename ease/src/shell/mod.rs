@@ -2,7 +2,7 @@
 
 use core::fmt::Write;
 
-use crate::drivers;
+use crate::drivers::keyboard::DecodedKey;
 use crate::kernel::collection::StackVec;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
@@ -121,12 +121,12 @@ impl Shell {
         }
     }
 
-    /// Runs the shell main loop. Polls keyboard, processes input, dispatches commands. Never returns.
-    pub fn run(&mut self) -> ! {
+    /// Runs the shell main loop. Polls given input, processes input, dispatches commands. Never returns.
+    pub fn run(&mut self, mut source: impl FnMut() -> Option<DecodedKey>) -> ! {
         loop {
             let _ = write!(self.console, "{PROMPT}");
             loop {
-                if let Some(event) = self.keyboard.poll(drivers::keyboard::read_key) {
+                if let Some(event) = self.keyboard.poll(&mut source) {
                     // Send event to line editor
                     match self.line_editor.process(event) {
                         EditResult::CursorMove | EditResult::LineEdit => {

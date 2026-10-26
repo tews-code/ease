@@ -70,18 +70,6 @@ pub(crate) mod queue {
     }
 }
 
-/// Read a decoded key from virtio keyboard queue
-///
-/// Returns None if no key presses have been decoded
-/// Special keys are encoded above 0xFF see [crate::syscall::special_key]
-pub(crate) fn read_key() -> Option<DecodedKey> {
-    queue::CONSUMER
-        .lock()
-        .as_mut()
-        .expect("decoded key queue must be initialised")
-        .pop()
-}
-
 /// Test support: queue a decoded key exactly as the decoder would, so a
 /// thread blocked in GET_CHAR wakes without a virtio keyboard event.
 ///

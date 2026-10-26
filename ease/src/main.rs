@@ -59,14 +59,6 @@ pub(crate) static INIT_COMPLETE: AtomicBool = AtomicBool::new(false);
 // Entry Points
 // =============================================================================
 
-// Not spawned in test builds (see kernel_init), so it would be dead there.
-#[cfg(not(test))]
-fn shell_main(fb: FrameBuffer) {
-    let console = shell::console::Console::new(fb);
-    let mut shell = shell::Shell::new(console);
-    shell.run();
-}
-
 fn interrupts_init_hart0() {
     arch::interrupts::enable();
 }
