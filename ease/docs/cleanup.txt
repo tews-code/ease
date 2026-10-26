@@ -86,7 +86,7 @@ Planned features and roadmap work live in docs/todo.txt, not here.
       standard stream" (e.g. fd.rs open_fills_lowest_free_slot... reusing
       slot 1, the empty slot 7, out-of-range 8), keep the bare number.
 
-[ ] Spawn failure paths free heap memory under the scheduler lock.
+[x] Spawn failure paths free heap memory under the scheduler lock.
     spawn_process / spawn_user_thread allocate the kernel and user stacks
     before locking ("allocate before locking"), but the stacks move into
     thread::ControlBlockSpec, so when Threads::acquire fails (arena full)
@@ -106,6 +106,8 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     one-line "is full" query on Processes (Threads has tcbs.is_full()).
     spawn_process_releases_pcb_when_thread_slots_full still applies
     unchanged.
+    Done (126ea12): all three spawn paths, including the kernel-thread
+    spawn, check via Processes/Threads::check_slot_free.
 
 [ ] Exit path frees stacks and the PCB memory map under the scheduler
     lock. Three places drop memory while SCHEDULER is held:
