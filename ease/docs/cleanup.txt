@@ -85,3 +85,14 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     - Judgement call: where a number means "a slot" rather than "the
       standard stream" (e.g. fd.rs open_fills_lowest_free_slot... reusing
       slot 1, the empty slot 7, out-of-range 8), keep the bare number.
+
+[ ] Spawn failure paths free heap memory under the scheduler lock.
+    spawn_process / spawn_user_thread allocate the kernel and user stacks
+    before locking ("allocate before locking"), but the stacks move into
+    thread::ControlBlockSpec, so when Threads::acquire fails (arena full)
+    they are dropped inside it with the lock held. spawn_process's
+    back-out also drops the Starting PCB's usermem::Map (its MemRegions)
+    under the lock via Processes::release. Pre-existing (seen 2026-10-26
+    during the process State refactor). Fix: have the failure paths hand
+    the regions back to the caller (as fd::Error::TooManyOpenFiles does
+    with its Entry) so they drop after the guard.

@@ -2610,6 +2610,79 @@ fn process_slot_reused_after_fault_kill() {
     assert!(drained, "replacement process never released");
 }
 
+// spawn_process acquires the PCB (Starting) before the first thread, so if
+// the thread arena is full it must release that PCB on the way out. Fill
+// the thread arena with stoppable kernel threads, then try more spawns than
+// there are process slots: if any failed spawn leaked its Starting PCB, a
+// later attempt would hit NotEnoughProcessSlots instead of the thread-slot
+// error. The arena is topped up before every attempt in case a background
+// thread exited and freed a slot. The fillers are released before any
+// assert so a failure doesn't strand them for later tests.
+#[test_case]
+fn spawn_process_releases_pcb_when_thread_slots_full() {
+    static STOP: AtomicUsize = AtomicUsize::new(0);
+    static EXITED: AtomicUsize = AtomicUsize::new(0);
+    fn filler() {
+        while STOP.load(Ordering::Relaxed) == 0 {
+            crate::kernel::sched::sleep(5);
+        }
+        EXITED.fetch_add(1, Ordering::Relaxed);
+        crate::kernel::sched::exit_kernel_thread(thread::ExitReason::Exit)
+    }
+    // Spawn fillers until the thread arena is full; returns how many.
+    fn fill() -> usize {
+        let mut spawned = 0;
+        loop {
+            match crate::kernel::sched::Builder::new()
+                .with_stack_class(Order::KB2)
+                .with_qos(Qos::Low)
+                .spawn(filler)
+            {
+                Ok(_) => spawned += 1,
+                Err(super::spawn::Error::Thread(thread::Error::NotEnoughThreadSlots)) => {
+                    return spawned;
+                }
+                Err(e) => panic!("filler spawn failed for another reason: {:?}", e),
+            }
+            assert!(spawned <= thread::MAX_COUNT, "thread arena never filled");
+        }
+    }
+    STOP.store(0, Ordering::Relaxed);
+    EXITED.store(0, Ordering::Relaxed);
+
+    let mut fillers = 0;
+    let mut unexpected = None;
+    for _ in 0..=super::process::MAX_COUNT {
+        fillers += fill();
+        match crate::kernel::sched::spawn_process("user_test") {
+            Err(super::spawn::Error::Thread(thread::Error::NotEnoughThreadSlots)) => {}
+            other => {
+                unexpected = Some(other);
+                break;
+            }
+        }
+    }
+
+    // Release the fillers before asserting.
+    STOP.store(1, Ordering::Relaxed);
+    let mut drained = false;
+    for _ in 0..200 {
+        if EXITED.load(Ordering::Relaxed) == fillers {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    if let Some(other) = unexpected {
+        panic!(
+            "spawn with a full thread arena must fail on the thread slot \
+             and release its PCB, got {:?}",
+            other
+        );
+    }
+    assert!(drained, "filler threads never exited");
+}
+
 // The load-time fence.i handshake must actually run: loading an image while
 // the other hart is online sets the FENCEI mailbox bit, and the other hart's
 // SOFTWARE trap arm fences and acks. QEMU can't surface a stale-icache bug

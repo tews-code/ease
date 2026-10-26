@@ -152,7 +152,7 @@ fn write(frame: &mut trap::Frame) {
     };
     // Check what kind the fd is indexing
     let Ok(syscall_context) = SyscallContext::current() else {
-        // The fd is not valid - syscall has been interrupted
+        // The process is not Alive - syscall has been interrupted
         frame.a0 = ease_abi::Error::Interrupted.into();
         frame.a1 = 0;
         return;
