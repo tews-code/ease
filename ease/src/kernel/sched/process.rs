@@ -263,12 +263,6 @@ impl Processes {
         self.0.get(process).ok_or(Error::ProcessHandleIsStale)
     }
 
-    /// Test-only liveness probe: whether the handle still names a PCB.
-    #[cfg(test)]
-    pub(super) fn contains(&self, process: Handle) -> bool {
-        self.0.get(process).is_some()
-    }
-
     /// Exclusively borrows the process's control block.
     ///
     /// # Panics
@@ -277,6 +271,24 @@ impl Processes {
         self.0
             .get_mut(process)
             .expect("process handle should not be stale")
+    }
+
+    /// Test-only liveness probe: whether the handle still names a PCB.
+    #[cfg(test)]
+    pub(super) fn contains(&self, process: Handle) -> bool {
+        self.0.get(process).is_some()
+    }
+
+    /// Check if there is a free slot in the Processes arena
+    ///
+    /// # Errors
+    /// Returns [Error::NotEnoughProcessSlots] if there are no slots free
+    pub(super) fn check_slot_free(&self) -> Result<(), Error> {
+        if self.0.is_full() {
+            Err(Error::NotEnoughProcessSlots)
+        } else {
+            Ok(())
+        }
     }
 
     /// Acquire new process control block.

@@ -2610,8 +2610,8 @@ fn process_slot_reused_after_fault_kill() {
     assert!(drained, "replacement process never released");
 }
 
-// spawn_process acquires the PCB (Starting) before the first thread, so if
-// the thread arena is full it must release that PCB on the way out. Fill
+// A spawn_process refused for a full thread arena must not leave a
+// Starting PCB behind (it checks both arenas before acquiring either). Fill
 // the thread arena with stoppable kernel threads, then try more spawns than
 // there are process slots: if any failed spawn leaked its Starting PCB, a
 // later attempt would hit NotEnoughProcessSlots instead of the thread-slot
@@ -2681,6 +2681,61 @@ fn spawn_process_releases_pcb_when_thread_slots_full() {
         );
     }
     assert!(drained, "filler threads never exited");
+}
+
+// spawn_process checks for a free process slot before it takes anything,
+// so a full process arena must fail with NotEnoughProcessSlots and leave
+// the thread arena untouched. The process arena (thread::MAX_COUNT - 2)
+// can't be filled through spawn_process: the threads run out first. Fill
+// it directly with placeholder Starting PCBs instead (empty memory maps,
+// no threads), then spawn. The placeholders are released before any
+// assert so a failure doesn't strand them for later tests.
+#[test_case]
+fn spawn_process_fails_on_process_slot_when_process_slots_full() {
+    let mut placeholders: crate::kernel::collection::StackVec<
+        super::process::Handle,
+        { super::process::MAX_COUNT },
+    > = crate::kernel::collection::StackVec::new();
+    let tcbs_before = {
+        let mut sched = super::SCHEDULER.sched.lock();
+        while let Ok(handle) = sched
+            .processes
+            .acquire("placeholder", super::usermem::Map::new())
+        {
+            placeholders
+                .push(handle)
+                .expect("placeholders holds a full process arena");
+        }
+        sched.threads.tcbs.iter().count()
+    };
+
+    let result = crate::kernel::sched::spawn_process("user_test");
+    let tcbs_after = super::SCHEDULER.sched.lock().threads.tcbs.iter().count();
+
+    // Release the placeholders before asserting.
+    {
+        let mut sched = super::SCHEDULER.sched.lock();
+        for &handle in placeholders.iter() {
+            sched.processes.release(handle);
+        }
+    }
+    assert!(
+        matches!(
+            result,
+            Err(super::spawn::Error::Process(
+                super::process::Error::NotEnoughProcessSlots
+            ))
+        ),
+        "spawn with a full process arena must fail on the process slot, got {:?}",
+        result
+    );
+    // A background thread may exit meanwhile, but none may be added.
+    assert!(
+        tcbs_after <= tcbs_before,
+        "failed spawn took a thread slot: {} TCBs before, {} after",
+        tcbs_before,
+        tcbs_after
+    );
 }
 
 // The load-time fence.i handshake must actually run: loading an image while

@@ -161,15 +161,29 @@ pub(super) struct Threads {
 pub(crate) type Handle = crate::kernel::collection::Handle<ControlBlock>;
 
 impl Threads {
+    /// Check if there is a free slot in the Threads arena
+    ///
+    /// # Errors
+    /// Returns [Error::NotEnoughThreadSlots] if there are no slots free
+    pub(super) fn check_slot_free(&self) -> Result<(), Error> {
+        if self.tcbs.is_full() {
+            Err(Error::NotEnoughThreadSlots)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Acquire a free slot and set up a valid thread control block for a thread
+    ///
+    /// # Errors
+    /// Returns [Error::NotEnoughThreadSlots] if there are no free slots for a new thread
     pub(super) fn acquire(
         &mut self,
         forge_stack: impl FnOnce(&mut MemRegion) -> NonNull<u8>,
         spec: ControlBlockSpec,
     ) -> Result<Handle, Error> {
-        if self.tcbs.is_full() {
-            return Err(Error::NotEnoughThreadSlots);
-        }
+        // Check if there is a free slot before continuing
+        self.check_slot_free()?;
         let pass_baseline = self.pass_baseline();
         let ControlBlockSpec {
             qos,
@@ -197,7 +211,7 @@ impl Threads {
                 #[cfg(feature = "trace")]
                 ready_since: now, // Cycle stamp of the last transition into Ready (for wake-latency tracing)
             })
-            .unwrap())
+            .expect("already checked there was a free slot while holding the exclusive borrow on Threads"))
     }
 
     /// Release a TCB slot based on the given thread handle

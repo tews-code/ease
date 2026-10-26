@@ -89,18 +89,23 @@ impl Scheduler {
             MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
         // Now take the scheduler lock
         let mut sched = self.sched.lock();
+        // Check if there is a free thread slot
+        sched.threads.check_slot_free()?;
         // Acquire a valid initialised thread control block slot with sp
         // pointing to a forged stack.
-        let thread = sched.threads.acquire(
-            |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
-            thread::ControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: None,
-            },
-        )?;
+        let thread = sched
+            .threads
+            .acquire(
+                |kernel_stack| context::forge_kernel_thread_stack(kernel_stack, entry),
+                thread::ControlBlockSpec {
+                    kernel_stack,
+                    qos,
+                    priority,
+                    affinity,
+                    user: None,
+                },
+            )
+            .expect("checked that there is a free slot under the same lock");
         // Make sure threads don't launch with stale flags
         self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
@@ -108,6 +113,13 @@ impl Scheduler {
     }
 
     /// Add an additional user thread to a process
+    ///
+    /// # Errors
+    /// - Returns [alloc::Error::NotEnoughMemory] if the memory allocation fails, preventing the spawn
+    /// - Returns [thread::Error::NotEnoughThreadSlots] if there are no free thread slots available
+    /// - Returns [process::Error::TooManyThreadsInProcess] if the process already has [process::MAX_THREADS_PER_PROC] threads
+    /// - Returns [process::Error::StaleProcessHandle] if the given process handle is stale
+    /// - Returns [process::Error::ProcessNotInAliveState] if the attempt is to add a thread to a process that is not alive
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_user_thread(
@@ -127,37 +139,44 @@ impl Scheduler {
             MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
         // Now lock the scheduler
         let mut sched = self.sched.lock();
+        // Check if there is a free thread slot
+        sched.threads.check_slot_free()?;
         // See if this process can accept another thread - in which case use the given entry return address
         let user_exit = sched.new_thread_entry_ra(process)?;
+        // We have space in the process, and we've been given user_exit, so proceed with spawning the new thread
         let user_stack_top = user_stack.top();
         let user_stack_base = user_stack.base();
-        let thread = sched.threads.acquire(
-            |kernel_stack| unsafe {
-                umode::init_stack_for_user_thread(
+        let thread = sched
+            .threads
+            .acquire(
+                |kernel_stack| unsafe {
+                    umode::init_stack_for_user_thread(
+                        kernel_stack,
+                        user_stack_base,
+                        user_stack_top,
+                        entry,
+                        user_exit,
+                    )
+                },
+                thread::ControlBlockSpec {
                     kernel_stack,
-                    user_stack_base,
-                    user_stack_top,
-                    entry,
-                    user_exit,
-                )
-            },
-            thread::ControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: Some(thread::UserContext {
-                    stack: user_stack,
-                    entry,
-                    process,
-                }),
-            },
-        )?;
+                    qos,
+                    priority,
+                    affinity,
+                    user: Some(thread::UserContext {
+                        stack: user_stack,
+                        entry,
+                        process,
+                    }),
+                },
+            )
+            .expect("checked there are thread slots free and still under same lock");
         // Make sure threads don't launch with stale flags
         self.clear_thread_flags(thread);
         self.finish_spawn(sched, affinity);
         Ok(thread)
     }
+
     /// Spawn a new user process
     ///
     /// The process starts with one user thread.
@@ -165,6 +184,11 @@ impl Scheduler {
     ///
     /// Takes a lock on the file descriptor table while holding the scheduler lock.
     /// Lock order: (1) SCHEDULER (2) FILE_DESCRIPTORS
+    ///
+    /// # Errors
+    /// - Returns [alloc::Error::NotEnoughMemory] if the memory allocation of the first thread fails
+    /// - Returns [process::Error::NotEnoughProcessSlots] if there are no free process slots
+    /// - Returns [thread::Error::NotEnoughThreadSlots] if there are no free thread slots
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
     pub(super) fn spawn_process(
@@ -191,40 +215,43 @@ impl Scheduler {
             MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
         // Take the lock
         let mut sched = self.sched.lock();
+        // Check if there is a free process slot before continuing
+        sched.processes.check_slot_free()?;
+        // Check if there is a free thread slot before continuing
+        sched.threads.check_slot_free()?;
         // Start with the process control block as we need the handle for the thread
-        let process = sched.processes.acquire(name, user_mem_map)?;
+        let process = sched
+            .processes
+            .acquire(name, user_mem_map)
+            .expect("have checked there are sufficient process slots under this lock");
         // Create the first thread for this process
         let user_stack_base = user_stack.base();
         let user_stack_top = user_stack.top();
-        let thread = match sched.threads.acquire(
-            |kernel_stack| unsafe {
-                umode::init_stack_for_user_thread(
+        let thread = sched
+            .threads
+            .acquire(
+                |kernel_stack| unsafe {
+                    umode::init_stack_for_user_thread(
+                        kernel_stack,
+                        user_stack_base,
+                        user_stack_top,
+                        entry,
+                        entry_ra,
+                    )
+                },
+                thread::ControlBlockSpec {
                     kernel_stack,
-                    user_stack_base,
-                    user_stack_top,
-                    entry,
-                    entry_ra,
-                )
-            },
-            thread::ControlBlockSpec {
-                kernel_stack,
-                qos,
-                priority,
-                affinity,
-                user: Some(thread::UserContext {
-                    stack: user_stack,
-                    entry,
-                    process,
-                }),
-            },
-        ) {
-            Ok(thread) => thread,
-            Err(e) => {
-                // Release the PCB - there are no threads successfully created so safe to exit
-                sched.processes.release(process);
-                return Err(Error::Thread(e));
-            }
-        };
+                    qos,
+                    priority,
+                    affinity,
+                    user: Some(thread::UserContext {
+                        stack: user_stack,
+                        entry,
+                        process,
+                    }),
+                },
+            )
+            .expect("checked there are sufficient thread slots under this lock");
         // Clear all stale flags
         self.clear_thread_flags(thread);
         // Add the file descriptors just before launching the user thread - this is the "commit point" after which we don't revert
