@@ -109,7 +109,7 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     Done (126ea12): all three spawn paths, including the kernel-thread
     spawn, check via Processes/Threads::check_slot_free.
 
-[ ] Exit path frees stacks and the PCB memory map under the scheduler
+[x] Exit path frees stacks and the PCB memory map under the scheduler
     lock. Three places drop memory while SCHEDULER is held:
     - post-switch cleanup (stride.rs, dead-thread branch):
       threads.tcbs.take(switched_from_thread) discards the TCB, freeing
@@ -128,3 +128,15 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     is long, consider deferring it to thread context (cf. Linux freeing a
     dead task's stack in finish_task_switch). Separate commit from the
     spawn item; irqsoff run before and after. Seen 2026-10-26.
+    Done (ab9d189): eviction returns the TCBs in a fixed array (StackVec
+    needs Copy) sized MAX_THREADS_PER_PROC - 1. Worst post-switch hold
+    787 -> ~170 us; deferring the free to thread context not needed.
+
+[ ] The irqsoff end-of-run report can overrun the UART TX ring and lose
+    bytes: in a --test=test-sched --irqsoff run (2026-10-26) the report
+    printed 264 "Lost bytes: N" markers and the per-site tables were
+    unreadable; an identical second run was intact. print_report goes
+    through the queued console (with_uart_writer), which drops on a full
+    1 KB ring by design. Fix: have print_report wait for ring space
+    (as WRITE's blocking path does) or flush() between lines, so a
+    diagnostic report is never silently truncated.
