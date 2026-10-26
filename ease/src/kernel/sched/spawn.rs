@@ -118,7 +118,7 @@ impl Scheduler {
     /// - Returns [alloc::Error::NotEnoughMemory] if the memory allocation fails, preventing the spawn
     /// - Returns [thread::Error::NotEnoughThreadSlots] if there are no free thread slots available
     /// - Returns [process::Error::TooManyThreadsInProcess] if the process already has [process::MAX_THREADS_PER_PROC] threads
-    /// - Returns [process::Error::StaleProcessHandle] if the given process handle is stale
+    /// - Returns [process::Error::ProcessHandleIsStale] if the given process handle is stale
     /// - Returns [process::Error::ProcessNotInAliveState] if the attempt is to add a thread to a process that is not alive
     #[allow(clippy::too_many_arguments)]
     #[cfg_attr(feature = "trace", ease_macros::trace)]
