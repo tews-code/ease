@@ -15,7 +15,7 @@ use crate::arch::csr::pmp;
 use crate::arch::pmp::Pmp;
 use crate::arch::uaccess;
 use crate::board;
-use crate::kernel::alloc::{MemRegion, Order, Pool};
+use crate::kernel::alloc::{Error, MemRegion, Order, Pool};
 use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::sched::process::SyscallContext;
 
@@ -249,10 +249,14 @@ impl Map {
     pub(super) fn region(&self, role: Role) -> Option<&MemRegion> {
         self.map[role.addr_slot()].as_ref().map(|s| &s.region)
     }
+
     /// Add a memory region to an existing user memory map
-    pub(super) fn add_region(&mut self, role: Role, order: Order) -> Result<(), ()> {
+    ///
+    /// # Errors
+    /// Errors if there is not enough memory for the allocation
+    pub(super) fn add_region(&mut self, role: Role, order: Order) -> Result<(), Error> {
         let region = match role.backing() {
-            Backing::Heap(pool) => MemRegion::from_heap(pool, order).ok_or(())?,
+            Backing::Heap(pool) => MemRegion::from_heap(pool, order)?,
             Backing::Fixed(base) => MemRegion::from_fixed(
                 NonNull::new(base as *mut u8).expect("base should not be null"),
                 order,
@@ -261,11 +265,12 @@ impl Map {
         self.map[role.addr_slot()] = Some(Segment { role, region });
         Ok(())
     }
+
     /// Attempts to add required memory regions to a memory map for a user process.
     ///
-    /// Returns a `Ok(())` on success or an `Err(())` on failure. Failure
-    /// is caused by being unable to allocate memory.
-    pub(crate) fn try_for_process(&mut self) -> Result<(), ()> {
+    /// # Errors
+    /// Passes a [Error::NotEnoughMemory] error if the region cannot be added
+    pub(crate) fn try_for_process(&mut self) -> Result<(), Error> {
         self.add_region(Role::Text, crate::Order::KB8)?;
         self.add_region(Role::Data, crate::Order::KB2)?;
         self.add_region(Role::Bss, crate::Order::KB2)?;

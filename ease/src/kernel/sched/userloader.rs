@@ -6,6 +6,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch;
+use crate::kernel::alloc;
 use crate::kernel::sched::usermem;
 use crate::kernel::sync::Mutex;
 use crate::kernel::{ipi, panic, percpu};
@@ -35,8 +36,15 @@ static LOAD_LOCK: Mutex<()> = Mutex::new(());
 /// User program loader errors
 #[derive(Debug)]
 pub(crate) enum Error {
+    /// The allocation failed so the blob could not be loaded into memory
+    Alloc(alloc::Error),
     MismatchedBlobSize,
-    NotEnoughMemory,
+}
+
+impl From<alloc::Error> for Error {
+    fn from(value: alloc::Error) -> Self {
+        Error::Alloc(value)
+    }
 }
 
 /// Newtype to hold the address of the entry to a user program
@@ -199,9 +207,7 @@ pub(crate) fn load_user_image(image: programs::Image) -> Result<LoadedImage, Err
     let load_plan = Plan::from_image(image)?;
     // Create the user memory map for this program
     let mut user_mem_map = usermem::Map::new();
-    user_mem_map
-        .try_for_process()
-        .map_err(|_| Error::NotEnoughMemory)?;
+    user_mem_map.try_for_process()?;
     // Now load from the load plan source into the user memory map destination
     load_plan.copy_user_image(&user_mem_map);
     // Set the user entry address

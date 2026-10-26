@@ -24,8 +24,9 @@ use crate::kernel::alloc::buddy::{BuddyPd0, BuddyPsram};
 use crate::kernel::alloc::kalloc::KAlloc;
 // Needs to be used by bin compile but not lib compile
 #[allow(unused_imports)]
+pub(crate) use region::Error;
+#[allow(unused_imports)]
 pub(crate) use region::{MemRegion, Order};
-
 #[cfg_attr(target_os = "none", global_allocator)]
 static KALLOC_PD1: KAlloc = KAlloc::new();
 static BUDDY_PD0: BuddyPd0 = BuddyPd0::new();
@@ -95,9 +96,13 @@ pub(crate) enum Pool {
     Psram,
 }
 
-/// Requests allocation from the specified pool
+/// Requests allocation from the specified pool.
 ///
-/// Safety: Caller must ensure allocators are initialised
+/// Returns `Some(NonNull<u8>)` pointing to the start of the allocation on success
+/// or `None` if that pool is out of memory
+///
+/// # Panics
+/// Panics if the requested allocator is not initialised
 #[cfg(target_os = "none")]
 fn alloc_in(pool: Pool, layout: Layout) -> Option<NonNull<u8>> {
     // Safety: Caller ensures allocators have been initialised

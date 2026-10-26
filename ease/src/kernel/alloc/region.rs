@@ -8,6 +8,12 @@ use core::ptr::NonNull;
 
 use super::{Pool, alloc_in, dealloc_in};
 
+#[derive(Debug)]
+pub(crate) enum Error {
+    /// Not enough memory for the allocation to succeed
+    NotEnoughMemory,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Order(u8);
 
@@ -62,9 +68,10 @@ pub(crate) struct MemRegion {
 impl MemRegion {
     /// Allocates a new MemRegion.
     ///
-    /// If allocation fails returns None
-    pub(crate) fn from_heap(pool: Pool, order: Order) -> Option<Self> {
-        let base = alloc_in(pool, order.layout())?;
+    /// # Errors
+    /// Returns [Error::NotEnoughMemory] if the allocation fails.
+    pub(crate) fn from_heap(pool: Pool, order: Order) -> Result<Self, Error> {
+        let base = alloc_in(pool, order.layout()).ok_or(Error::NotEnoughMemory)?;
         // The allocator promised us `layout.align()` alignment; assert it in debug builds.
         debug_assert!(
             base.addr().get() % order.align() == 0,
@@ -73,7 +80,7 @@ impl MemRegion {
             order.align(),
             pool
         );
-        Some(Self {
+        Ok(Self {
             base,
             order,
             dealloc_pool: Some(pool),

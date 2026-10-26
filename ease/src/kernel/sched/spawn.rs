@@ -1,7 +1,7 @@
 //! Spawn processes and threads
 
 use crate::arch::{context, umode};
-use crate::kernel::alloc::{MemRegion, Order};
+use crate::kernel::alloc::{self, MemRegion, Order};
 use crate::kernel::fd;
 use crate::kernel::ipi;
 use crate::kernel::percpu;
@@ -17,11 +17,17 @@ use super::userloader;
 /// Process spawn errors
 #[derive(Debug)]
 pub(crate) enum Error {
+    Alloc(alloc::Error),
     Thread(thread::Error),
     Process(process::Error),
     UserLoader(userloader::Error),
-    NotEnoughMemory,
     NotFound,
+}
+
+impl From<alloc::Error> for Error {
+    fn from(value: alloc::Error) -> Self {
+        Error::Alloc(value)
+    }
 }
 
 impl From<thread::Error> for Error {
@@ -79,8 +85,8 @@ impl Scheduler {
         affinity: Option<u8>,
     ) -> Result<thread::Handle, Error> {
         // Thread stack is taken from the kernel heap
-        let kernel_stack = MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)
-            .ok_or(Error::NotEnoughMemory)?;
+        let kernel_stack =
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, stack_order)?;
         // Now take the scheduler lock
         let mut sched = self.sched.lock();
         // Acquire a valid initialised thread control block slot with sp
@@ -116,11 +122,9 @@ impl Scheduler {
     ) -> Result<thread::Handle, Error> {
         // Allocate stacks before locking
         let kernel_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
-                .ok_or(Error::NotEnoughMemory)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
         let user_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)
-                .ok_or(Error::NotEnoughMemory)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
         // Now lock the scheduler
         let mut sched = self.sched.lock();
         // See if this process can accept another thread - in which case use the given entry return address
@@ -182,11 +186,9 @@ impl Scheduler {
         // Allocate stacks before locking; this is wasteful if there aren't enough other resources
         // but we don't want to do this under the scheduler lock
         let kernel_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)
-                .ok_or(Error::NotEnoughMemory)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::KernelPd1, kernel_stack_order)?;
         let user_stack =
-            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)
-                .ok_or(Error::NotEnoughMemory)?;
+            MemRegion::from_heap(crate::kernel::alloc::Pool::UserPd0, user_stack_order)?;
         // Take the lock
         let mut sched = self.sched.lock();
         // Start with the process control block as we need the handle for the thread

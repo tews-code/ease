@@ -247,6 +247,13 @@ macro_rules! define_buddy {
                     unsafe { inner.push(top_order, block) };
                 }
 
+                /// Allocate the requested memory.
+                ///
+                /// Returns a raw pointer to the start of allocated memory on success,
+                /// or a null pointer on out-of-memory failure.
+                ///
+                /// # Panics
+                /// Panics if the allocator has not yet been initialised.
                 pub(crate) unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
                     // If allocation size is zero return a dangling, provenance-free
                     // sentinel. The GlobalAlloc contract forbids dereferencing it.
@@ -265,7 +272,6 @@ macro_rules! define_buddy {
                     let alloc_order =
                         (alloc_size.next_power_of_two() / $min_block_size).ilog2() as usize;
                     // Walk the array of list heads starting at the desired order
-
                     // Phase 1: walk up to find a non-empty list. Stop at the heap's
                     // actual top order — slots beyond that were never populated and a
                     // request larger than the heap can never be served.
