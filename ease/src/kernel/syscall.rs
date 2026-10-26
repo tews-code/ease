@@ -2,6 +2,7 @@
 
 use crate::arch::{trap, umode};
 use crate::drivers::uart;
+use crate::kernel::console_input;
 use crate::kernel::validate::{Untrusted, Validate};
 use crate::kernel::{self, fd, interrupts};
 use crate::sched::{self, process::SyscallContext, thread, usermem};
@@ -118,8 +119,8 @@ fn read(frame: &mut trap::Frame) {
     if let Some(validated_user_buf) = syscall_context.validate_buf(user_buf) {
         // Kernel buffer to receive the bytes
         let mut buf = [0u8; READ_BUF_LEN];
-        // Read the bytes via UART; we sleep until at least a byte is available
-        let bytes_read = match uart::wait_and_read_interruptible(
+        // Read the bytes via console input; we sleep until at least a byte is available
+        let bytes_read = match console_input::wait_and_read_interruptible(
             &mut buf[..validated_user_buf.len().min(READ_BUF_LEN)],
         ) {
             Ok(bytes_read) => bytes_read,

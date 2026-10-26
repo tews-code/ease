@@ -7,6 +7,7 @@
 
 pub mod alloc;
 pub mod collection;
+pub(crate) mod console_input;
 mod fd;
 pub(crate) mod interrupts;
 pub mod ipi;

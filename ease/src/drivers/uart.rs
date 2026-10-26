@@ -32,6 +32,7 @@ use crate::arch::hart_id;
 use crate::arch::{interrupts, mmio};
 use crate::board::uart;
 use crate::kernel::collection::{StackVec, spsc};
+use crate::kernel::console_input;
 use crate::kernel::sync::{Interrupted, SpinLock};
 use core::fmt::Write;
 
@@ -101,8 +102,6 @@ mod queue {
     // Safety: Only create the producer once right here.
     pub(super) static RX_PRODUCER: TryLock<spsc::Producer<'static, u8, RX_LEN>> =
         unsafe { TryLock::new(RX.producer_unchecked()) };
-    // Wait queue for threads blocked on input
-    pub(super) static RX_AVAIL: WaitQueue = WaitQueue::new();
 
     /// Transmission queue
     pub(super) static TX: spsc::Queue<u8, TX_LEN> = spsc::Queue::new();
@@ -123,10 +122,6 @@ mod queue {
 /// Main writer
 /// Note that this can only be used with interrupts enabled
 static UART_WRITER: SpinLock<UartWriter> = SpinLock::new(UartWriter::new()); // Private - only access with `with_uart_writer`
-
-/// Main reader
-/// Note that this can only be used with interrupts enabled
-static UART_READER: SpinLock<UartReader> = SpinLock::new(UartReader::new());
 
 /// Direct write to MMIO - skips queue
 /// Busy waits on the LSR before writing the byte
@@ -154,23 +149,6 @@ pub(crate) fn init() {
         FCR_FIFO_ENABLE | FCR_RX_FIFO_RESET | FCR_TX_FIFO_RESET | FCR_TRIGGER_8,
     );
     RBR_interrupt_enable();
-}
-
-/// Provides user thread access to the [queue::RX_AVAIL] wait queue.
-///
-/// Returns the number of bytes received on success or
-/// [crate::kernel::sync::Interrupted] on Err.
-pub(crate) fn wait_and_read_interruptible(buf: &mut [u8]) -> Result<usize, Interrupted> {
-    if buf.is_empty() {
-        return Ok(0);
-    }
-    let mut bytes_read: usize = 0;
-    // Block until the RX queue has bytes available
-    queue::RX_AVAIL.wait_with_interruptible(&UART_READER, |uart_reader| {
-        bytes_read = uart_reader.read_bytes(buf);
-        bytes_read > 0
-    })?;
-    Ok(bytes_read)
 }
 
 /// Prints to UART
@@ -341,7 +319,7 @@ pub(crate) fn inject_rx(bytes: &[u8]) {
             let _ = producer.push(byte);
         }
     }
-    queue::RX_AVAIL.wake_all();
+    console_input::notify();
 }
 
 /// UART Reader to hold the RX queue consumer
@@ -350,9 +328,14 @@ pub(crate) struct UartReader {
 }
 
 impl UartReader {
-    const fn new() -> Self {
+    /// Create a new [UartReader] which holds the consumer side of the SPSC queue
+    ///
+    /// # Safety
+    /// The caller must ensure that there is only one UartReader as there must be only
+    /// one consumer
+    pub(crate) const unsafe fn new() -> Self {
         Self {
-            // Safety: we never call split and do not change the queue once set up
+            // Safety: the caller guarantees that this is the only consumer
             consumer: unsafe { queue::RX.consumer_unchecked() },
         }
     }
@@ -364,7 +347,7 @@ impl UartReader {
 
     /// Fill a given buffer with bytes from the receiver queue
     /// Returns the number of bytes received
-    fn read_bytes(&mut self, buf: &mut [u8]) -> usize {
+    pub(crate) fn read_bytes(&mut self, buf: &mut [u8]) -> usize {
         let mut count: usize = 0;
         while count < buf.len()
             && let Some(b) = self.read_byte()
@@ -470,7 +453,7 @@ pub fn handle_interrupt() {
                     let _ = producer.push(byte); // drop if full
                 }
                 // Wake any wait-queue threads
-                queue::RX_AVAIL.wake_all();
+                console_input::notify();
             }
             IIR_THR_EMPTY => {
                 let mut consumer = queue::TX_CONSUMER.try_lock()
