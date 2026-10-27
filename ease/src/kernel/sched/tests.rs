@@ -2941,6 +2941,65 @@ fn echo_prints_input_and_exits_on_x() {
     assert!(drained, "echo did not exit after reading 'x'");
 }
 
+// Keyboard as the second console-input source: decoded keys pushed by the
+// keyboard driver must wake a READ parked on fd 0, exactly as UART bytes
+// do. UP_ARROW (0x101) sits between the letters and must be skipped, not
+// truncated: a truncating conversion would turn it into 0x01 and break up
+// the echoed "Key".
+#[test_case]
+fn keyboard_keys_wake_read_and_special_keys_are_skipped() {
+    use crate::drivers::keyboard::{DecodedKey, inject_key};
+    fn inject_ascii(bytes: &[u8]) {
+        for &byte in bytes {
+            inject_key(DecodedKey::from_code(byte as usize));
+        }
+    }
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle =
+        crate::kernel::sched::spawn_process("echo").expect("echo process spawn should succeed");
+    // With no input queued, echo must park in READ
+    crate::kernel::sched::sleep(50);
+    assert!(
+        process_alive(handle),
+        "echo exited before any input: READ did not block"
+    );
+    inject_ascii(b"K");
+    inject_key(DecodedKey::from_code(crate::syscall::special_key::UP_ARROW));
+    inject_ascii(b"ey");
+    #[cfg(feature = "test-io")]
+    {
+        let mut echoed = false;
+        for _ in 0..200 {
+            if crate::io::test_io::contains("Key") {
+                echoed = true;
+                break;
+            }
+            crate::kernel::sched::sleep(10);
+        }
+        assert!(
+            echoed,
+            "echo never printed back \"Key\": keyboard keys did not reach READ, or UP_ARROW was not skipped"
+        );
+    }
+    assert!(process_alive(handle), "echo exited before reading 'x'");
+    inject_ascii(b"x");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    if !drained {
+        // Don't leak a parked echo into later tests
+        crate::kernel::sched::spawn_user(handle, UserEntry::from_fn(test_programs::user_fault_now))
+            .expect("faulter should join the echo process");
+    }
+    assert!(drained, "echo did not exit after reading a keyboard 'x'");
+}
+
 // REGRESSION GUARD for the single trap-return path: a blocking syscall
 // hands back every register except its two results. The probe program
 // loads a distinctive value into s0-s11, t0-t6 and a3-a6, blocks in

@@ -114,9 +114,8 @@ fn kernel_init() {
         .spawn(|| {
             drivers::virtio::blk::virtio_blk_init();
             drivers::plic::enable(virtio::blk::IRQ);
-            drivers::keyboard::init(); // First the driver (sets up queues)
-            drivers::virtio::keyboard::init(); // Then the virtio keyboard
-            drivers::plic::enable(virtio::keyboard::IRQ); // Then the virtio interrupt
+            drivers::virtio::keyboard::init(); // Enable the virtio keyboard before the PLIC starts up and raises interrupts
+            drivers::plic::enable(virtio::keyboard::IRQ);
             match fs::init() {
                 Ok(s) => println!(
                     "Mounted {} volume",

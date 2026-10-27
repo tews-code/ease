@@ -6,7 +6,8 @@
 
 use super::virtio::input;
 use super::virtio::input::evdev;
-use crate::kernel::collection::{Bitmap, bitmap_words_for};
+use crate::kernel::collection::{Bitmap, bitmap_words_for, spsc};
+use crate::kernel::console_input;
 use crate::syscall;
 
 // Limits on codes for validation
@@ -20,11 +21,6 @@ const KEY_MAP: &[u8] = include_bytes!(concat!(
     "/resources/apple-uk.keymap"
 ));
 const _: () = assert!(KEY_MAP.len() == KEYMAP_CODES_MAX * KEY_MAP_BYTES_PER_CODE);
-
-/// Initialise the keyboard driver queue
-pub(crate) fn init() {
-    queue::init();
-}
 
 /// Newtype for keys that have been run through the virtio decoder (as opposed to raw)
 #[derive(Clone, Copy)]
@@ -42,46 +38,70 @@ impl DecodedKey {
     }
 }
 
-/// Queue to pass decoded keys from the virtio keyboard decoder thread to the shell thread
+/// Queue to pass decoded keys from the virtio keyboard decoder thread to the reader.
 /// We use statics as the keyboard is permanently attached to the hardware
 pub(crate) mod queue {
     use super::DecodedKey;
     use crate::kernel::collection::spsc;
-    use crate::kernel::sync::{SpinLock, StaticCell, WaitQueue};
+    use crate::kernel::sync::TryLock;
     /// Number of ASCII or special keys in queue (max burst size, more are dropped)
-    const LEN: usize = 64;
+    pub(super) const LEN: usize = 64;
     /// SPSC queue to Send the keys
-    pub(super) static KEYS: StaticCell<spsc::Queue<DecodedKey, LEN>> = StaticCell::new();
+    pub(super) static KEYS: spsc::Queue<DecodedKey, LEN> = spsc::Queue::new();
     /// Holds the static key queue producer
-    pub(super) static PRODUCER: SpinLock<Option<spsc::Producer<'static, DecodedKey, LEN>>> =
-        SpinLock::new(None);
-    /// Holds the static key queue consumer
-    pub(crate) static CONSUMER: SpinLock<Option<spsc::Consumer<'static, DecodedKey, LEN>>> =
-        SpinLock::new(None);
-    /// Wait queue on new decoded key ready in the queue
-    pub(crate) static KEYS_PENDING: WaitQueue = WaitQueue::new();
+    pub(super) static PRODUCER: TryLock<spsc::Producer<'static, DecodedKey, LEN>> =
+        // Safety: The producer is only created once right here
+        TryLock::new(unsafe { KEYS.producer_unchecked() });
+}
 
-    pub(super) fn init() {
-        let (producer, consumer) = KEYS.init(spsc::Queue::new()).split();
-        let mut p = PRODUCER.lock();
-        let mut c = CONSUMER.lock();
-        *p = Some(producer);
-        *c = Some(consumer);
+/// Reader that holds the consumer for the KEYS queue
+pub(crate) struct Reader {
+    consumer: spsc::Consumer<'static, DecodedKey, { queue::LEN }>,
+}
+
+impl Reader {
+    /// Create a new [Reader] which holds the consumer side of the SPSC queue
+    ///
+    /// # Safety
+    /// The caller must ensure that there is only one Reader as there must be only
+    /// one consumer
+    pub(crate) const unsafe fn new() -> Self {
+        Self {
+            // Safety: This is the only place the KEYS queue consumer is created
+            consumer: unsafe { queue::KEYS.consumer_unchecked() },
+        }
+    }
+
+    /// Pop DecodedKeys from the KEYS queue into the given buffer until the buffer
+    /// is full or the queue is empty.
+    ///
+    /// Returns the number of bytes read into the buffer.
+    /// An empty buffer always returns immediately with zero bytes read.
+    pub(crate) fn read_keys(&mut self, buf: &mut [u8]) -> usize {
+        let mut keys_read: usize = 0;
+        while keys_read < buf.len()
+            && let Some(key) = self.consumer.pop()
+        {
+            if let Ok(byte) = u8::try_from(key.code()) {
+                buf[keys_read] = byte;
+                keys_read += 1;
+            }
+        }
+        keys_read
     }
 }
 
 /// Test support: queue a decoded key exactly as the decoder would, so a
-/// thread blocked in GET_CHAR wakes without a virtio keyboard event.
+/// thread blocked in READ wakes without a virtio keyboard event.
 ///
-/// This is a second user of the PRODUCER (but is safe due to SpinLock)
+/// This is a second user of the PRODUCER (but is safe due to TryLock as nothing sends keyboard events during testing)
 #[cfg(test)]
 pub(crate) fn inject_key(key: DecodedKey) {
     let _ = queue::PRODUCER
-        .lock()
-        .as_mut()
-        .expect("decoded key queue must be intialised")
+        .try_lock()
+        .expect("should be the only taker of this lock")
         .push(key);
-    queue::KEYS_PENDING.wake_all();
+    console_input::notify();
 }
 
 fn ascii_code(key_code: u16, shift: bool, opt: bool, caps_lock: bool) -> u8 {
@@ -243,6 +263,7 @@ impl Decoder {
             EventKind::Unknown(e) => Emit::UnknownEvent(e),
         }
     }
+
     /// Feeds the SPSC key queue
     ///
     /// Key codes are sent as their usize value
@@ -255,12 +276,11 @@ impl Decoder {
                 // If the queue is full the keystroke is dropped: blocking
                 // here would back-pressure into the device ring instead.
                 let _ = queue::PRODUCER
-                    .lock()
-                    .as_mut()
-                    .expect("decoded key queue should be initialised")
+                    .try_lock()
+                    .expect("should be the only user of the PRODUCER lock")
                     .push(DecodedKey(val));
                 // Let the blocked thread know
-                queue::KEYS_PENDING.wake_all();
+                console_input::notify();
             }
             Emit::UnknownKeyCode(k) => {
                 println!("Unknown key code {}", k);

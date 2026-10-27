@@ -97,8 +97,7 @@ mod queue {
     pub(super) static RX: spsc::Queue<u8, RX_LEN> = spsc::Queue::new();
     /// Receiving byte producer is a static because it is used by the ISR after trap.
     /// It is exclusively used by the ISR on HART 0. We use `TryLock` as a lightweight
-    /// way to bring interior mutability into the static.  Note the RX consumer is held
-    /// in the struct UartReader, which is protected by a spinlock.
+    /// way to bring interior mutability into the static.
     // Safety: Only create the producer once right here.
     pub(super) static RX_PRODUCER: TryLock<spsc::Producer<'static, u8, RX_LEN>> =
         unsafe { TryLock::new(RX.producer_unchecked()) };
@@ -323,15 +322,15 @@ pub(crate) fn inject_rx(bytes: &[u8]) {
 }
 
 /// UART Reader to hold the RX queue consumer
-pub(crate) struct UartReader {
+pub(crate) struct Reader {
     consumer: spsc::Consumer<'static, u8, { queue::RX_LEN }>,
 }
 
-impl UartReader {
-    /// Create a new [UartReader] which holds the consumer side of the SPSC queue
+impl Reader {
+    /// Create a new [Reader] which holds the consumer side of the SPSC queue
     ///
     /// # Safety
-    /// The caller must ensure that there is only one UartReader as there must be only
+    /// The caller must ensure that there is only one Reader as there must be only
     /// one consumer
     pub(crate) const unsafe fn new() -> Self {
         Self {
