@@ -9,9 +9,10 @@ use ease_ulib as _; // linked for its lang items and entry point, not its names,
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     unsafe {
-        core::ptr::read_volatile(4 as *const u32);  // Triggers PMP protection near address 0
+        #[allow(clippy::manual_dangling_ptr)]
+        core::ptr::read_volatile(4 as *const u32); // Triggers PMP protection near address 0
     }
     loop {
-        core::hint::spin_loop();    // Keep spinning to allow test case to detect failure
+        core::hint::spin_loop(); // Keep spinning to allow test case to detect failure
     }
 }

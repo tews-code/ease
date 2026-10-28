@@ -158,15 +158,16 @@ cargo fmt --manifest-path ../ease-abi/Cargo.toml
 cargo fmt --manifest-path ../ease-ulib/Cargo.toml
 
 echo ""
-echo "=== Clippy (ease-abi, ease-ulib, ease-macros) ==="
-# The kernel clippy below lints only the ease package, and ease-ulib is
-# otherwise only compiled (warnings allowed) as a dependency of the user
-# programs. Lint the crates the kernel and user programs build on.
-cargo clippy --manifest-path ../ease-abi/Cargo.toml \
-    --target riscv32imac-unknown-none-elf -- -D warnings $CLIPPY_EXTRA
-cargo clippy --manifest-path ../ease-ulib/Cargo.toml \
-    --target riscv32imac-unknown-none-elf -- -D warnings $CLIPPY_EXTRA
-cargo clippy --package ease-macros -- -D warnings $CLIPPY_EXTRA
+echo "=== Clippy (packages) ==="
+# The kernel clippy runs once per feature set in the QEMU stage; every
+# other package is linted here. Run inside each package directory so its
+# own .cargo/config.toml applies (ease-user sets its target there) and
+# packages outside the workspace (ease-ulib, ease-user) are reached. Add a
+# new package by adding its directory to the list.
+for pkg in ease-abi ease-macros ease-ulib ease-user; do
+    echo "--- $pkg"
+    (cd "../$pkg" && cargo clippy -- -D warnings $CLIPPY_EXTRA)
+done
 
 echo ""
 echo "=== User Programs ==="
