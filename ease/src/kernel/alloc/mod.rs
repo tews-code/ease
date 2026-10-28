@@ -3,8 +3,8 @@
 // Each allocator module compiles unconditionally so its `host_tests`
 // module runs under `cargo test --lib` and Miri. The kernel binary
 // uses KAlloc (slab + buddy tier) as its sole `#[global_allocator]`.
-// `bump` and `freelist` are retained for their host_tests as reference
-// algorithms — they're not wired into the kernel.
+// `bump` is retained for host_tests as reference
+// algorithm — not wired into the kernel.
 
 #[cfg(target_os = "none")]
 use core::alloc::GlobalAlloc;
@@ -14,8 +14,6 @@ use core::ptr::NonNull;
 mod buddy;
 #[cfg(all(test, not(target_os = "none")))]
 mod bump;
-#[cfg(all(test, not(target_os = "none")))]
-mod freelist;
 mod kalloc;
 mod region;
 mod slab;

@@ -111,8 +111,8 @@ DIAG_FEATURES="paint-stack trace irqsoff profile"
 ALL_RUN_FEATURES="trace irqsoff paint-stack"
 
 # Dead code is reported but never fails a clippy run, in every package:
-# work in progress (and the bump and freelist allocators, kept in-tree as
-# reference implementations but not wired into the kernel binary) is
+# work in progress (and the bump allocator, kept in-tree as a
+# reference implementation but not wired into the kernel binary) is
 # legitimately unused. --force-warn keeps it a warning even under
 # -D warnings; a plain -W would still be promoted to an error.
 CLIPPY_EXTRA="--force-warn dead-code"
@@ -239,6 +239,11 @@ cargo test --package ease --lib --target "$HOST_TARGET" \
     --no-default-features --features "$FEATURES"
 # TODO: Enable when binary is target-conditional
 # cargo test --package ease --tests --target "$HOST_TARGET"
+# ease-ulib's host tests (the user-heap allocator). Its syscall layer and
+# panic handler are gated to riscv32, so the host build leaves just the
+# allocator and its lock. Run from its own directory: it is outside the
+# workspace.
+(cd ../ease-ulib && cargo test --lib --target "$HOST_TARGET")
 
 if [ $MIRI -eq 1 ]; then
     echo ""
@@ -251,6 +256,7 @@ if [ $MIRI -eq 1 ]; then
     fi
     cargo +nightly miri test --package ease --lib --target "$HOST_TARGET" \
         --no-default-features --features "$FEATURES"
+    (cd ../ease-ulib && cargo +nightly miri test --lib --target "$HOST_TARGET")
 fi
 
 echo ""

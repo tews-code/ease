@@ -6,8 +6,7 @@
 //! # Testing Strategy
 //!
 //! - **Host tests (`cargo test --lib`)**: Pure logic, parsers, data structures,
-//!   and any kernel modules whose code is target-independent (e.g. the
-//!   freelist allocator). Run under Miri to verify soundness:
+//!   and any kernel modules whose code is target-independent. Run under Miri to verify soundness:
 //!   `cargo +nightly miri test --lib --target $HOST_TARGET`
 //! - **QEMU tests (`cargo test --bin ease`)**: Hardware-dependent code (UART,
 //!   interrupts, virtio, the global allocator instance).
@@ -177,14 +176,14 @@ mod drivers {
 }
 
 // Pull just the host-compatible pieces of the kernel module tree into
-// the lib crate so the freelist allocator, sync primitives and
+// the lib crate so the sync primitives and
 // collections can be unit-tested. We do NOT load `kernel/mod.rs`
 // because that pulls in `panic`, `stack_guard`, `timer` which depend
 // on `crate::arch`/`crate::board`/`crate::drivers` — modules that only
 // exist in the binary crate. Instead we declare an inline `kernel`
 // module and use `#[path]` to point at the kernel directory so that
-// `crate::kernel::sync` and friends still resolve identically inside
-// freelist.rs whether it's compiled as part of the lib or the binary.
+// `crate::kernel::sync` and friends still resolve identically
+// whether it's compiled as part of the lib or the binary.
 #[allow(missing_docs, dead_code)]
 #[path = "kernel"]
 mod kernel {

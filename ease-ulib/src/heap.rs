@@ -81,8 +81,12 @@
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-use crate::kernel::alloc::align_up;
-use crate::kernel::sync::AllocatorLock;
+use crate::sync::SpinLock;
+
+pub(super) fn align_up(addr: usize, align: usize) -> Option<usize> {
+    debug_assert!(align.is_power_of_two());
+    addr.checked_add(align - 1).map(|a| a & !(align - 1))
+}
 
 // Base alignment for every allocation. Derived from `FreeBlock` so the
 // padding-split invariant holds on every target: any non-zero padding is
@@ -168,7 +172,7 @@ unsafe impl Send for FreeBlock {}
 // this is `IrqSpinLock` (disables interrupts in the critical section); on
 // host builds it is a plain `SpinLock`.
 pub struct FreeBlockList {
-    pub(crate) sentinel: AllocatorLock<FreeBlock>,
+    pub(crate) sentinel: SpinLock<FreeBlock>,
 }
 
 impl FreeBlockList {
@@ -176,7 +180,7 @@ impl FreeBlockList {
     /// `alloc`/`dealloc` operations.
     pub const fn new() -> Self {
         Self {
-            sentinel: AllocatorLock::new(FreeBlock {
+            sentinel: SpinLock::new(FreeBlock {
                 next: core::ptr::null_mut(),
                 size: 0,
             }),
@@ -432,7 +436,7 @@ impl FreeBlockList {
 //     cargo test --lib --target $HOST_TARGET
 // Run under Miri to verify soundness:
 //     cargo +nightly miri test --lib --target $HOST_TARGET
-#[cfg(all(test, not(target_os = "none"), feature = "test-alloc"))]
+#[cfg(all(test, not(target_os = "none")))]
 mod host_tests {
     use super::*;
     use core::alloc::Layout;
