@@ -4,10 +4,10 @@
 
 use core::arch::asm;
 use core::num::NonZeroUsize;
-use ease_abi::syscall;
+pub use ease_abi::Error;
 pub use ease_abi::ascii;
 pub use ease_abi::fds;
-pub use ease_abi::Error;
+use ease_abi::syscall;
 
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
@@ -19,7 +19,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 /// Print a single u8 byte to standard out
 pub fn put_char(ch: u8) -> Result<(), Error> {
     let buf = [ch; 1];
-    ecall3(syscall::WRITE, fds::STDOUT, buf.as_ptr().addr(), 1).map(|_| () )
+    ecall3(syscall::WRITE, fds::STDOUT, buf.as_ptr().addr(), 1).map(|_| ())
 }
 
 /// Fill a user slice buffer from the file descriptor `fd`.
@@ -45,9 +45,13 @@ pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {
     let mut idx = 0;
     while idx < buf.len() {
         let bytes_written = write(fd, &buf[idx..])?;
-        if bytes_written == 0 { return Err(Error::WriteZero)}; // We aren't making any progress
+        if bytes_written == 0 {
+            return Err(Error::WriteZero);
+        }; // We aren't making any progress
         idx += bytes_written;
-        if idx > buf.len() { panic!("written more bytes than buffer holds"); }
+        if idx > buf.len() {
+            panic!("written more bytes than buffer holds");
+        }
     }
     Ok(())
 }
@@ -55,7 +59,7 @@ pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {
 /// Exit a process
 pub fn exit() -> ! {
     let _ = ecall0(syscall::EXIT);
-    unsafe{ asm!("unimp", options(noreturn)) };
+    unsafe { asm!("unimp", options(noreturn)) };
 }
 
 /// Memory region
@@ -67,9 +71,11 @@ pub struct Region {
 /// Request heap memory from the kernel
 fn request_heap(size: usize) -> Result<Region, Error> {
     let (base, size) = ecall1_ret2(syscall::ALLOC, size)?;
-    Ok(Region{
-        base: NonZeroUsize::try_from(base).expect("kernel should not give a zero base address for allocation"),
-        size: NonZeroUsize::try_from(size).expect("kernel should not give a zero size for the allocated region"),
+    Ok(Region {
+        base: NonZeroUsize::try_from(base)
+            .expect("kernel should not give a zero base address for allocation"),
+        size: NonZeroUsize::try_from(size)
+            .expect("kernel should not give a zero size for the allocated region"),
     })
 }
 
@@ -148,7 +154,7 @@ unsafe extern "C" {
 ///
 /// Linker script ensures that _start is at the beginning of .text
 #[unsafe(no_mangle)]
-#[unsafe(link_section=".text._start")]
+#[unsafe(link_section = ".text._start")]
 pub extern "C" fn _start() -> ! {
     unsafe { main() };
     exit()
@@ -161,8 +167,7 @@ pub struct Writer;
 
 impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        write_all(fds::STDOUT, s.as_bytes())
-            .map_err(|_| core::fmt::Error)?;
+        write_all(fds::STDOUT, s.as_bytes()).map_err(|_| core::fmt::Error)?;
         Ok(())
     }
 }
@@ -189,4 +194,3 @@ macro_rules! println {
         $crate::print!("{}\n", format_args!($($arg)*));
     }}
 }
-

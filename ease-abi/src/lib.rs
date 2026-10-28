@@ -44,7 +44,7 @@ pub mod fds {
 pub enum Error {
     // Skip 0 as it indicates success
     /// Item not found
-    NotFound  = 1,
+    NotFound = 1,
     /// Buffer is invalid, for example outside of the process memory range
     BadBuffer = 2,
     /// File descriptor is invalid

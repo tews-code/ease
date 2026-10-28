@@ -110,11 +110,12 @@ DIAG_FEATURES="paint-stack trace irqsoff profile"
 # only: it has no functional suite of its own.
 ALL_RUN_FEATURES="trace irqsoff paint-stack"
 
-# The bump and freelist allocator modules are kept in-tree as reference
-# implementations (with host_tests) but aren't wired into the kernel
-# binary, so their code is legitimately dead from the kernel's point of
-# view. Relax clippy's dead-code check.
-CLIPPY_EXTRA="-A dead-code"
+# Dead code is reported but never fails a clippy run, in every package:
+# work in progress (and the bump and freelist allocators, kept in-tree as
+# reference implementations but not wired into the kernel binary) is
+# legitimately unused. --force-warn keeps it a warning even under
+# -D warnings; a plain -W would still be promoted to an error.
+CLIPPY_EXTRA="--force-warn dead-code"
 
 echo "Test set                : $TEST_SET"
 echo "Disk image              : $FS_TYPE (feature: $FS_FEATURE)"
@@ -149,8 +150,23 @@ qemu_stage() {
     cargo test --bin ease --no-default-features --features "$features"
 }
 
-# Unconditionally reformat to pass clippy
+# Unconditionally reformat to pass clippy. ease-abi and ease-ulib aren't
+# reached by a plain `cargo fmt` here (it formats only the current package;
+# ease-ulib is outside the workspace), so name them.
 cargo fmt
+cargo fmt --manifest-path ../ease-abi/Cargo.toml
+cargo fmt --manifest-path ../ease-ulib/Cargo.toml
+
+echo ""
+echo "=== Clippy (ease-abi, ease-ulib, ease-macros) ==="
+# The kernel clippy below lints only the ease package, and ease-ulib is
+# otherwise only compiled (warnings allowed) as a dependency of the user
+# programs. Lint the crates the kernel and user programs build on.
+cargo clippy --manifest-path ../ease-abi/Cargo.toml \
+    --target riscv32imac-unknown-none-elf -- -D warnings $CLIPPY_EXTRA
+cargo clippy --manifest-path ../ease-ulib/Cargo.toml \
+    --target riscv32imac-unknown-none-elf -- -D warnings $CLIPPY_EXTRA
+cargo clippy --package ease-macros -- -D warnings $CLIPPY_EXTRA
 
 echo ""
 echo "=== User Programs ==="
