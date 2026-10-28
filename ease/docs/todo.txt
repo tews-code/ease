@@ -44,6 +44,53 @@ Tick with [x] when done, or delete the line.
            that. DecodedKey and ease-abi special_key removed; fixes the
            >0xFF special-key truncation.
 
+[ ] User heap: a syscall that gives a process a fixed-size heap on
+    request, and the ease-ulib #[global_allocator] over it. Design
+    agreed 2026-10-28:
+      - Explicit setup: the program calls a ulib setup function with
+        the size it needs, at the start of main, before any allocation
+        and before spawning threads. Common embedded no_std pattern
+        (embedded-alloc, linked_list_allocator init); Linux's lazy
+        malloc doesn't fit because it relies on the heap growing.
+        Allocating before setup fails with a clear message.
+      - Nothing at spawn: a program that never asks pays no memory and
+        no PMP entry for a heap.
+      - Syscall: kernel rounds the request up to a power of two,
+        allocates a NAPOT block, adds Role::Heap to the process map,
+        returns base and actual size. PMP is rebuilt from the map on
+        every switch (stride.rs, to_pmp), so the caller sees it on
+        return; setup before spawning threads means no sibling can be
+        running with a stale PMP.
+      - Second call: error (setup is once, so it's a bug).
+      - Pool by size: small heaps from UserPd0 (fast SRAM, 512 B steps,
+        threshold e.g. 64 KB), large from Psram (4 KB steps). Programs
+        may get a say in the pool later if needed.
+      - Limits: minimum 512 B (smallest Order, B512; the PD0 buddy
+        itself goes to 16 B). Maximum 4 MB, for Doom. UserPd0 is only
+        256 KB, shared with all user stacks, so 4 MB means Psram, and
+        today's Psram buddy is exactly 4 MB (__user_heap_psram_size):
+        Doom's heap would take the whole pool, leaving none for BufRW.
+        Order stops at KB128, so needs sizes up to MB4. Option: grow the
+        Psram buddy toward the 8 MB part (user .text sits right after
+        the Psram heap today, linker ASSERT in memory-qemu.x, and could
+        move).
+      - No growth, no moving: without an MMU, pointers into the heap
+        can't be fixed up after a memcpy. Growing in place (doubling
+        into a free buddy) is possible later but not guaranteed;
+        put aside. Out of memory = Rust alloc error = process dies.
+      - Freed at process teardown with the map; the syscall undoes its
+        own allocation if it fails partway.
+      - Allocator: the existing linked-list allocator, as GlobalAlloc
+        in ease-ulib, initialised empty and set up from the syscall's
+        base/size. Its lock must be an atomic spinlock (U-mode can't
+        disable interrupts; threads share the heap).
+    Steps:
+    [ ] 1. Kernel: the heap syscall (limits, pool choice, second-call
+           error). Probe: ask for a heap, write it, check one past the
+           end PMP-faults, check a second call errors.
+    [ ] 2. ease-ulib: allocator as #[global_allocator] + setup function.
+           Probe: set up a heap and use a Vec.
+
 [ ] Move the shell's line_editor and vt_parse to user space, on a user
     heap instead of large stack buffers (LineEditor holds the line, the
     saved line and HISTORY_SIZE + 1 history lines as StackVec<u8, 74>).
@@ -51,14 +98,8 @@ Tick with [x] when done, or delete the line.
     (console-input step 3); Shell::run stays, taking its input source as
     a parameter, as the reference loop for the port. src/shell has no
     caller until this lands, then goes.
-    Prerequisite: user space has no heap today (no allocator in
-    ease-ulib, no syscall that gives a process memory). Needs:
-      - a heap region in the process memory map (usermem Role + PMP
-        entry; mind the 6 U-mode PMP entries), fixed-size at spawn
-        first, growable later only if needed; see the process memory
-        layout item: the heap shares the data/bss block's entry;
-      - a #[global_allocator] in ease-ulib over that region, so user
-        programs can use alloc's Vec/String.
+    Prerequisite: the user heap item above (heap syscall + ease-ulib
+    #[global_allocator]), so user programs can use alloc's Vec/String.
     Then port line_editor and vt_parse (and their tests) to ease-ulib
     or ease-user, swapping StackVec for Vec, and rebuild Shell::run's
     loop on READ/WRITE (its framebuffer redraw, direct UART echo and
@@ -144,13 +185,16 @@ Tick with [x] when done, or delete the line.
     Budget:
       1. Text                  R+X  fixed (flash/blob)
       2. Rodata                R    fixed (see .rodata item above)
-      3. Data + bss + heap     R+W  one NAPOT block from UserPd0, shared
-                                    by the process's threads
+      3. Data + bss            R+W  one NAPOT block, shared by the
+                                    process's threads
       4. Stack                 R+W  this thread's own, swapped on context
                                     switch (as today: usermem::to_pmp)
-      5. BufRW                 R+W  PSRAM
-      6. BufR                  R    PSRAM (kernel hands the process data
-                                    to read)
+      5. Heap                  R+W  only if the program asks (user heap
+                                    item): created after spawn, so it
+                                    can't join entry 3's block
+      6. BufRW                 R+W  PSRAM
+      (BufR, R only, PSRAM: no entry left; add when something needs a
+      read-only buffer, e.g. by sharing with a program that has no heap)
     Notes:
       - Heap is per process (threads share it); stacks are per thread,
         up to MAX_THREADS_PER_PROC. Keeping the stack in its own swapped
@@ -161,38 +205,27 @@ Tick with [x] when done, or delete the line.
         realistic failure in Rust (deep recursion, big locals) and safe
         Rust has no other guard; the user stack canaries are a second
         line.
-      - No spare entry. If one is needed (a second heap arena, a shared
-        buffer, driver-process memory), BufR is the one to give up
-        until something actually needs a read-only buffer.
-      - Why data/bss and heap share a block rather than a separate heap
-        entry: merged costs next_pow2(data + bss + heap) and the padding
-        becomes heap; separate costs next_pow2(data + bss) +
-        next_pow2(heap), wasting up to half of each.
+      - No spare entry. A heap merged into entry 3's block would have
+        saved one (merged costs next_pow2(data + bss + heap), the
+        padding becoming heap), but the heap is on demand to save
+        memory for programs that don't need one, so it can't be sized
+        at spawn. Revisit if the ELF loader lets a program declare its
+        heap size in the image (cf. Windows PE heap fields).
       - Growing the heap: with no MMU, allocations can't move, and a
         bigger NAPOT region must be aligned to its new size, so growing
-        in place rarely works. Growth would mean a second arena in its
-        own entry (see "No spare entry").
+        in place rarely works.
       - No BufW: R=0, W=1 is a reserved PMP encoding. Write access is
         always R+W.
       - BufRW/BufR live in PSRAM, different physical memory, so they can
         never share the RW block's entry.
-    Entry 3 layout, low to high:
-        base  data + bss | heap  top
-      - Size = data + bss + requested heap, rounded up to a power of
-        two; the heap takes the rest, so NAPOT padding becomes heap, not
-        waste. Block aligned to its own size. Sized per process at spawn.
-      - Heap at the top: an overrun past the topmost allocation faults.
-        The allocator fails when full rather than growing past the top.
-      - Not caught inside the block: overruns between neighbours (data
-        into the heap, one heap allocation into the next). Only unsafe
-        code can do this; accepted to save entries.
+      - Heap as its own NAPOT region: an overrun off either end faults.
+        Not caught: one heap allocation into the next (unsafe code only).
     Today: Data and Bss are Backing::Fixed (__user_data_start,
     __user_bss_start), Stack and Heap are separate UserPd0 allocations,
     one entry per Role (usermem.rs). Open question: how data/bss get
     into the block without an MMU (link each program for its block,
     position-independent code, or relocations applied by the loader).
-    The user-heap prerequisite of the line_editor/vt_parse item is
-    this block's heap.
+    The heap itself is designed in the user heap item.
 
 [ ] Raw key events for games (Doom): press, release and hold for every
     key, including modifiers and arrows, so a game knows what is held.
