@@ -1,6 +1,5 @@
 //! Keyboard event reader
 
-use crate::drivers::keyboard::DecodedKey;
 use crate::kernel::timer;
 use crate::shell::vt_parse::{EscapeParser, Key, ParseResult};
 
@@ -23,13 +22,13 @@ impl Keyboard {
     /// Polls for a keyboard event. Calls `read_byte` to get raw UART input.
     /// Returns `None` if no input is available. May block briefly (up to 2ms)
     /// when resolving escape sequences.
-    pub fn poll(&mut self, mut read_byte: impl FnMut() -> Option<DecodedKey>) -> Option<KeyEvent> {
+    pub fn poll(&mut self, mut read_byte: impl FnMut() -> Option<u8>) -> Option<KeyEvent> {
         if let Some(b) = self.parser.pending_byte() {
             return Some(KeyEvent::Byte(b));
         }
-        let byte = read_byte()?.code(); // If no byte return None immediately
+        let byte = read_byte()?; // If no byte return None immediately
 
-        match self.parser.parse(byte as u8) {
+        match self.parser.parse(byte) {
             ParseResult::Byte(b) => Some(KeyEvent::Byte(b)),
             ParseResult::Special(k) => Some(KeyEvent::Special(k)),
             ParseResult::InvalidSequence => None,
@@ -38,7 +37,7 @@ impl Keyboard {
                 let start = timer::elapsed_ms();
                 loop {
                     if let Some(next) = read_byte() {
-                        match self.parser.parse(next.code() as u8) {
+                        match self.parser.parse(next) {
                             ParseResult::Byte(b) => return Some(KeyEvent::Byte(b)), // Fallen out of sequence with ordinary byte
                             ParseResult::Special(k) => return Some(KeyEvent::Special(k)), // Fallen out of sequence with special char
                             ParseResult::InvalidSequence => return None,
@@ -64,9 +63,9 @@ mod tests {
     use super::*;
 
     /// Helper: poll with a fixed sequence of bytes, then None thereafter
-    fn poll_bytes(kb: &mut Keyboard, bytes: &[usize]) -> Option<KeyEvent> {
+    fn poll_bytes(kb: &mut Keyboard, bytes: &[u8]) -> Option<KeyEvent> {
         let mut iter = bytes.iter();
-        kb.poll(|| iter.next().copied().map(|c| DecodedKey::from_code(c)))
+        kb.poll(|| iter.next().copied())
     }
 
     #[test_case]
@@ -78,10 +77,7 @@ mod tests {
     #[test_case]
     fn test_regular_byte() {
         let mut kb = Keyboard::default();
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'a'.into()]),
-            Some(KeyEvent::Byte(b'a'))
-        );
+        assert_eq!(poll_bytes(&mut kb, &[b'a']), Some(KeyEvent::Byte(b'a')));
     }
 
     #[test_case]
@@ -106,7 +102,7 @@ mod tests {
     fn test_arrow_up() {
         let mut kb = Keyboard::default();
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'A'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'[', b'A']),
             Some(KeyEvent::Special(Key::ArrowUp))
         );
     }
@@ -115,7 +111,7 @@ mod tests {
     fn test_arrow_down() {
         let mut kb = Keyboard::default();
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'B'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'[', b'B']),
             Some(KeyEvent::Special(Key::ArrowDown))
         );
     }
@@ -124,7 +120,7 @@ mod tests {
     fn test_arrow_right() {
         let mut kb = Keyboard::default();
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'C'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'[', b'C']),
             Some(KeyEvent::Special(Key::ArrowRight))
         );
     }
@@ -133,7 +129,7 @@ mod tests {
     fn test_arrow_left() {
         let mut kb = Keyboard::default();
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'D'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'[', b'D']),
             Some(KeyEvent::Special(Key::ArrowLeft))
         );
     }
@@ -153,7 +149,7 @@ mod tests {
         let mut kb = Keyboard::default();
         // ESC followed immediately by 'x' — parser returns Esc, pushes back 'x'
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'x'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'x']),
             Some(KeyEvent::Special(Key::Esc))
         );
         // Next poll should return the pushed-back byte
@@ -164,25 +160,22 @@ mod tests {
     fn test_invalid_csi_returns_none() {
         let mut kb = Keyboard::default();
         // ESC [ Z — unknown final byte
-        assert_eq!(poll_bytes(&mut kb, &[0x1B, b'['.into(), b'Z'.into()]), None);
+        assert_eq!(poll_bytes(&mut kb, &[0x1B, b'[', b'Z']), None);
     }
 
     #[test_case]
     fn test_invalid_csi_preserves_byte() {
         let mut kb = Keyboard::default();
-        let _ = poll_bytes(&mut kb, &[0x1B, b'['.into(), b'Z'.into()]); // InvalidSequence
+        let _ = poll_bytes(&mut kb, &[0x1B, b'[', b'Z']); // InvalidSequence
         // Pushed-back byte returned on next poll
-        assert_eq!(kb.poll(|| None), Some(KeyEvent::Byte(b'Z'.into())));
+        assert_eq!(kb.poll(|| None), Some(KeyEvent::Byte(b'Z')));
     }
 
     #[test_case]
     fn test_csi_parameters_consumed() {
         let mut kb = Keyboard::default();
         // ESC [ 3 ~ (Delete key) — parameters consumed, '~' is unrecognized final byte
-        assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'3'.into(), b'~'.into()]),
-            None
-        );
+        assert_eq!(poll_bytes(&mut kb, &[0x1B, b'[', b'3', b'~']), None);
         // '~' is in pushback
         assert_eq!(kb.poll(|| None), Some(KeyEvent::Byte(b'~')));
     }
@@ -190,14 +183,8 @@ mod tests {
     #[test_case]
     fn test_consecutive_keys() {
         let mut kb = Keyboard::default();
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'h'.into()]),
-            Some(KeyEvent::Byte(b'h'))
-        );
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'i'.into()]),
-            Some(KeyEvent::Byte(b'i'))
-        );
+        assert_eq!(poll_bytes(&mut kb, &[b'h']), Some(KeyEvent::Byte(b'h')));
+        assert_eq!(poll_bytes(&mut kb, &[b'i']), Some(KeyEvent::Byte(b'i')));
         assert_eq!(
             poll_bytes(&mut kb, &[0x0D]),
             Some(KeyEvent::Special(Key::Enter))
@@ -208,31 +195,22 @@ mod tests {
     fn test_arrow_then_regular_byte() {
         let mut kb = Keyboard::default();
         assert_eq!(
-            poll_bytes(&mut kb, &[0x1B, b'['.into(), b'A'.into()]),
+            poll_bytes(&mut kb, &[0x1B, b'[', b'A']),
             Some(KeyEvent::Special(Key::ArrowUp))
         );
         // No pushback — next poll works normally
         assert_eq!(kb.poll(|| None), None);
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'z'.into()]),
-            Some(KeyEvent::Byte(b'z'))
-        );
+        assert_eq!(poll_bytes(&mut kb, &[b'z']), Some(KeyEvent::Byte(b'z')));
     }
 
     #[test_case]
     fn test_pushback_drained_before_new_byte() {
         let mut kb = Keyboard::default();
         // Set up pushback via bare ESC + non-bracket
-        let _ = poll_bytes(&mut kb, &[0x1B, b'x'.into()]);
+        let _ = poll_bytes(&mut kb, &[0x1B, b'x']);
         // Provide a new byte, but pushback should be returned first
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'y'.into()]),
-            Some(KeyEvent::Byte(b'x'))
-        );
+        assert_eq!(poll_bytes(&mut kb, &[b'y']), Some(KeyEvent::Byte(b'x')));
         // Now the new byte
-        assert_eq!(
-            poll_bytes(&mut kb, &[b'y'.into()]),
-            Some(KeyEvent::Byte(b'y'))
-        );
+        assert_eq!(poll_bytes(&mut kb, &[b'y']), Some(KeyEvent::Byte(b'y')));
     }
 }

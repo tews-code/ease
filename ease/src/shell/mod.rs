@@ -2,7 +2,6 @@
 
 use core::fmt::Write;
 
-use crate::drivers::keyboard::DecodedKey;
 use crate::kernel::collection::StackVec;
 use crate::shell::console::Console;
 use crate::shell::keyboard::Keyboard;
@@ -122,7 +121,7 @@ impl Shell {
     }
 
     /// Runs the shell main loop. Polls given input, processes input, dispatches commands. Never returns.
-    pub fn run(&mut self, mut source: impl FnMut() -> Option<DecodedKey>) -> ! {
+    pub fn run(&mut self, mut source: impl FnMut() -> Option<u8>) -> ! {
         loop {
             let _ = write!(self.console, "{PROMPT}");
             loop {

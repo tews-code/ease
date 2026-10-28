@@ -28,6 +28,20 @@ pub(crate) mod evdev {
     pub(crate) const VALUE_HOLD: u32 = 2;
 }
 
+// ┌─────────┬──────┬───────────┬──────┐
+// │   Key   │ Code │    Key    │ Code │
+// ├─────────┼──────┼───────────┼──────┤
+// │ Home    │ 102  │ End       │ 107  │
+// ├─────────┼──────┼───────────┼──────┤
+// │ Up      │ 103  │ Down      │ 108  │
+// ├─────────┼──────┼───────────┼──────┤
+// │ Page Up │ 104  │ Page Down │ 109  │
+// ├─────────┼──────┼───────────┼──────┤
+// │ Left    │ 105  │ Insert    │ 110  │
+// ├─────────┼──────┼───────────┼──────┤
+// │ Right   │ 106  │ Delete    │ 111  │
+// └─────────┴──────┴───────────┴──────┘
+
 pub(crate) mod key_code {
     pub(crate) const BACKSPACE: u16 = 14;
     pub(crate) const CONTROL: u16 = 29;
@@ -36,7 +50,16 @@ pub(crate) mod key_code {
     pub(crate) const LEFT_OPT: u16 = 56;
     pub(crate) const CAPS_LOCK: u16 = 58;
     pub(crate) const RIGHT_OPT: u16 = 100;
+    pub(crate) const HOME: u16 = 102;
     pub(crate) const UP_ARROW: u16 = 103;
+    pub(crate) const PAGE_UP: u16 = 104;
+    pub(crate) const LEFT_ARROW: u16 = 105;
+    pub(crate) const RIGHT_ARROW: u16 = 106;
+    pub(crate) const END: u16 = 107;
+    pub(crate) const DOWN_ARROW: u16 = 108;
+    pub(crate) const PAGE_DOWN: u16 = 109;
+    pub(crate) const INSERT: u16 = 110;
+    pub(crate) const DELETE: u16 = 111;
 }
 
 // Virtio input events use the Linux evdev format

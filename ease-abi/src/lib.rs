@@ -69,13 +69,6 @@ impl From<Error> for usize {
     }
 }
 
-pub mod special_key {
-    // All special keys are placed above 0xFF
-    const BASE: usize = 0x100;
-    pub const UNKNOWN: usize = BASE;
-    pub const UP_ARROW: usize = BASE + 1;
-}
-
 // ASCII chars that are used for console and serial control
 pub mod ascii {
     pub const BELL: u8 = 0x07;

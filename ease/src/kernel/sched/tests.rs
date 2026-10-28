@@ -2941,21 +2941,34 @@ fn echo_prints_input_and_exits_on_x() {
     assert!(drained, "echo did not exit after reading 'x'");
 }
 
-// Keyboard as the second console-input source: decoded keys pushed by the
-// keyboard driver must wake a READ parked on fd 0, exactly as UART bytes
-// do. UP_ARROW (0x101) sits between the letters and must be skipped, not
-// truncated: a truncating conversion would turn it into 0x01 and break up
-// the echoed "Key".
+// Keyboard as the second console-input source, end to end through the
+// real Decoder: evdev key events are decoded, queued as bytes and must
+// wake a READ parked on fd 0, exactly as UART bytes do. Insert sits
+// between the letters and must arrive as its whole xterm sequence
+// ESC [ 2 ~ (Insert rather than an arrow because echo prints the bytes
+// back, and a terminal ignores CSI 2 ~ as output where ESC [ A would
+// move its cursor).
 #[test_case]
-fn keyboard_keys_wake_read_and_special_keys_are_skipped() {
-    use crate::drivers::keyboard::{DecodedKey, inject_key};
-    fn inject_ascii(bytes: &[u8]) {
-        for &byte in bytes {
-            inject_key(DecodedKey::from_code(byte as usize));
+fn keyboard_keys_wake_read_as_bytes_and_escape_sequences() {
+    use crate::drivers::keyboard::Decoder;
+    use crate::drivers::virtio::input::{Event, evdev};
+    // Press and release one key, as the virtio keyboard reports it.
+    fn tap(decoder: &mut Decoder, code: u16) {
+        for value in [evdev::VALUE_PRESS, evdev::VALUE_RELEASE] {
+            decoder.feed(&Event {
+                event_type: evdev::EV_KEY,
+                code,
+                value,
+            });
         }
     }
+    const KEY_K: u16 = 37;
+    const KEY_Y: u16 = 21;
+    const KEY_X: u16 = 45;
+    const KEY_INSERT: u16 = 110;
     #[cfg(feature = "test-io")]
     crate::io::test_io::clear();
+    let mut decoder = Decoder::new();
     let handle =
         crate::kernel::sched::spawn_process("echo").expect("echo process spawn should succeed");
     // With no input queued, echo must park in READ
@@ -2964,14 +2977,14 @@ fn keyboard_keys_wake_read_and_special_keys_are_skipped() {
         process_alive(handle),
         "echo exited before any input: READ did not block"
     );
-    inject_ascii(b"K");
-    inject_key(DecodedKey::from_code(crate::syscall::special_key::UP_ARROW));
-    inject_ascii(b"ey");
+    tap(&mut decoder, KEY_K);
+    tap(&mut decoder, KEY_INSERT);
+    tap(&mut decoder, KEY_Y);
     #[cfg(feature = "test-io")]
     {
         let mut echoed = false;
         for _ in 0..200 {
-            if crate::io::test_io::contains("Key") {
+            if crate::io::test_io::contains("k\x1b[2~y") {
                 echoed = true;
                 break;
             }
@@ -2979,11 +2992,11 @@ fn keyboard_keys_wake_read_and_special_keys_are_skipped() {
         }
         assert!(
             echoed,
-            "echo never printed back \"Key\": keyboard keys did not reach READ, or UP_ARROW was not skipped"
+            "echo never printed back k ESC [ 2 ~ y: keyboard keys did not reach READ, or Insert's sequence was split or lost"
         );
     }
     assert!(process_alive(handle), "echo exited before reading 'x'");
-    inject_ascii(b"x");
+    tap(&mut decoder, KEY_X);
     let mut drained = false;
     for _ in 0..200 {
         if !process_alive(handle) {

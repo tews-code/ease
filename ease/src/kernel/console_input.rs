@@ -64,7 +64,7 @@ pub(crate) fn wait_and_read_interruptible(buf: &mut [u8]) -> Result<usize, Inter
         // We try the UART and drain all
         bytes_read = reader.uart.read_bytes(buf);
         // Now try the console keyboard and drain all
-        bytes_read += reader.keyboard.read_keys(&mut buf[bytes_read..]);
+        bytes_read += reader.keyboard.read_bytes(&mut buf[bytes_read..]);
         // Confirm we got some bytes
         bytes_read > 0
     })?;

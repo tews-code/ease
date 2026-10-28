@@ -1,14 +1,13 @@
 //! Console keyboard driver
 //!
 //! Decodes duplicate key press and shift tracking.
-//! Keys are `usize` and hold either ASCII or special codes.
-//! See [read_byte] as the API
+//! Keys are bytes for characters or byte slice for escape sequences.
+//! See [Reader::read_bytes] as the API
 
 use super::virtio::input;
 use super::virtio::input::evdev;
 use crate::kernel::collection::{Bitmap, bitmap_words_for, spsc};
 use crate::kernel::console_input;
-use crate::syscall;
 
 // Limits on codes for validation
 const EVDEV_CODES_MAX: usize = 768;
@@ -22,41 +21,24 @@ const KEY_MAP: &[u8] = include_bytes!(concat!(
 ));
 const _: () = assert!(KEY_MAP.len() == KEYMAP_CODES_MAX * KEY_MAP_BYTES_PER_CODE);
 
-/// Newtype for keys that have been run through the virtio decoder (as opposed to raw)
-#[derive(Clone, Copy)]
-pub(crate) struct DecodedKey(usize);
-
-impl DecodedKey {
-    #[cfg(test)]
-    /// Create a DecodedKey from a `usize` code
-    pub(crate) fn from_code(code: usize) -> Self {
-        Self(code)
-    }
-    /// Get the underlying `usize` code
-    pub(crate) fn code(&self) -> usize {
-        self.0
-    }
-}
-
-/// Queue to pass decoded keys from the virtio keyboard decoder thread to the reader.
+/// Queue to pass decoded bytes from the virtio keyboard decoder thread to the reader.
 /// We use statics as the keyboard is permanently attached to the hardware
 pub(crate) mod queue {
-    use super::DecodedKey;
     use crate::kernel::collection::spsc;
     use crate::kernel::sync::TryLock;
-    /// Number of ASCII or special keys in queue (max burst size, more are dropped)
+    /// Number of bytes in queue (max burst size, more are dropped)
     pub(super) const LEN: usize = 64;
-    /// SPSC queue to Send the keys
-    pub(super) static KEYS: spsc::Queue<DecodedKey, LEN> = spsc::Queue::new();
+    /// SPSC queue to Send the bytes from the keyboard
+    pub(super) static KEYBOARD: spsc::Queue<u8, LEN> = spsc::Queue::new();
     /// Holds the static key queue producer
-    pub(super) static PRODUCER: TryLock<spsc::Producer<'static, DecodedKey, LEN>> =
+    pub(super) static PRODUCER: TryLock<spsc::Producer<'static, u8, LEN>> =
         // Safety: The producer is only created once right here
-        TryLock::new(unsafe { KEYS.producer_unchecked() });
+        TryLock::new(unsafe { KEYBOARD.producer_unchecked() });
 }
 
-/// Reader that holds the consumer for the KEYS queue
+/// Reader that holds the consumer for the KEYBOARD queue
 pub(crate) struct Reader {
-    consumer: spsc::Consumer<'static, DecodedKey, { queue::LEN }>,
+    consumer: spsc::Consumer<'static, u8, { queue::LEN }>,
 }
 
 impl Reader {
@@ -67,27 +49,25 @@ impl Reader {
     /// one consumer
     pub(crate) const unsafe fn new() -> Self {
         Self {
-            // Safety: This is the only place the KEYS queue consumer is created
-            consumer: unsafe { queue::KEYS.consumer_unchecked() },
+            // Safety: This is the only place the KEYBOARD queue consumer is created
+            consumer: unsafe { queue::KEYBOARD.consumer_unchecked() },
         }
     }
 
-    /// Pop DecodedKeys from the KEYS queue into the given buffer until the buffer
+    /// Pop bytes from the KEYBOARD queue into the given buffer until the buffer
     /// is full or the queue is empty.
     ///
     /// Returns the number of bytes read into the buffer.
     /// An empty buffer always returns immediately with zero bytes read.
-    pub(crate) fn read_keys(&mut self, buf: &mut [u8]) -> usize {
-        let mut keys_read: usize = 0;
-        while keys_read < buf.len()
-            && let Some(key) = self.consumer.pop()
+    pub(crate) fn read_bytes(&mut self, buf: &mut [u8]) -> usize {
+        let mut bytes_read: usize = 0;
+        while bytes_read < buf.len()
+            && let Some(byte) = self.consumer.pop()
         {
-            if let Ok(byte) = u8::try_from(key.code()) {
-                buf[keys_read] = byte;
-                keys_read += 1;
-            }
+            buf[bytes_read] = byte;
+            bytes_read += 1;
         }
-        keys_read
+        bytes_read
     }
 }
 
@@ -96,12 +76,18 @@ impl Reader {
 ///
 /// This is a second user of the PRODUCER (but is safe due to TryLock as nothing sends keyboard events during testing)
 #[cfg(test)]
-pub(crate) fn inject_key(key: DecodedKey) {
-    let _ = queue::PRODUCER
+pub(crate) fn inject_key(bytes: &[u8]) {
+    // Check if there is enough space in the queue before loading the sequence
+    // If not, simply drop the entire key
+    let mut producer = queue::PRODUCER
         .try_lock()
-        .expect("should be the only taker of this lock")
-        .push(key);
-    console_input::notify();
+        .expect("should be the only user of the PRODUCER lock");
+    if queue::KEYBOARD.free() >= bytes.len() {
+        for byte in bytes.iter() {
+            let _ = producer.push(*byte); // We know there is enough space
+        }
+        console_input::notify();
+    }
 }
 
 fn ascii_code(key_code: u16, shift: bool, opt: bool, caps_lock: bool) -> u8 {
@@ -121,9 +107,18 @@ fn ctrl_code(ascii_code: u8, ctrl: bool) -> u8 {
     }
 }
 
-fn special_code(key_code: u16) -> Option<usize> {
+fn escape_sequence(key_code: u16) -> Option<&'static [u8]> {
     match key_code {
-        input::key_code::UP_ARROW => Some(syscall::special_key::UP_ARROW),
+        input::key_code::UP_ARROW => Some(b"\x1b[A"),
+        input::key_code::DOWN_ARROW => Some(b"\x1b[B"),
+        input::key_code::RIGHT_ARROW => Some(b"\x1b[C"),
+        input::key_code::LEFT_ARROW => Some(b"\x1b[D"),
+        input::key_code::HOME => Some(b"\x1b[H"),
+        input::key_code::END => Some(b"\x1b[F"),
+        input::key_code::INSERT => Some(b"\x1b[2~"),
+        input::key_code::DELETE => Some(b"\x1b[3~"),
+        input::key_code::PAGE_UP => Some(b"\x1b[5~"),
+        input::key_code::PAGE_DOWN => Some(b"\x1b[6~"),
         _ => None,
     }
 }
@@ -138,7 +133,8 @@ enum EventKind {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Emit {
-    Char(usize), // We emit usize instead of u8 to fit into a0 for syscall; Special keys are also sent this way
+    Char(u8),                      // For byte characters
+    EscapeSequence(&'static [u8]), // Escape sequence as a slice
     Quiet,
     UnknownKeyCode(u16),
     UnknownEvent(input::Event),
@@ -227,14 +223,14 @@ impl Decoder {
                         // Add ctrl modifier
                         let ascii_code = ctrl_code(ascii_code, self.held_ctrl());
                         if ascii_code != 0 {
-                            return Emit::Char(ascii_code as usize);
+                            return Emit::Char(ascii_code);
                         }
                         // Not a character, try to match as a special key
-                        if let Some(special_key) = special_code(key_code) {
-                            Emit::Char(special_key)
-                        } else {
-                            Emit::UnknownKeyCode(key_code)
+                        if let Some(sequence) = escape_sequence(key_code) {
+                            return Emit::EscapeSequence(sequence);
                         }
+                        // Unknown key
+                        Emit::UnknownKeyCode(key_code)
                     }
                 }
             }
@@ -266,21 +262,33 @@ impl Decoder {
 
     /// Feeds the SPSC key queue
     ///
-    /// Key codes are sent as their usize value
-    /// Special codes are sent as values above 0xFF, see [crate::syscall::special_key]
+    /// Characters are pushed as a byte. Escape sequences are pushed as a byte array if
+    /// there is enough space on the queue, otherwise dropped.
     pub(crate) fn feed(&mut self, e: &input::Event) {
         match self.decode_event(e) {
             Emit::Quiet => {}
             Emit::Char(val) => {
-                // Every decoded byte queues (incl. CR, DEL, CP437 highs).
                 // If the queue is full the keystroke is dropped: blocking
                 // here would back-pressure into the device ring instead.
                 let _ = queue::PRODUCER
                     .try_lock()
                     .expect("should be the only user of the PRODUCER lock")
-                    .push(DecodedKey(val));
+                    .push(val);
                 // Let the blocked thread know
                 console_input::notify();
+            }
+            Emit::EscapeSequence(sequence) => {
+                // Check if there is enough space in the queue before loading the sequence
+                // If not, simply drop the entire key
+                let mut producer = queue::PRODUCER
+                    .try_lock()
+                    .expect("should be the only user of the PRODUCER lock");
+                if queue::KEYBOARD.free() >= sequence.len() {
+                    for byte in sequence.iter() {
+                        let _ = producer.push(*byte); // We know there is enough space
+                    }
+                    console_input::notify();
+                }
             }
             Emit::UnknownKeyCode(k) => {
                 println!("Unknown key code {}", k);
@@ -312,18 +320,18 @@ mod test {
     #[test_case]
     fn decoder_plain_letter() {
         let mut d = Decoder::new();
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
     }
 
     #[test_case]
     fn decoder_shift_uppercases_until_released() {
         let mut d = Decoder::new();
         assert_eq!(d.decode_event(&ev(1, 42, 1)), Emit::Quiet); // left shift down
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A'));
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet); // release a
         assert_eq!(d.decode_event(&ev(1, 42, 0)), Emit::Quiet); // shift up
         // Regression: shift release must actually clear held_shift
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
     }
 
     #[test_case]
@@ -340,7 +348,7 @@ mod test {
         // No auto-repeat policy: neither host-style duplicate presses
         // (Fedora/KDE) nor proper value-2 repeats emit for letters.
         let mut d = Decoder::new();
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
         assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 30, 2)), Emit::Quiet);
     }
@@ -360,16 +368,16 @@ mod test {
         // released, and a second press-release cycle turns it off.
         let mut d = Decoder::new();
         assert_eq!(d.decode_event(&ev(1, 58, 1)), Emit::Quiet); // caps down
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A'));
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 58, 0)), Emit::Quiet); // caps up
         // Still latched after release
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A'));
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
         // Second cycle unlatches
         assert_eq!(d.decode_event(&ev(1, 58, 1)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 58, 0)), Emit::Quiet);
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
     }
 
     #[test_case]
@@ -380,7 +388,7 @@ mod test {
         assert_eq!(d.decode_event(&ev(1, 58, 1)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 58, 1)), Emit::Quiet); // duplicate press
         assert_eq!(d.decode_event(&ev(1, 58, 2)), Emit::Quiet); // repeat
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'A'));
     }
 
     #[test_case]
@@ -389,10 +397,10 @@ mod test {
         // ignore caps entirely: plain 3 stays 3, shift-3 stays pound.
         let mut d = Decoder::new();
         assert_eq!(d.decode_event(&ev(1, 58, 1)), Emit::Quiet); // caps down
-        assert_eq!(d.decode_event(&ev(1, 4, 1)), Emit::Char(b'3' as usize));
+        assert_eq!(d.decode_event(&ev(1, 4, 1)), Emit::Char(b'3'));
         assert_eq!(d.decode_event(&ev(1, 4, 0)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 42, 1)), Emit::Quiet); // shift down
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
         assert_eq!(d.decode_event(&ev(1, 4, 1)), Emit::Char(0x9C));
     }
 
@@ -404,7 +412,7 @@ mod test {
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 29, 0)), Emit::Quiet); // ctrl up
         // Regression: ctrl release must actually clear the modifier
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
     }
 
     #[test_case]
@@ -434,22 +442,82 @@ mod test {
     }
 
     #[test_case]
-    fn decoder_up_arrow_is_special_key() {
-        // Arrows have no keymap byte; they emit an encoded special key
-        // above 0xFF instead (see syscall::special_key).
+    fn decoder_up_arrow_is_escape_sequence() {
+        // Arrows have no keymap byte; they emit the xterm escape sequence
+        // a terminal would send over the UART, and release stays quiet.
         let mut d = Decoder::new();
         assert_eq!(
             d.decode_event(&ev(1, 103, 1)),
-            Emit::Char(syscall::special_key::UP_ARROW)
+            Emit::EscapeSequence(b"\x1b[A")
         );
         assert_eq!(d.decode_event(&ev(1, 103, 0)), Emit::Quiet);
+    }
+
+    #[test_case]
+    fn decoder_navigation_keys_match_xterm() {
+        // Pins every evdev code in the table to its xterm sequence. The
+        // codes are the raw Linux numbers, not the key_code constants, so
+        // a constant with the wrong value (evdev doesn't number the
+        // arrows in order) fails here.
+        let table: [(u16, &[u8]); 10] = [
+            (102, b"\x1b[H"),  // Home
+            (103, b"\x1b[A"),  // Up
+            (104, b"\x1b[5~"), // Page Up
+            (105, b"\x1b[D"),  // Left
+            (106, b"\x1b[C"),  // Right
+            (107, b"\x1b[F"),  // End
+            (108, b"\x1b[B"),  // Down
+            (109, b"\x1b[6~"), // Page Down
+            (110, b"\x1b[2~"), // Insert
+            (111, b"\x1b[3~"), // Delete
+        ];
+        let mut d = Decoder::new();
+        for (code, sequence) in table {
+            assert_eq!(
+                d.decode_event(&ev(1, code, 1)),
+                Emit::EscapeSequence(sequence)
+            );
+            assert_eq!(d.decode_event(&ev(1, code, 0)), Emit::Quiet);
+        }
+    }
+
+    #[test_case]
+    fn feed_drops_a_sequence_that_does_not_fit_whole() {
+        // A sequence must reach the queue whole or not at all: a partial
+        // ESC [ would make the reader's parser swallow the next key.
+        // Fill the queue to 2 free bytes, feed Up (3 bytes), and check
+        // nothing went in; then a 1-byte key still fits.
+        let mut d = Decoder::new();
+        let free = queue::KEYBOARD.free();
+        assert!(
+            free >= 2,
+            "keyboard queue should be near empty at test start"
+        );
+        inject_key(&[b'a'; queue::LEN][..free - 2]);
+        assert_eq!(queue::KEYBOARD.free(), 2);
+        d.feed(&ev(1, 103, 1));
+        assert_eq!(
+            queue::KEYBOARD.free(),
+            2,
+            "a partial escape sequence was queued"
+        );
+        d.feed(&ev(1, 103, 0));
+        d.feed(&ev(1, 30, 1)); // 'a' fits in the space Up couldn't use
+        assert_eq!(queue::KEYBOARD.free(), 1);
+        d.feed(&ev(1, 30, 0));
+        // Drain through console input so later tests start empty
+        let mut buf = [0u8; queue::LEN];
+        while queue::KEYBOARD.free() < queue::LEN {
+            crate::kernel::console_input::wait_and_read_interruptible(&mut buf)
+                .expect("a kernel test thread is never interrupted");
+        }
     }
 
     #[test_case]
     fn decoder_syn_and_release_are_quiet() {
         let mut d = Decoder::new();
         assert_eq!(d.decode_event(&ev(0, 0, 0)), Emit::Quiet);
-        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a' as usize));
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
     }
 
