@@ -17,5 +17,5 @@ pub(crate) trait Validate<T>: Sized {
     type Error;
 
     /// Performs the validation
-    fn validate(val: Untrusted<T>) -> Result<Self, Self::Error>;
+    fn validate(value: Untrusted<T>) -> Result<Self, Self::Error>;
 }

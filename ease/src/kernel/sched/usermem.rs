@@ -8,7 +8,7 @@
 //! A user process `Map` therefore consists of up to 6 segments covered by differing PMP rules
 
 use core::marker::PhantomData;
-use core::num::NonZero;
+use core::num::NonZeroUsize;
 use core::ptr::NonNull;
 
 use crate::arch::csr::pmp;
@@ -222,7 +222,7 @@ impl Map {
             return Some(NonNull::slice_from_raw_parts(
                 user_stack
                     .base()
-                    .with_addr(NonZero::new(user_buf.base_addr)?),
+                    .with_addr(NonZeroUsize::new(user_buf.base_addr)?),
                 user_buf.len,
             ));
         }
@@ -236,7 +236,7 @@ impl Map {
                     segment
                         .region
                         .base()
-                        .with_addr(NonZero::new(user_buf.base_addr)?),
+                        .with_addr(NonZeroUsize::new(user_buf.base_addr)?),
                     user_buf.len,
                 ));
             }

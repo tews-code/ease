@@ -44,12 +44,12 @@ impl ValidFd {
 
 impl Validate<usize> for ValidFd {
     type Error = Error;
-    fn validate(val: Untrusted<usize>) -> Result<Self, Self::Error> {
-        let val = val.raw();
-        if val >= MAX_OPEN {
+    fn validate(value: Untrusted<usize>) -> Result<Self, Self::Error> {
+        let value = value.raw();
+        if value >= MAX_OPEN {
             Err(Error::UnknownFileDescriptor)
         } else {
-            Ok(ValidFd(val))
+            Ok(ValidFd(value))
         }
     }
 }
