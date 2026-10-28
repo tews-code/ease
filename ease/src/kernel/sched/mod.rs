@@ -270,7 +270,7 @@ pub fn current_wake_overshoot() -> u64 {
 }
 
 //
-// SPAWN USER
+// PROCESS
 //
 
 /// Spawn a user process
@@ -308,6 +308,11 @@ pub fn spawn_user(
         Qos::High,
         None,
     )
+}
+
+/// Add a heap to a user process
+pub fn install_user_heap(heap: MemRegion) -> Result<(), process::HeapError> {
+    SCHEDULER.install_user_heap(heap)
 }
 
 //

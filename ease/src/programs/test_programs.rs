@@ -70,6 +70,14 @@ pub(super) const PROGRAMS: &[Program] = &[
         image: Image::Flash(user_read_split_probe),
     },
     Program {
+        name: "user_alloc_probe",
+        image: Image::Flash(user_alloc_probe),
+    },
+    Program {
+        name: "user_alloc_overrun_probe",
+        image: Image::Flash(user_alloc_overrun_probe),
+    },
+    Program {
         name: "user_print_probe",
         image: Image::Flash(user_print_probe),
     },
@@ -602,6 +610,126 @@ fn user_write(fd: usize, addr: usize, len: usize) -> (usize, usize) {
         );
     }
     (error, value)
+}
+
+/// Exercises the ALLOC syscall from U-mode and prints a verdict for the
+/// kernel-side test: `ALLOC OK` on success, otherwise `ALLOC FAIL 0x<mask>`
+/// with one bit per failed step, then exits.
+///
+/// The refused sizes run first, while the process still has no heap. The
+/// in-bounds writes come straight after a successful ALLOC with no switch
+/// in between, so they only survive if the syscall re-armed this thread's
+/// PMP: without that the first write faults, the process is killed and
+/// no verdict is printed.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_alloc_probe() {
+    use ease_abi::{Error, MAX_HEAP_SIZE};
+    let mut fail: usize = 0;
+    // 0: zero bytes is refused, with a1 and a2 zeroed
+    if user_alloc(0) != (Error::HeapSizeNotSupported as usize, 0, 0) {
+        fail |= 1 << 0;
+    }
+    // 1: one byte over the maximum is refused
+    if user_alloc(MAX_HEAP_SIZE + 1) != (Error::HeapSizeNotSupported as usize, 0, 0) {
+        fail |= 1 << 1;
+    }
+    // 2: a small request succeeds, rounded up to the 512-byte minimum
+    let (error, base, size) = user_alloc(100);
+    if error != 0 || base == 0 || size != 512 {
+        fail |= 1 << 2;
+    }
+    // 3: the heap is NAPOT: aligned to its own size
+    if size == 0 || base & (size - 1) != 0 {
+        fail |= 1 << 3;
+    }
+    // 4: the first and last bytes are writable and read back
+    if fail & (1 << 2) == 0 {
+        let first = base as *mut u8;
+        let last = (base + size - 1) as *mut u8;
+        unsafe {
+            core::ptr::write_volatile(first, 0xA5);
+            core::ptr::write_volatile(last, 0x5A);
+            if core::ptr::read_volatile(first) != 0xA5 || core::ptr::read_volatile(last) != 0x5A {
+                fail |= 1 << 4;
+            }
+        }
+    }
+    // 5: a second ALLOC is refused: a process gets at most one heap
+    if user_alloc(100) != (Error::HeapAlreadyAllocated as usize, 0, 0) {
+        fail |= 1 << 5;
+    }
+    user_put_char(b'\n' as usize);
+    if fail == 0 {
+        const OK: [u8; 9] = *b"ALLOC OK\n";
+        let mut i = 0;
+        while i < 9 {
+            user_put_char(OK[i] as usize);
+            i += 1;
+        }
+    } else {
+        const MSG: [u8; 13] = *b"ALLOC FAIL 0x";
+        const HEX: [u8; 16] = *b"0123456789abcdef";
+        let mut i = 0;
+        while i < 13 {
+            user_put_char(MSG[i] as usize);
+            i += 1;
+        }
+        let mut shift = 12;
+        while shift > 0 {
+            shift -= 4;
+            user_put_char(HEX[(fail >> shift) & 0xf] as usize);
+        }
+        user_put_char(b'\n' as usize);
+    }
+    user_exit();
+}
+
+/// Takes a 64 KB heap (above the SRAM threshold, so from PSRAM, where the
+/// process has no other writable region), writes its last byte, then
+/// writes one byte past the end. That write must PMP-fault and kill the
+/// process. Surviving it prints `ALLOC OVERRUN SURVIVED`; a failed ALLOC
+/// prints `ALLOC OVERRUN SETUP FAIL`; both then exit cleanly.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_alloc_overrun_probe() {
+    let (error, base, size) = user_alloc(64 * 1024);
+    if error != 0 || size != 64 * 1024 {
+        const MSG: [u8; 25] = *b"ALLOC OVERRUN SETUP FAIL\n";
+        let mut i = 0;
+        while i < 25 {
+            user_put_char(MSG[i] as usize);
+            i += 1;
+        }
+        user_exit();
+    }
+    unsafe {
+        core::ptr::write_volatile((base + size - 1) as *mut u8, 0x5A);
+        core::ptr::write_volatile((base + size) as *mut u8, 0x5A);
+    }
+    const MSG: [u8; 23] = *b"ALLOC OVERRUN SURVIVED\n";
+    let mut i = 0;
+    while i < 23 {
+        user_put_char(MSG[i] as usize);
+        i += 1;
+    }
+    user_exit();
+}
+
+/// Raw ALLOC syscall returning the kernel's (error, base, size) unchanged
+#[unsafe(link_section = ".user_text")]
+fn user_alloc(size: usize) -> (usize, usize, usize) {
+    let error: usize;
+    let base: usize;
+    let actual_size: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") size => error,
+            out("a1") base,
+            out("a2") actual_size,
+            in("a7") syscall::ALLOC,
+        );
+    }
+    (error, base, actual_size)
 }
 
 /// Raw READ syscall returning the kernel's (error, value) pair unchanged

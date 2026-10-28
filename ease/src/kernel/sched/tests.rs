@@ -3219,6 +3219,48 @@ fn read_syscall_refuses_bad_fds_and_buffers() {
     );
 }
 
+// ALLOC end to end from U-mode: user_alloc_probe checks the refused sizes
+// (zero, one over the 4 MB maximum), a 100-byte request rounded up to a
+// 512-byte NAPOT heap, writes to its first and last bytes, and the
+// second-call refusal, printing ALLOC OK or ALLOC FAIL <mask>. Exiting
+// without a verdict means the in-bounds writes faulted: the syscall did
+// not re-arm the caller's PMP after adding the heap.
+#[test_case]
+fn alloc_syscall_gives_one_napot_heap() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("user_alloc_probe"), "alloc probe never exited");
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("ALLOC OK"),
+        "alloc probe did not print ALLOC OK (see ALLOC FAIL <mask> on the console; no verdict at all means writing the new heap faulted: is the caller's PMP re-armed?)"
+    );
+}
+
+// The heap's PMP entry ends at the heap: user_alloc_overrun_probe takes a
+// 64 KB PSRAM heap and writes one byte past its end, which must fault and
+// kill the process before it can print ALLOC OVERRUN SURVIVED.
+#[test_case]
+fn alloc_syscall_heap_overrun_faults() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(
+        run_to_exit("user_alloc_overrun_probe"),
+        "alloc overrun probe never exited"
+    );
+    #[cfg(feature = "test-io")]
+    {
+        assert!(
+            !crate::io::test_io::contains("ALLOC OVERRUN SETUP FAIL"),
+            "alloc overrun probe could not get its 64 KB heap"
+        );
+        assert!(
+            !crate::io::test_io::contains("ALLOC OVERRUN SURVIVED"),
+            "a write one byte past the heap did not fault"
+        );
+    }
+}
+
 // READ blocking path from U-mode: user_read_split_probe must block on fd 0
 // until input arrives, then two 4-byte READs over 6 injected bytes must
 // return 4 then 2, with nothing lost in between.

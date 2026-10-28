@@ -15,9 +15,13 @@ use crate::arch::csr::pmp;
 use crate::arch::pmp::Pmp;
 use crate::arch::uaccess;
 use crate::board;
-use crate::kernel::alloc::{Error, MemRegion, Order, Pool};
+use crate::kernel::alloc::{self, MemRegion, Order, Pool};
 use crate::kernel::interrupts::with_interrupts_disabled;
 use crate::kernel::sched::process::SyscallContext;
+use crate::kernel::validate::{Untrusted, Validate};
+
+/// The maximum size of heap that is attempted to be allocated from SRAM; larger is from PSRAM
+pub(super) const MAX_SRAM_HEAP: Order = Order::KB32;
 
 // All programs are currently forced to have the same layout by linker script
 unsafe extern "C" {
@@ -25,6 +29,23 @@ unsafe extern "C" {
     static __user_data_start: u8;
     static __user_bss_start: u8;
 }
+
+/// A valid order from an untrusted `size` in bytes
+pub(crate) struct ValidOrder(Order);
+
+impl ValidOrder {
+    pub(super) fn get(&self) -> Order {
+        self.0
+    }
+}
+
+impl Validate<usize> for ValidOrder {
+    type Error = alloc::Error;
+    fn validate(value: Untrusted<usize>) -> Result<Self, Self::Error> {
+        Order::try_from(value.raw()).map(Self)
+    }
+}
+
 /// A user buffer that has survived the validation process.
 ///
 /// The lifetime specifier links the buffer to the `SyscallContext` which in turn
@@ -159,12 +180,19 @@ impl Role {
         }
     }
 
-    fn backing(self) -> Backing {
+    fn backing(self, order: Order) -> Backing {
         match self {
             Role::Text => Backing::Fixed(&raw const __user_text_start as usize),
             Role::Data => Backing::Fixed(&raw const __user_data_start as usize),
             Role::Bss => Backing::Fixed(&raw const __user_bss_start as usize),
-            Role::Stack | Role::Heap => Backing::Heap(Pool::UserPd0),
+            Role::Stack => Backing::Heap(Pool::UserPd0),
+            Role::Heap => {
+                if order.size() <= MAX_SRAM_HEAP.size() {
+                    Backing::Heap(Pool::UserPd0)
+                } else {
+                    Backing::Heap(Pool::Psram)
+                }
+            }
             Role::BufRW => Backing::Heap(Pool::Psram),
         }
     }
@@ -198,6 +226,22 @@ impl Map {
             map: [const { None }; board::pmp::ADDR_COUNT],
         }
     }
+
+    /// Allocate new heap memory for the user process.
+    ///
+    /// It chooses the memory type by heap size request. If the request order is
+    /// up to and including [MAX_SRAM_HEAP], the heap allocation attempt is from SRAM,
+    /// above this it is attempted from PSRAM.
+    ///
+    /// # Errors
+    /// Returns [alloc::Error::NotEnoughMemory] if the allocation fails.
+    pub(crate) fn allocate_heap(order: ValidOrder) -> Result<MemRegion, alloc::Error> {
+        let Backing::Heap(pool) = Role::Heap.backing(order.get()) else {
+            panic!("should be one of two valid pools");
+        };
+        alloc::MemRegion::from_heap(pool, order.get())
+    }
+
     /// Determines whether the whole buffer is contained within a single memory region with the right access type.
     ///
     /// The access type ensures that the kernel is not using the user memory in a way not permitted as if PMP were
@@ -253,9 +297,9 @@ impl Map {
     /// Add a memory region to an existing user memory map
     ///
     /// # Errors
-    /// Errors if there is not enough memory for the allocation
-    pub(super) fn add_region(&mut self, role: Role, order: Order) -> Result<(), Error> {
-        let region = match role.backing() {
+    /// Returns [alloc::Error::NotEnoughMemory] if the allocation fails.
+    pub(super) fn add_region(&mut self, role: Role, order: Order) -> Result<(), alloc::Error> {
+        let region = match role.backing(order) {
             Backing::Heap(pool) => MemRegion::from_heap(pool, order)?,
             Backing::Fixed(base) => MemRegion::from_fixed(
                 NonNull::new(base as *mut u8).expect("base should not be null"),
@@ -266,16 +310,34 @@ impl Map {
         Ok(())
     }
 
+    /// Adds an allocated heap memory region to an existing memory map for a user process.
+    ///
+    /// # Errors
+    /// Returns `Err(MemRegion)` returning the given memory region if a heap segment is already present
+    pub(crate) fn add_heap(&mut self, heap: MemRegion) -> Result<(), MemRegion> {
+        let slot = Role::Heap.addr_slot();
+        if self.map[slot].is_some() {
+            Err(heap)
+        } else {
+            self.map[slot] = Some(Segment {
+                role: Role::Heap,
+                region: heap,
+            });
+            Ok(())
+        }
+    }
+
     /// Attempts to add required memory regions to a memory map for a user process.
     ///
     /// # Errors
-    /// Passes a [Error::NotEnoughMemory] error if the region cannot be added
-    pub(crate) fn try_for_process(&mut self) -> Result<(), Error> {
+    /// Returns [alloc::Error::NotEnoughMemory] if the allocation fails.
+    pub(crate) fn try_for_process(&mut self) -> Result<(), alloc::Error> {
         self.add_region(Role::Text, crate::Order::KB8)?;
         self.add_region(Role::Data, crate::Order::KB2)?;
         self.add_region(Role::Bss, crate::Order::KB2)?;
         Ok(())
     }
+
     /// Derive a PMP set from a Map for a specific thread
     ///
     /// Iterates through the program's Map segments and uses

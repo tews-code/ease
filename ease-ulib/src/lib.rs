@@ -3,7 +3,7 @@
 #![no_std]
 
 use core::arch::asm;
-
+use core::num::NonZeroUsize;
 use ease_abi::syscall;
 pub use ease_abi::ascii;
 pub use ease_abi::fds;
@@ -51,20 +51,30 @@ pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {
     }
     Ok(())
 }
+
 /// Exit a process
 pub fn exit() -> ! {
-    unsafe {
-        asm!(
-            "ecall",
-            "unimp",
-            in("a7") syscall::EXIT,
-            options(noreturn),
-        );
-    }
+    let _ = ecall0(syscall::EXIT);
+    unsafe{ asm!("unimp", options(noreturn)) };
 }
+
+/// Memory region
+pub struct Region {
+    base: NonZeroUsize,
+    size: NonZeroUsize,
+}
+
+/// Request heap memory from the kernel
+fn request_heap(size: usize) -> Result<Region, Error> {
+    let (base, size) = ecall1_ret2(syscall::ALLOC, size)?;
+    Ok(Region{
+        base: NonZeroUsize::try_from(base).expect("kernel should not give a zero base address for allocation"),
+        size: NonZeroUsize::try_from(size).expect("kernel should not give a zero size for the allocated region"),
+    })
+}
+
 /// Common syscall asm and error decoded for zero argument syscalls
 /// `error` in a0, `value` in a1, zero means success
-#[expect(dead_code)]
 fn ecall0(syscall: usize) -> Result<usize, Error> {
     let error: usize;
     let value: usize;
@@ -83,27 +93,30 @@ fn ecall0(syscall: usize) -> Result<usize, Error> {
         Err(Error::try_from(error).expect("kernel returned an unknown error code"))
     }
 }
-/// Common syscall asm and error decoded for one argument syscalls
-/// `error` in a0, `value` in a1, zero means success
-#[expect(dead_code)]
-fn ecall1(syscall: usize, arg: usize) -> Result<usize, Error> {
+
+/// Common syscall asm and error decoded for one argument syscalls.
+/// Returns an error code in a0, or if a0 is zero returns `val1` in a1 and `val2` in `a2`
+fn ecall1_ret2(syscall: usize, arg: usize) -> Result<(usize, usize), Error> {
     let error: usize;
-    let value: usize;
+    let val1: usize;
+    let val2: usize;
     unsafe {
         asm!(
             "ecall",
              clobber_abi("C"),
              inout("a0") arg => error,
-             out("a1") value,
+             out("a1") val1,
+             out("a2") val2,
              in("a7") syscall,
         );
     }
     if error == 0 {
-        Ok(value)
+        Ok((val1, val2))
     } else {
         Err(Error::try_from(error).expect("kernel returned an unknown error code"))
     }
 }
+
 /// Common syscall asm and error decoded for three-argument syscalls
 ///
 /// Returns `Ok(usize)` on success or an `Error` on failure.

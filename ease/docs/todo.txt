@@ -58,9 +58,11 @@ Tick with [x] when done, or delete the line.
       - Syscall: kernel rounds the request up to a power of two,
         allocates a NAPOT block, adds Role::Heap to the process map,
         returns base and actual size. PMP is rebuilt from the map on
-        every switch (stride.rs, to_pmp), so the caller sees it on
-        return; setup before spawning threads means no sibling can be
-        running with a stale PMP.
+        every switch (stride.rs, to_pmp), but returning from a syscall
+        is not a switch: the syscall must rebuild and activate the
+        caller's PMP itself after adding the heap, or its first heap
+        write faults. Setup before spawning threads means no sibling
+        can be running with a stale PMP.
       - Second call: error (setup is once, so it's a bug).
       - Pool by size: small heaps from UserPd0 (fast SRAM, 512 B steps,
         threshold e.g. 64 KB), large from Psram (4 KB steps). Programs

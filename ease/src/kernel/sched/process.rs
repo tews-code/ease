@@ -7,6 +7,7 @@ use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
 use super::usermem;
+use crate::kernel::alloc::MemRegion;
 use crate::kernel::collection::{Arena, StackVec};
 use crate::kernel::fd;
 use crate::kernel::ipi;
@@ -73,6 +74,7 @@ impl SyscallContext {
     }
 }
 
+/// Common errors for process creation and management
 #[derive(Debug)]
 pub(crate) enum Error {
     /// Thread creation errors
@@ -91,6 +93,15 @@ pub(crate) enum Error {
     TooManyThreadsInProcess,
     /// A given thread is not part of this process
     ThreadNotInProcess,
+}
+
+/// Errors for heap installation
+#[derive(Debug)]
+pub(crate) enum HeapError {
+    /// An additional attempt was made to add a heap to a process which already has a heap
+    ProcessAlreadyHasHeapInstalled,
+    /// The process is not in Alive state
+    ProcessNotInAliveState,
 }
 
 impl From<thread::Error> for Error {
@@ -665,5 +676,48 @@ impl Scheduler {
             return None;
         }
         pcb.mem_map.validate(&user_context.stack, user_buf)
+    }
+
+    /// Add a heap to a process user memory map
+    ///
+    /// # Panics
+    /// Panics if called on a kernel thread
+    ///
+    /// # Errors
+    /// - Returns [Error::ProcessNotInAliveState] if the process is not alive
+    /// - Returns [Error::ProcessAlreadyHasHeapInstalled] if this is an additional attempt to add a heap to the process
+    pub(super) fn install_user_heap(&self, heap: MemRegion) -> Result<(), HeapError> {
+        let mut sched = self.sched.lock();
+        let current_thread = percpu::current_thread();
+        let current_process = sched
+            .threads
+            .process_handle_of(current_thread)
+            .expect("should not be called on a kernel thread");
+        let pcb = sched.processes.pcb_mut(current_process);
+        if !matches!(pcb.state, State::Alive(_)) {
+            drop(sched);
+            drop(heap);
+            return Err(HeapError::ProcessNotInAliveState);
+        }
+        if let Err(memregion) = pcb.mem_map.add_heap(heap) {
+            drop(sched);
+            drop(memregion);
+            return Err(HeapError::ProcessAlreadyHasHeapInstalled);
+        };
+        // Re-arm PMP with the new heap region added
+        let user_context = sched
+            .threads
+            .tcbs
+            .get(current_thread)
+            .expect("thread handle should not be stale")
+            .user
+            .as_ref()
+            .expect("should not run on a kernel thread");
+        let pmp_config = sched
+            .processes
+            .mem_map(current_process)
+            .to_pmp(&user_context.stack);
+        pmp_config.activate();
+        Ok(())
     }
 }

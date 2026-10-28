@@ -5,17 +5,26 @@
 //! We take inspiration from the RISCV SBI approach on syscall responses:
 //!  `a0` holds 0 on success or a syscall error code on failure
 //!  `a1` holds the value on success or zero on error
+//!  `a2` for some calls this holds an additional return value on success or zero on error.
 //!
 //! Also holds
-//! - a module of decoded special keys for console
+//! - Error codes
+//! - File descriptor common values
+//! - the maximum heap size
 //! - common ASCII codes
 
 #![no_std]
 
 pub mod syscall {
+    /// Exit the user process, exiting all threads and releasing all resources
     pub const EXIT: usize = 0;
+    /// Read from the given file descriptor
     pub const READ: usize = 1;
+    /// Write to the given file descriptor
     pub const WRITE: usize = 2;
+    /// Request memory from the kernel for the entire process; must only be called once before the first allocation.
+    /// The kernel allocator will round up to a suitable region and return the base address in `a1` and the region size in `a2`.
+    pub const ALLOC: usize = 3;
 
     // Test-only syscalls live at 100+ so real syscall growth never
     // collides. The kernel only wires them up in test builds; a
@@ -44,6 +53,12 @@ pub enum Error {
     WriteZero = 4,
     /// Syscall refused
     Interrupted = 5,
+    /// The process already has a heap (second call)
+    HeapAlreadyAllocated = 6,
+    /// The requested size is zero or over the maximum
+    HeapSizeNotSupported = 7,
+    /// Not enough memory to satisfy the heap request
+    NotEnoughHeapMemory = 8,
 }
 /// Convert an error number into the Error enum.
 ///
@@ -58,6 +73,9 @@ impl TryFrom<usize> for Error {
             v if v == Error::BadFd as usize => Ok(Error::BadFd),
             v if v == Error::WriteZero as usize => Ok(Error::WriteZero),
             v if v == Error::Interrupted as usize => Ok(Error::Interrupted),
+            v if v == Error::HeapAlreadyAllocated as usize => Ok(Error::HeapAlreadyAllocated),
+            v if v == Error::HeapSizeNotSupported as usize => Ok(Error::HeapSizeNotSupported),
+            v if v == Error::NotEnoughHeapMemory as usize => Ok(Error::NotEnoughHeapMemory),
             _ => Err(value),
         }
     }
@@ -68,6 +86,9 @@ impl From<Error> for usize {
         value as usize
     }
 }
+
+/// A user program can request at most 4MiB of heap
+pub const MAX_HEAP_SIZE: usize = 4 * 1024 * 1024;
 
 // ASCII chars that are used for console and serial control
 pub mod ascii {

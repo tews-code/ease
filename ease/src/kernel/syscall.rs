@@ -2,10 +2,12 @@
 
 use crate::arch::{trap, umode};
 use crate::drivers::uart;
+use crate::kernel::alloc;
 use crate::kernel::console_input;
 use crate::kernel::validate::{Untrusted, Validate};
 use crate::kernel::{self, fd, interrupts};
-use crate::sched::{self, process::SyscallContext, thread, usermem};
+use crate::sched::process::{self, SyscallContext};
+use crate::sched::{self, thread, usermem};
 use ease_abi::syscall;
 #[cfg(feature = "profile")]
 use ease_macros::profile;
@@ -29,7 +31,7 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             umode::EcallResult::Diverted
         }
-        syscall::READ | syscall::WRITE => {
+        syscall::READ | syscall::WRITE | syscall::ALLOC => {
             kernel::trap::divert_work_to_kernel(
                 frame,
                 frame.mepc + 4,
@@ -55,6 +57,7 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
         }
     }
 }
+
 /// Handles diverted system calls for user threads that were not immediately handled,
 /// e.g. as they may block, or take a scheduler lock.
 ///
@@ -72,6 +75,7 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
             match syscall {
                 syscall::READ => read(frame),
                 syscall::WRITE => write(frame),
+                syscall::ALLOC => alloc(frame),
                 // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
                 // discipline. The guard lives in an inner scope: on Err(Interrupted)
                 // we leave the scope by normal control flow, the guard drops (mutex
@@ -85,6 +89,7 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
     }
 }
 
+/// Read from given file descriptor into the provided buffer
 fn read(frame: &mut trap::Frame) {
     // READ holds nothing across its waits, so exit-on-the-spot is legal here
     sched::exit_user_thread_if_needs_exit();
@@ -139,6 +144,7 @@ fn read(frame: &mut trap::Frame) {
     }
 }
 
+/// Write from the given buffer to the given file descriptor
 fn write(frame: &mut trap::Frame) {
     // No wait loop, so no need to call [sched::exit_user_thread_if_needs_exit].
     // Get the (untrusted) file descriptor from the frame
@@ -189,6 +195,61 @@ fn write(frame: &mut trap::Frame) {
         frame.a0 = ease_abi::Error::BadBuffer.into();
         frame.a1 = 0;
     }
+}
+
+impl From<alloc::Error> for ease_abi::Error {
+    fn from(value: alloc::Error) -> Self {
+        match value {
+            alloc::Error::NotEnoughMemory => ease_abi::Error::NotEnoughHeapMemory,
+            alloc::Error::HeapSizeNotSupported => ease_abi::Error::HeapSizeNotSupported,
+        }
+    }
+}
+
+impl From<process::HeapError> for ease_abi::Error {
+    fn from(value: process::HeapError) -> Self {
+        match value {
+            process::HeapError::ProcessNotInAliveState => ease_abi::Error::Interrupted,
+            process::HeapError::ProcessAlreadyHasHeapInstalled => {
+                ease_abi::Error::HeapAlreadyAllocated
+            }
+        }
+    }
+}
+
+/// Allocate heap memory for a user process.
+///
+/// A process gets at most one heap; additional requests are refused
+fn alloc(frame: &mut trap::Frame) {
+    // Nothing is held yet, so exiting is safe
+    sched::exit_user_thread_if_needs_exit();
+    match try_alloc(Untrusted::new(frame.a0)) {
+        Ok((base, size)) => {
+            frame.a0 = 0;
+            frame.a1 = base;
+            frame.a2 = size;
+        }
+        Err(e) => {
+            frame.a0 = e.into();
+            frame.a1 = 0;
+            frame.a2 = 0;
+        }
+    }
+}
+
+/// Allocate heap memory for a user process.
+///
+/// A process gets at most one heap; additional requests are refused
+fn try_alloc(size: Untrusted<usize>) -> Result<(usize, usize), ease_abi::Error> {
+    // Validate the untrusted size and convert to an order
+    let order = usermem::ValidOrder::validate(size)?;
+    // Allocate outside of a lock
+    let heap = usermem::Map::allocate_heap(order)?;
+    let base = heap.base_addr();
+    let size = heap.size();
+    // Install the heap into the user mem map
+    sched::install_user_heap(heap)?;
+    Ok((base, size))
 }
 
 #[cfg(all(test, feature = "test-sched"))]
