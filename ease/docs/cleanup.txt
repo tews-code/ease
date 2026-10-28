@@ -38,9 +38,11 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     - Only wrap values where a missed check becomes a panic or memory bug.
 
 [ ] Remove the test-only TEST_MUTEX_BLOCK syscall (ease-abi = 100,
-    syscall.rs dispatch arm + test_mutex_block, user.rs user_mutex_block
-    and its image entry, test_support TEST_MUTEX / TEST_MUTEX_SIGNAL).
-    - It backs the boundary-kill test in sched/tests.rs (~line 2933):
+    kernel/syscall.rs: both TEST_MUTEX_BLOCK arms (~lines 42, 81) +
+    test_mutex_block; programs/test_programs.rs user_mutex_block and
+    its "user_mutex_block" table entry; test_support TEST_MUTEX /
+    TEST_MUTEX_SIGNAL). Locations refreshed 2026-10-28.
+    - It backs the boundary-kill test in sched/tests.rs (~line 3276):
       a user thread fault-killed while holding a kernel Mutex across an
       interruptible wait must drop the guard before exiting.
     - Don't lose that coverage: move the test onto a real syscall that
