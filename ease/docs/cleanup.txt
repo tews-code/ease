@@ -142,3 +142,11 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     1 KB ring by design. Fix: have print_report wait for ring space
     (as WRITE's blocking path does) or flush() between lines, so a
     diagnostic report is never silently truncated.
+
+[ ] The thread-trace dump panics inside the panic path: trace.rs:521
+    unwraps per_cpu[h].current_thread_handle, which is None on a hart
+    that has no current thread yet, so a kernel panic's trace ends in a
+    second panic ("called Option::unwrap() on a None value") and the
+    table is lost. Seen 2026-10-29 after a userloader assert at 47 ms.
+    Fix: treat a None handle as "not on this hart" (map/is_some_and)
+    rather than unwrapping; audit the other per_cpu reads in the dump.
