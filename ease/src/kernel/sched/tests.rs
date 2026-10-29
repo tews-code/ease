@@ -3261,6 +3261,29 @@ fn alloc_syscall_heap_overrun_faults() {
     }
 }
 
+// USER HEAP end to end through ease-ulib: heap-probe calls heap_init (ALLOC
+// rounds 4095 up to a 4 KB NAPOT heap), grows a Vec one push at a time so
+// the global allocator reallocates and frees through the free list, checks
+// the sum, frees it and boxes a value from the reused heap. Any failure
+// panics in the probe, which ulib's handler reports as USER PANIC.
+#[test_case]
+fn ulib_heap_backs_vec_and_box() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("heap-probe"), "heap probe never exited");
+    #[cfg(feature = "test-io")]
+    {
+        assert!(
+            !crate::io::test_io::contains("USER PANIC"),
+            "heap probe panicked (see USER PANIC on the console)"
+        );
+        assert!(
+            crate::io::test_io::contains("HEAP OK\n"),
+            "heap probe did not print HEAP OK"
+        );
+    }
+}
+
 // READ blocking path from U-mode: user_read_split_probe must block on fd 0
 // until input arrives, then two 4-byte READs over 6 injected bytes must
 // return 4 then 2, with nothing lost in between.

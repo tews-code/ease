@@ -97,6 +97,14 @@ pub(super) const PROGRAMS: &[Program] = &[
             "flood-probe.bin"
         ))),
     },
+    Program {
+        name: "heap-probe",
+        image: Image::Blob(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../ease-user/target/riscv32imac-unknown-none-elf/debug/",
+            "heap-probe.bin"
+        ))),
+    },
 ];
 
 /// Echos character read from std in until `x` at which point it quits
