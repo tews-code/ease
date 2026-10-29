@@ -78,10 +78,14 @@
 // 0x8001_0024/ +-----------+
 // __heap_end
 
+use crate::sync::SpinLock;
+#[cfg(target_arch = "riscv32")]
+use crate::syscall;
+use core::alloc::GlobalAlloc;
 #[cfg(test)]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-
-use crate::sync::SpinLock;
+#[cfg(target_arch = "riscv32")]
+use ease_abi::Error;
 
 pub(super) fn align_up(addr: usize, align: usize) -> Option<usize> {
     debug_assert!(align.is_power_of_two());
@@ -114,6 +118,28 @@ pub(crate) static DEALLOCATED_BYTES: AtomicU32 = AtomicU32::new(0);
 pub(crate) static PADDING_BYTES: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 pub(crate) static HEAP_TOP: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_arch = "riscv32")]
+#[global_allocator]
+static ALLOCATOR: FreeBlockList = FreeBlockList::new();
+
+/// Initialise the heap for a process
+///
+/// `size` is the requested size in bytes.
+#[cfg(target_arch = "riscv32")]
+pub fn heap_init(size: usize) -> Result<usize, Error> {
+    let region = syscall::request_heap(size)?;
+    let base = core::ptr::with_exposed_provenance_mut::<u8>(region.base.get());
+    // Safety: The region has just been created by the kernel buddy allocator.
+    // the region is valid for reads and writes for the entire lifetime of the allocator.
+    // The region is exclusively owned by this allocator.
+    // start is NAPOT aligned to minimum 512 bytes, so aligned to align_of::<FreeBlock>().
+    // size is at least 512 bytes which is >= size_of::<FreeBlock>().
+    unsafe {
+        ALLOCATOR.init(base, region.size.get());
+    }
+    Ok(region.size.get())
+}
 
 // Each freed memory block has a size and a link to the next free block
 pub(crate) struct FreeBlock {
@@ -168,9 +194,7 @@ impl FreeBlock {
 // Safety: Free Block only references heap memory and holds no thread-local data, so Send
 unsafe impl Send for FreeBlock {}
 
-// Protect the list with the kernel's allocator lock. On the kernel target
-// this is `IrqSpinLock` (disables interrupts in the critical section); on
-// host builds it is a plain `SpinLock`.
+// Protect the list with an allocator SpinLock.
 pub struct FreeBlockList {
     pub(crate) sentinel: SpinLock<FreeBlock>,
 }
@@ -232,7 +256,9 @@ impl FreeBlockList {
         sentinel_guard.next = new;
         sentinel_guard.size = 0;
     }
+}
 
+unsafe impl GlobalAlloc for FreeBlockList {
     //   FREE_BLOCK_LIST.sentinel | alloc  | free_block |  alloc  | (de)alloc | alloc | free_block |
     //            .size: 0                 ^     .size                                ^    .size
     //            .next -------------------+     .next -------------------------------+    .next: None
@@ -439,6 +465,7 @@ impl FreeBlockList {
 #[cfg(all(test, not(target_os = "none")))]
 mod host_tests {
     use super::*;
+    use core::alloc::GlobalAlloc;
     use core::alloc::Layout;
 
     /// Owns a chunk of host memory that the test allocator treats as the heap.

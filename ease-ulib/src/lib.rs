@@ -4,6 +4,8 @@
 
 pub use ease_abi::ascii;
 pub use ease_abi::fds;
+#[cfg(target_arch = "riscv32")]
+pub use heap::heap_init;
 
 mod heap;
 mod sync;

@@ -46,6 +46,7 @@ impl<T> SpinLock<T> {
         SpinLockGuard { lock: self }
     }
 
+    #[expect(dead_code)]
     pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
         // Only attempt CAS
         // We use full compare_exchange to avoid spurious lack of locking. This costs a rarely used branch,

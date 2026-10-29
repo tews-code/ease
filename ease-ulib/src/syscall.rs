@@ -52,12 +52,12 @@ pub fn exit() -> ! {
 
 /// Memory region
 pub struct Region {
-    base: NonZeroUsize,
-    size: NonZeroUsize,
+    pub base: NonZeroUsize,
+    pub size: NonZeroUsize,
 }
 
 /// Request heap memory from the kernel
-fn request_heap(size: usize) -> Result<Region, Error> {
+pub(crate) fn request_heap(size: usize) -> Result<Region, Error> {
     let (base, size) = ecall1_ret2(syscall::ALLOC, size)?;
     Ok(Region {
         base: NonZeroUsize::try_from(base)
