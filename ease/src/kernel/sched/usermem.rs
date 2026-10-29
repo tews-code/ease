@@ -327,17 +327,6 @@ impl Map {
         }
     }
 
-    /// Attempts to add required memory regions to a memory map for a user process.
-    ///
-    /// # Errors
-    /// Returns [alloc::Error::NotEnoughMemory] if the allocation fails.
-    pub(crate) fn try_for_process(&mut self) -> Result<(), alloc::Error> {
-        self.add_region(Role::Text, crate::Order::KB8)?;
-        self.add_region(Role::Data, crate::Order::KB2)?;
-        self.add_region(Role::Bss, crate::Order::KB2)?;
-        Ok(())
-    }
-
     /// Derive a PMP set from a Map for a specific thread
     ///
     /// Iterates through the program's Map segments and uses
@@ -371,9 +360,11 @@ impl Map {
 
 // `validate` is the kernel's only defence against confused-deputy syscalls:
 // a user buffer that reaches outside the process's own regions, or that asks
-// the kernel to write where the user may only read. The map is the real
-// process layout (linker-fixed text/data/bss) plus a heap-allocated stack, so
-// these exercise the same regions a syscall would see.
+// the kernel to write where the user may only read. The map has the real
+// process regions (linker-fixed text/data/bss bases) plus a heap-allocated
+// stack, so these exercise the same regions a syscall would see. The sizes are
+// the test's own: the loader sizes a real map from its load plan, and every
+// test here reads its bounds back from the map rather than assuming them.
 #[cfg(all(test, feature = "test-sched"))]
 mod test {
     use super::{Map, Role, Transfer, UserBuf};
@@ -381,7 +372,14 @@ mod test {
 
     fn process_map() -> (Map, MemRegion) {
         let mut map = Map::new();
-        map.try_for_process().expect("process map should allocate");
+        for (role, order) in [
+            (Role::Text, Order::KB8),
+            (Role::Data, Order::KB2),
+            (Role::Bss, Order::KB2),
+        ] {
+            map.add_region(role, order)
+                .expect("process map should allocate");
+        }
         let stack = MemRegion::from_heap(Pool::UserPd0, Order::KB1).expect("stack should allocate");
         (map, stack)
     }

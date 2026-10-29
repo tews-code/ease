@@ -5,6 +5,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::Order;
 use crate::arch;
 use crate::kernel::alloc;
 use crate::kernel::sched::usermem;
@@ -195,6 +196,7 @@ impl Plan {
         }
     }
 }
+
 /// Loads a user program binary into memory
 ///
 /// Returns the loaded image with the user memory map and entry point.
@@ -207,7 +209,10 @@ pub(crate) fn load_user_image(image: programs::Image) -> Result<LoadedImage, Err
     let load_plan = Plan::from_image(image)?;
     // Create the user memory map for this program
     let mut user_mem_map = usermem::Map::new();
-    user_mem_map.try_for_process()?;
+    // Set up the user memory map
+    user_mem_map.add_region(usermem::Role::Text, Order::try_from(load_plan.text.size)?)?;
+    user_mem_map.add_region(usermem::Role::Data, Order::try_from(load_plan.data.size)?)?;
+    user_mem_map.add_region(usermem::Role::Bss, Order::try_from(load_plan.bss.size)?)?;
     // Now load from the load plan source into the user memory map destination
     load_plan.copy_user_image(&user_mem_map);
     // Set the user entry address

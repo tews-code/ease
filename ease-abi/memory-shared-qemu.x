@@ -11,7 +11,7 @@
  */
 
 __user_text_origin = 0x81400000;
-__user_text_size = 8K;
+__user_text_size = 16K;
 
 __user_data_origin = __user_text_origin + __user_text_size;
 __user_data_size = 2K;
