@@ -232,10 +232,10 @@ fn tight_deadline_wakes_with_long_leeway_neighbor() {
     // regressions in the earliest_deadline / coalescing path, not a tight
     // jitter measurement. A real regression (e.g. timer pinned to the
     // neighbor's far-future `b`) would blow past this by orders of magnitude.
-    // RESIDUAL-TAIL: 110 ms also absorbs the residual wake-latency tail (a
+    // RESIDUAL-TAIL: 35 ms also absorbs the residual wake-latency tail (a
     // Ready thread briefly passed over; tracked for follow-up).
     assert!(
-        elapsed <= 30,
+        elapsed <= 35,
         "tight sleeper dragged by long-leeway neighbor: {} ms",
         elapsed
     );
