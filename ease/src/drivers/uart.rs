@@ -192,20 +192,20 @@ fn tx_fill_fifo(consumer: &mut spsc::Consumer<'static, u8, { queue::TX_LEN }>) {
         return; // We don't wait for the FIFO buffer to clear, return and wait for another interrupt
     }
     let mut sent = 0;
-    while sent < uart::FIFO_SIZE
-        && let Some(byte) = consumer.pop()
-    {
-        mmio::write8(uart::BASE, THR, byte);
-        sent += 1;
-    }
-    // Check for empty queue, in which case we want to stop the interrupt
-    if queue::TX.is_empty() {
-        THRE_interrupt_disable();
-        mmio::fence_mmio_write_to_mem_read();
-        // Recheck in case of last push
-        if !queue::TX.is_empty() {
-            // OK, more bytes so reenable
-            THRE_interrupt_enable();
+    while sent < uart::FIFO_SIZE {
+        if let Some(byte) = consumer.pop() {
+            mmio::write8(uart::BASE, THR, byte);
+            sent += 1;
+        } else {
+            // Queue is empty, re-set everything
+            THRE_interrupt_disable();
+            mmio::fence_mmio_write_to_mem_read();
+            // Recheck in case of last push
+            if !queue::TX.is_empty() {
+                // OK, more bytes so reenable
+                THRE_interrupt_enable();
+            }
+            break;
         }
     }
 }
@@ -797,6 +797,105 @@ mod tests {
         assert!(
             !test_io::contains("Lost bytes"),
             "paced cross-hart producer dropped bytes: the drain stalled behind a masked THRE"
+        );
+    }
+
+    // REGRESSION GUARD for the stranded-byte stall (2026-11-11). After the
+    // last byte goes out the handler is entered once more with the ring
+    // empty: reading IIR has already cleared the THRE interrupt, and that
+    // pass writes nothing to the UART. A byte pushed from the other hart
+    // during that pass finds THRE already unmasked, so its unmask raises
+    // nothing; if the handler then leaves THRE unmasked because the ring
+    // is "not empty", no interrupt is left to drain it and all later
+    // output queues behind it.
+    //
+    // The empty pass only happens when a byte arrives while the handler is
+    // still sending the one before it: the handler takes both, masks, and
+    // the writer's unmask for the second byte then raises an interrupt
+    // with nothing left to send. A third byte pushed during that pass is
+    // the one that strands. So the producer on hart 1 writes single bytes
+    // in a steady rhythm, as a user program printing one character per
+    // syscall does, sweeping the gap between pushes from back-to-back up
+    // to GAP_MAX so some triples line up with the handler. Bursts are
+    // short enough that the ring cannot fill, and after each one the ring
+    // must drain within 500 ms. NUL bytes keep the console quiet.
+    #[test_case]
+    fn uart_single_bytes_pushed_as_ring_empties_never_strand() {
+        use crate::arch::csr::rdcycles;
+        use crate::kernel::timer::elapsed_ms;
+        const BURSTS: usize = 8_000;
+        const BURST_LEN: usize = 32;
+        const GAP_MAX: u64 = 2_000;
+        const STALL_MS: u64 = 500;
+        const RUNNING: usize = 0;
+        const FINISHED: usize = 1;
+        const STALLED: usize = 2;
+        static STATE: AtomicUsize = AtomicUsize::new(RUNNING);
+        static STALL_BURST: AtomicUsize = AtomicUsize::new(0);
+        static STALL_GAP: AtomicUsize = AtomicUsize::new(0);
+        STATE.store(RUNNING, Ordering::Relaxed);
+        assert!(wait_drained(500), "ring never idle before test");
+
+        fn producer() {
+            for burst in 0..BURSTS {
+                // One gap per burst, spread evenly over 0..GAP_MAX by a
+                // multiplicative hash of the burst number
+                let gap = ((burst as u64).wrapping_mul(0x9E37_79B1) & 0xffff) * GAP_MAX / 0x1_0000;
+                for _ in 0..BURST_LEN {
+                    let pushed_at = rdcycles();
+                    with_uart_writer(|writer| writer.write_bytes(&[0]));
+                    while rdcycles() - pushed_at < gap {
+                        core::hint::spin_loop();
+                    }
+                }
+                let start = elapsed_ms();
+                while !queue::TX.is_empty() {
+                    if elapsed_ms() - start > STALL_MS {
+                        STALL_BURST.store(burst, Ordering::Relaxed);
+                        STALL_GAP.store(gap as usize, Ordering::Relaxed);
+                        STATE.store(STALLED, Ordering::Release);
+                        return;
+                    }
+                    core::hint::spin_loop();
+                }
+            }
+            STATE.store(FINISHED, Ordering::Release);
+        }
+        Builder::new()
+            .with_stack_class(Order::KB4)
+            .with_affinity(1)
+            .spawn(producer)
+            .expect("producer should spawn");
+
+        let mut waited = 0;
+        while STATE.load(Ordering::Acquire) == RUNNING && waited < 30_000 {
+            sched::sleep(10);
+            waited += 10;
+        }
+        let state = STATE.load(Ordering::Acquire);
+        let left = queue::TX.len();
+        let masked = thre_masked();
+        if state == STALLED {
+            // Kick the drain back to life before failing: a masked-to-unmasked
+            // transition re-raises THRE, and without it the failure message
+            // itself would queue behind the stranded byte.
+            THRE_interrupt_disable();
+            THRE_interrupt_enable();
+        }
+        assert!(
+            state != STALLED,
+            "byte stranded in the TX ring in burst {} (gap {} cycles): {} bytes left, THRE masked = {}",
+            STALL_BURST.load(Ordering::Relaxed),
+            STALL_GAP.load(Ordering::Relaxed),
+            left,
+            masked
+        );
+        assert!(state == FINISHED, "single-byte producer never finished");
+        assert!(
+            wait_drained(500),
+            "output not fully drained after the last byte: {} bytes left, THRE masked = {}",
+            queue::TX.len(),
+            thre_masked()
         );
     }
 
