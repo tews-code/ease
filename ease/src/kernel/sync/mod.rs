@@ -15,6 +15,7 @@ mod spinlock;
 mod staticcell;
 #[cfg(all(test, not(target_os = "none")))]
 pub mod tests;
+#[cfg(target_os = "none")]
 mod waitqueue;
 
 #[cfg(target_os = "none")]
@@ -30,6 +31,7 @@ pub use mutex::Mutex;
 pub use spinlock::{IrqSpinLock, IrqSpinLockGuard, SpinLock, SpinLockGuard, TryLock};
 #[allow(unused_imports)]
 pub(crate) use staticcell::StaticCell;
+#[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub(crate) use waitqueue::WaitQueue;
 

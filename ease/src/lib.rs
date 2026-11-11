@@ -15,7 +15,11 @@
 //! currently supported because it tries to compile `main.rs` which contains
 //! RISC-V assembly that fails on the host.
 
+// The lib exists only as the host test build. Everywhere else (the RISC-V
+// build, clippy, docs, rust-analyzer with the RISC-V target) it is empty,
+// so shared kernel files belong to the binary crate alone.
 #![cfg_attr(not(test), no_std)]
+#![cfg(all(test, not(target_os = "none")))]
 #![warn(missing_docs)]
 
 // fs/volume.rs uses `alloc::vec::Vec`. The kernel binary gets `alloc`
@@ -59,19 +63,9 @@ macro_rules! dprintln {
 // linker symbols and inline assembly than we want to compile here), so
 // we provide a tiny stub with matching signatures. The stub is never
 // actually called from host code paths because `AllocatorLock` resolves
-// to `SpinLock` on host targets, but it makes `cargo doc` /
-// `cargo clippy` succeed when they build the lib crate for
-// `riscv32imac-unknown-none-elf`.
+// to `SpinLock` on host targets.
 #[allow(dead_code)]
 mod arch {
-    pub mod mmio {
-        pub fn read32(_base: usize, _offset: usize) -> usize {
-            0
-        }
-        // Stub
-        pub fn write32(_base: usize, _offset: usize, _bits: u32) {}
-    }
-
     pub mod regs {
         pub fn sp() -> usize {
             0
@@ -87,26 +81,11 @@ mod arch {
         #[cfg(feature = "irqsoff")]
         #[inline]
         pub fn restore_at(_prev: usize, _site: &'static core::panic::Location<'static>) {}
-        #[inline]
-        pub fn enabled() -> bool {
-            false
-        }
     }
     pub mod csr {
         #[inline]
         pub fn rdcycles() -> u64 {
             0
-        }
-        pub mod mie {
-            pub const MSIE: usize = 0;
-            #[inline]
-            pub fn enable_bits(_bits: usize) {}
-        }
-        pub mod mstatus {
-            #[inline]
-            pub fn read() -> usize {
-                0
-            }
         }
     }
 
@@ -166,13 +145,6 @@ mod drivers {
             }
         }
     }
-
-    #[allow(dead_code)]
-    pub mod uart {
-        pub fn direct_write_byte(_byte: u8) {
-            panic!("uart::direct_write_byte stub: must not be called from the lib crate")
-        }
-    }
 }
 
 // Pull just the host-compatible pieces of the kernel module tree into
@@ -203,17 +175,6 @@ mod kernel {
         }
         pub fn lock_released(_site: &'static core::panic::Location<'static>, _acquired: u64) {}
     }
-    pub mod percpu {
-        pub fn current_thread() -> super::sched::thread::Handle {
-            super::sched::thread::Handle { idx: 0 }
-        }
-
-        pub fn set_needs_reschedule() {}
-
-        pub fn current_thread_idx() -> usize {
-            0
-        }
-    }
     pub mod profile;
     pub mod sync;
     pub mod timer {
@@ -221,10 +182,6 @@ mod kernel {
         // crate's timer module; this satisfies the type checker for the
         // lib build.
         pub const CYCLES_PER_US: u64 = 1;
-
-        pub fn elapsed_ms() -> u64 {
-            panic!("timer stub: must not be called from the lib crate")
-        }
 
         pub fn elapsed() -> u64 {
             panic!("timer stub: must not be called from the lib crate")
@@ -235,108 +192,6 @@ mod kernel {
     pub mod sched {
         pub mod process {
             pub const MAX_COUNT: usize = 14;
-        }
-
-        pub mod thread {
-            pub const MAX_COUNT: usize = 16;
-
-            #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-            pub struct Handle {
-                pub idx: usize,
-            }
-
-            impl Handle {
-                pub fn idx(&self) -> usize {
-                    self.idx
-                }
-            }
-        }
-
-        /// The deadline struct
-        #[derive(Clone, Copy)]
-        pub(crate) struct Deadline;
-
-        impl Deadline {
-            pub(crate) fn has_passed(&self) -> bool {
-                panic!("sched stub: must not be called from the lib crate");
-            }
-
-            /// New deadline with leeway from millisecond values
-            pub(crate) fn from_ms(_deadline_ms: u64, _leeway_ms: u64) -> Self {
-                Self
-            }
-
-            /// New deadline after a duration in milliseconds, using system leeway
-            pub(crate) fn after_ms_with_system_leeway(_duration_ms: u64, _qos: Qos) -> Self {
-                Self
-            }
-        }
-
-        /// The thread quality of service
-        #[derive(Clone, Copy)]
-        pub(crate) enum Qos {
-            High,
-            Low,
-        }
-
-        /// Get the current thread's QoS
-        pub fn current_qos() -> Qos {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn current_thread() -> thread::Handle {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn set_next_waiter(_handle: thread::Handle, _next: Option<thread::Handle>) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn get_next_waiter(_thread: thread::Handle) -> Option<thread::Handle> {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn park() {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn park_if_blocked() {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn unpark(_handle: thread::Handle) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn unpark_by_index(_idx: usize) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn set_self_blocked() {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        pub fn set_self_blocked_until(_deadline: Deadline) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-        /// Park this thread in blocked state with wakeup deadline
-        pub fn park_if_blocked_until(_deadline: Deadline) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        /// Park this thread in blocked state with wakeup deadline
-        pub fn set_needs_wakeup(_idx: usize) {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        /// Checks if the current thread has the flag indicating the user thread must exit
-        pub(crate) fn current_user_thread_needs_exit() -> bool {
-            panic!("sched stub: must not be called from the lib crate");
-        }
-
-        /// Sets the current thread to Running state
-        pub(crate) fn set_self_running() {
-            panic!("sched stub: must not be called from the lib crate");
         }
     }
 

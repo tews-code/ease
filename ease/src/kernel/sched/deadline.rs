@@ -22,8 +22,10 @@ const LEEWAY_MAX_CYCLES: u64 = LEEWAY_MAX_US * timer::CYCLES_PER_US;
 ///
 /// The leeway can be set by the caller or calculated by the system
 /// based on the thread's QoS.
-/// - [Deadline::from_ms(deadline_ms, leeway_ms)]
-/// - [Deadline::from_ms_with_system_leeway(deadline_ms)]
+/// - [Deadline::from_ms] for an absolute deadline and absolute leeway
+/// - [Deadline::from_ms_with_system_leeway] for an absolute deadline with leeway calculated using the QoS
+/// - [Deadline::after_ms] for a deadline some duration and after the current time
+/// - [Deadline::after_ms_with_system_leeway] for a deadline after the current time and leeway calculated using the QoS
 ///
 /// Note that
 /// - deadlines can be missed by milliseconds due to scheduler activity.
