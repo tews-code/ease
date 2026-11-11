@@ -238,10 +238,13 @@ pub fn set_self_blocked() {
     SCHEDULER.set_self_blocked()
 }
 
+// PARK WITH TIMEOUT
+
 /// Set this thread to blocked state, with a wakeup `Deadline`
 pub fn set_self_blocked_until(deadline: Deadline) {
     SCHEDULER.set_self_blocked_until(deadline);
 }
+
 /// Park this thread in blocked state with wake up `Deadline`
 pub fn park_if_blocked_until(deadline: Deadline) {
     SCHEDULER.park_if_blocked_until(deadline);
@@ -332,4 +335,11 @@ pub fn clear_wakeup_signal(handle: thread::Handle) {
 #[cfg(feature = "paint-stack")]
 pub fn stacks() {
     SCHEDULER.stacks();
+}
+
+// QoS
+
+/// Get the current thread's QoS
+pub fn current_qos() -> Qos {
+    SCHEDULER.current_qos()
 }

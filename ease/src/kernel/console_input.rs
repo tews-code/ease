@@ -70,3 +70,37 @@ pub(crate) fn wait_and_read_interruptible(buf: &mut [u8]) -> Result<usize, Inter
     })?;
     Ok(bytes_read)
 }
+
+/// Provides user thread access to a wait queue on the input sources with a timeout in milliseconds.
+/// The sources are always drained in the order:
+/// 1. UART first until fully drained
+/// 2. Keyboard second until fully drained.
+///
+/// Returns the number of bytes received on success. This will be zero on a timeout.
+///
+/// # Errors
+/// Returns [Interrupted] if the user thread's process is being torn down while this thread
+/// was sleeping
+pub(crate) fn wait_and_read_interruptible_until(
+    buf: &mut [u8],
+    timeout: u32,
+) -> Result<usize, Interrupted> {
+    if buf.is_empty() {
+        return Ok(0);
+    }
+    let mut bytes_read: usize = 0;
+    // Block until any of the READER sources queues have bytes available
+    AVAIL.wait_with_interruptible_until(
+        &READER,
+        |reader| {
+            // We try the UART and drain all
+            bytes_read = reader.uart.read_bytes(buf);
+            // Now try the console keyboard and drain all
+            bytes_read += reader.keyboard.read_bytes(&mut buf[bytes_read..]);
+            // Confirm we got some bytes
+            bytes_read > 0
+        },
+        timeout,
+    )?;
+    Ok(bytes_read)
+}

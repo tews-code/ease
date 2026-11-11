@@ -11,9 +11,20 @@ pub fn put_char(ch: u8) -> Result<(), Error> {
 }
 
 /// Fill a user slice buffer from the file descriptor `fd`.
+///
+/// Takes a timeout parameter in milliseconds. If this is set to `0`,
+/// the function returns immediately. If it is set to `u32::MAX` there
+/// is no timeout and the thread blocks until it has read at least one byte.
+///
 /// Returns the number of bytes received.
-pub fn read(fd: usize, buf: &mut [u8]) -> Result<usize, Error> {
-    ecall3(syscall::READ, fd, buf.as_mut_ptr().addr(), buf.len())
+pub fn read(fd: usize, buf: &mut [u8], timeout: u32) -> Result<usize, Error> {
+    ecall4(
+        syscall::READ,
+        fd,
+        buf.as_mut_ptr().addr(),
+        buf.len(),
+        timeout as usize,
+    )
 }
 
 /// Write a buffer from a user slice to file descriptor `fd`.
@@ -133,6 +144,37 @@ fn ecall3(syscall: usize, arg0: usize, arg1: usize, arg2: usize) -> Result<usize
         Err(Error::try_from(error).expect("kernel returned an unknown error code"))
     }
 }
+
+/// Common syscall asm and error decoded for four-argument syscalls
+///
+/// Returns `Ok(usize)` on success or an `Error` on failure.
+fn ecall4(
+    syscall: usize,
+    arg0: usize,
+    arg1: usize,
+    arg2: usize,
+    arg3: usize,
+) -> Result<usize, Error> {
+    let error: usize;
+    let value: usize;
+    unsafe {
+        asm!(
+            "ecall",
+             clobber_abi("C"),
+             inout("a0") arg0 => error,
+             inout("a1") arg1 => value,
+             in("a2") arg2,
+             in("a3") arg3,
+             in("a7") syscall,
+        );
+    }
+    if error == 0 {
+        Ok(value)
+    } else {
+        Err(Error::try_from(error).expect("kernel returned an unknown error code"))
+    }
+}
+
 unsafe extern "C" {
     /// Common "main" exported by all user programs
     /// This is picked up by _start and run once, followed by exit.

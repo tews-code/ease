@@ -252,6 +252,7 @@ mod kernel {
             }
         }
 
+        /// The deadline struct
         #[derive(Clone, Copy)]
         pub(crate) struct Deadline;
 
@@ -259,6 +260,28 @@ mod kernel {
             pub(crate) fn has_passed(&self) -> bool {
                 panic!("sched stub: must not be called from the lib crate");
             }
+
+            /// New deadline with leeway from millisecond values
+            pub(crate) fn from_ms(_deadline_ms: u64, _leeway_ms: u64) -> Self {
+                Self
+            }
+
+            /// New deadline after a duration in milliseconds, using system leeway
+            pub(crate) fn after_ms_with_system_leeway(_duration_ms: u64, _qos: Qos) -> Self {
+                Self
+            }
+        }
+
+        /// The thread quality of service
+        #[derive(Clone, Copy)]
+        pub(crate) enum Qos {
+            High,
+            Low,
+        }
+
+        /// Get the current thread's QoS
+        pub fn current_qos() -> Qos {
+            panic!("sched stub: must not be called from the lib crate");
         }
 
         pub fn current_thread() -> thread::Handle {

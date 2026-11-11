@@ -3015,9 +3015,9 @@ fn keyboard_keys_wake_read_as_bytes_and_escape_sequences() {
 
 // REGRESSION GUARD for the single trap-return path: a blocking syscall
 // hands back every register except its two results. The probe program
-// loads a distinctive value into s0-s11, t0-t6 and a3-a6, blocks in
-// READ on stdin (a2 and a7 carry READ's length and number, which must
-// also survive), and after the kernel injects a byte compares all 25 (see
+// loads a distinctive value into s0-s11, t0-t6 and a4-a6, blocks in
+// READ on stdin (a2, a3 and a7 carry READ's length, timeout and number,
+// which must also survive), and after the kernel injects a byte compares all 25 (see
 // test_programs::user_register_probe). REG OK on the console plus a clean exit
 // is the pass signal; any mismatch prints REG MISMATCH <bitmask> and
 // spins, so the drain timeout below is the failure. Before the syscall path went
@@ -3322,6 +3322,117 @@ fn read_syscall_blocks_then_splits_input_without_loss() {
             crate::io::test_io::contains("READ SPLIT OK"),
             "read split probe did not print READ SPLIT OK (wrong counts)"
         );
+    }
+}
+
+// READ timeout path from U-mode: with no input queued, user_read_timeout_probe
+// makes a zero-timeout READ (must return at once) and a 50 ms READ (must
+// return once the timeout has passed). Both must come back as success with
+// zero bytes. A probe that never exits means a timed READ slept past its
+// timeout.
+#[test_case]
+fn read_syscall_times_out_with_no_input() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(
+        run_to_exit("user_read_timeout_probe"),
+        "read timeout probe never exited: a timed READ blocked past its timeout"
+    );
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("READ TIMEOUT OK"),
+        "read timeout probe did not print READ TIMEOUT OK: a timed-out READ did not return (0, 0)"
+    );
+}
+
+// READ with a long timeout still returns as soon as input arrives:
+// user_read_timed_input_probe asks for 30 s, the test injects one byte once
+// the probe has parked, and the probe must exit having read exactly it.
+#[test_case]
+fn read_syscall_timed_read_returns_input_before_timeout() {
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    let handle = crate::kernel::sched::spawn_process("user_read_timed_input_probe")
+        .expect("timed input probe spawn should succeed");
+    // With no input queued, the timed READ must park the probe
+    crate::kernel::sched::sleep(50);
+    assert!(
+        process_alive(handle),
+        "timed input probe exited before any input: the timed READ did not block"
+    );
+    crate::drivers::uart::inject_rx(b"t");
+    let mut drained = false;
+    for _ in 0..200 {
+        if !process_alive(handle) {
+            drained = true;
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    assert!(
+        drained,
+        "timed input probe never exited: input did not wake the timed READ"
+    );
+    #[cfg(feature = "test-io")]
+    assert!(
+        crate::io::test_io::contains("READ TIMED INPUT OK"),
+        "timed input probe did not print READ TIMED INPUT OK: the READ did not return the one injected byte"
+    );
+}
+
+// A timed wait that gives up must hand the thread back in Running state.
+// The wait marks the thread BlockedUntil before it checks the condition, so
+// a timeout return that skips the reset leaves a running thread marked
+// blocked with a deadline already in the past, which the other hart's wake
+// pass can turn into Ready and run a second time. The waiter reads its own
+// state straight after the wait returns.
+#[test_case]
+fn timed_wait_timeout_returns_thread_in_running_state() {
+    use crate::kernel::percpu;
+    use crate::kernel::sync::{SpinLock, WaitQueue};
+    static WQ: WaitQueue = WaitQueue::new();
+    static R: SpinLock<u32> = SpinLock::new(0);
+    // 0 = still waiting, 1 = Running after the timeout, 2 = any other state,
+    // 3 = the wait did not report a timeout
+    static VERDICT: AtomicUsize = AtomicUsize::new(0);
+
+    fn waiter() {
+        let timed_out = matches!(
+            WQ.wait_with_interruptible_until(&R, |r| *r == 1, 20),
+            Ok(None)
+        );
+        let state = super::SCHEDULER
+            .sched
+            .lock()
+            .threads
+            .tcbs
+            .get(percpu::current_thread())
+            .map(|tcb| tcb.state);
+        let verdict = if !timed_out {
+            3
+        } else if state == Some(thread::State::Running) {
+            1
+        } else {
+            2
+        };
+        VERDICT.store(verdict, Ordering::Release);
+    }
+
+    crate::kernel::sched::Builder::new()
+        .with_stack_class(Order::KB4)
+        .spawn(waiter)
+        .expect("timed wait test thread spawn failed");
+    for _ in 0..100 {
+        if VERDICT.load(Ordering::Acquire) != 0 {
+            break;
+        }
+        crate::kernel::sched::sleep(10);
+    }
+    match VERDICT.load(Ordering::Acquire) {
+        1 => {}
+        0 => panic!("timed wait with a 20 ms timeout had not returned after 1 s"),
+        2 => panic!("timed wait returned on timeout with the thread not in Running state"),
+        _ => panic!("timed wait returned, but not as a timeout"),
     }
 }
 

@@ -44,7 +44,7 @@ Tick with [x] when done, or delete the line.
            that. DecodedKey and ease-abi special_key removed; fixes the
            >0xFF special-key truncation.
 
-[ ] User heap: a syscall that gives a process a fixed-size heap on
+[x] User heap: a syscall that gives a process a fixed-size heap on
     request, and the ease-ulib #[global_allocator] over it. Design
     agreed 2026-10-28:
       - Explicit setup: the program calls a ulib setup function with
@@ -87,10 +87,10 @@ Tick with [x] when done, or delete the line.
         base/size. Its lock must be an atomic spinlock (U-mode can't
         disable interrupts; threads share the heap).
     Steps:
-    [ ] 1. Kernel: the heap syscall (limits, pool choice, second-call
+    [x] 1. Kernel: the heap syscall (limits, pool choice, second-call
            error). Probe: ask for a heap, write it, check one past the
            end PMP-faults, check a second call errors.
-    [ ] 2. ease-ulib: allocator as #[global_allocator] + setup function.
+    [x] 2. ease-ulib: allocator as #[global_allocator] + setup function.
            Probe: set up a heap and use a Vec.
 
 [ ] Move the shell's line_editor and vt_parse to user space, on a user

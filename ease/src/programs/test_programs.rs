@@ -70,6 +70,14 @@ pub(super) const PROGRAMS: &[Program] = &[
         image: Image::Flash(user_read_split_probe),
     },
     Program {
+        name: "user_read_timeout_probe",
+        image: Image::Flash(user_read_timeout_probe),
+    },
+    Program {
+        name: "user_read_timed_input_probe",
+        image: Image::Flash(user_read_timed_input_probe),
+    },
+    Program {
         name: "user_alloc_probe",
         image: Image::Flash(user_alloc_probe),
     },
@@ -243,8 +251,10 @@ extern "C" fn probe_expected(i: usize) -> usize {
         0x7000_0000 + (i - 12) // t0..t6
     } else if i == 19 {
         REG_PROBE_READ_LEN // a2 carried READ's length argument
+    } else if i == 20 {
+        u32::MAX as usize // a3 carried READ's timeout argument: no timeout
     } else if i < 24 {
-        0x6000_0000 + (i - 19 + 2) // a3..a6
+        0x6000_0000 + (i - 19 + 2) // a4..a6
     } else {
         syscall::READ // a7 carried the syscall number
     }
@@ -254,12 +264,13 @@ extern "C" fn probe_expected(i: usize) -> usize {
 /// hand back every register except the two results.
 ///
 /// Loads a distinctive value into s0–s11 (callee-saved: the user ABI relies
-/// on these surviving) and into t0–t6 and a3–a6 (caller-saved: the full
+/// on these surviving) and into t0–t6 and a4–a6 (caller-saved: the full
 /// frame restore preserves them too), blocks in READ on stdin until the
 /// kernel test injects a byte, then dumps all 25 registers and compares.
-/// a0–a2 and a7 carry READ's arguments (a2 = [`REG_PROBE_READ_LEN`], read
-/// into a scratch byte in the probe's stack frame); a0 and a1 are the
-/// syscall's two results, while a2 and a7 must still come back unchanged. All match:
+/// a0–a3 and a7 carry READ's arguments (a2 = [`REG_PROBE_READ_LEN`], read
+/// into a scratch byte in the probe's stack frame; a3 = no timeout); a0 and
+/// a1 are the syscall's two results, while a2, a3 and a7 must still come
+/// back unchanged. All match:
 /// exits cleanly. Any mismatch: prints REG MISMATCH with a bitmask (bit i =
 /// register i in [`probe_expected`]'s order) and spins, so the kernel-side
 /// test times out and the console says why.
@@ -287,12 +298,13 @@ pub extern "C" fn user_register_probe() {
             "li s8, 0x50000008", "li s9, 0x50000009", "li s10, 0x5000000a", "li s11, 0x5000000b",
             "li t0, 0x70000000", "li t1, 0x70000001", "li t2, 0x70000002", "li t3, 0x70000003",
             "li t4, 0x70000004", "li t5, 0x70000005", "li t6, 0x70000006",
-            "li a3, 0x60000003", "li a4, 0x60000004", "li a5, 0x60000005",
+            "li a4, 0x60000004", "li a5, 0x60000005",
             "li a6, 0x60000006",
-            // READ(stdin, scratch byte at 52(sp), REG_PROBE_READ_LEN)
+            // READ(stdin, scratch byte at 52(sp), REG_PROBE_READ_LEN, no timeout)
             "li a0, {stdin}",
             "addi a1, sp, 52",
             "li a2, {read_len}",
+            "li a3, -1", // u32::MAX: block with no timeout
             "li a7, {read}",
             // Block until the kernel test injects a byte
             "ecall",
@@ -587,6 +599,72 @@ pub extern "C" fn user_read_split_probe() {
     user_exit();
 }
 
+/// Prints up to four characters packed into one word, lowest byte first,
+/// skipping zero bytes. Probes build their verdicts from these so the text
+/// travels in registers: a string constant would sit in kernel read-only
+/// data, which U-mode cannot read.
+#[unsafe(link_section = ".user_text")]
+fn user_put_packed(word: usize) {
+    let mut shift = 0;
+    while shift < 32 {
+        let byte = (word >> shift) & 0xff;
+        if byte != 0 {
+            user_put_char(byte);
+        }
+        shift += 8;
+    }
+}
+
+/// Timed READs on fd 0 with no input queued, then a verdict for the
+/// kernel-side test: `READ TIMEOUT OK` or `READ TIMEOUT BAD`, then exits.
+///
+/// A zero timeout must return at once with nothing read, and a 50 ms
+/// timeout must return with nothing read once it has passed. Neither is an
+/// error: both come back as (0, 0). A probe that never exits means a timed
+/// READ blocked past its timeout.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_read_timeout_probe() {
+    let mut buf = core::mem::MaybeUninit::<[u8; 8]>::uninit();
+    let buf_addr = buf.as_mut_ptr().cast::<u8>() as usize;
+    // A zero timeout polls and returns nothing
+    let polled = user_read_timed(0, buf_addr, 8, 0) == (0, 0);
+    // A short timeout expires and returns nothing
+    let expired = user_read_timed(0, buf_addr, 8, 50) == (0, 0);
+    user_put_char(b'\n' as usize);
+    user_put_packed(const { u32::from_le_bytes(*b"READ") as usize });
+    user_put_packed(const { u32::from_le_bytes(*b" TIM") as usize });
+    user_put_packed(const { u32::from_le_bytes(*b"EOUT") as usize });
+    if polled && expired {
+        user_put_packed(const { u32::from_le_bytes(*b" OK\n") as usize });
+    } else {
+        user_put_packed(const { u32::from_le_bytes(*b" BAD") as usize });
+        user_put_char(b'\n' as usize);
+    }
+    user_exit();
+}
+
+/// One timed READ on fd 0 with a timeout far longer than the kernel-side
+/// test takes to inject a byte: it must return that byte, not wait out the
+/// timeout. Prints `READ TIMED INPUT OK` or `READ TIMED INPUT BAD`, then exits.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_read_timed_input_probe() {
+    let mut buf = core::mem::MaybeUninit::<[u8; 8]>::uninit();
+    let buf_addr = buf.as_mut_ptr().cast::<u8>() as usize;
+    let got_one = user_read_timed(0, buf_addr, 8, 30_000) == (0, 1);
+    user_put_char(b'\n' as usize);
+    user_put_packed(const { u32::from_le_bytes(*b"READ") as usize });
+    user_put_packed(const { u32::from_le_bytes(*b" TIM") as usize });
+    user_put_packed(const { u32::from_le_bytes(*b"ED I") as usize });
+    user_put_packed(const { u32::from_le_bytes(*b"NPUT") as usize });
+    if got_one {
+        user_put_packed(const { u32::from_le_bytes(*b" OK\n") as usize });
+    } else {
+        user_put_packed(const { u32::from_le_bytes(*b" BAD") as usize });
+        user_put_char(b'\n' as usize);
+    }
+    user_exit();
+}
+
 /// Prints `PRINT OK` through [`user_put_char`] and exits: a smoke test for
 /// the helper every other probe uses to report its verdict, so a broken
 /// print path fails here by name rather than as a confusing probe failure.
@@ -740,9 +818,16 @@ fn user_alloc(size: usize) -> (usize, usize, usize) {
     (error, base, actual_size)
 }
 
-/// Raw READ syscall returning the kernel's (error, value) pair unchanged
+/// Raw READ syscall with no timeout, returning the kernel's (error, value) pair unchanged
 #[unsafe(link_section = ".user_text")]
 fn user_read(fd: usize, addr: usize, len: usize) -> (usize, usize) {
+    user_read_timed(fd, addr, len, u32::MAX as usize)
+}
+
+/// Raw READ syscall with a timeout in milliseconds, returning the kernel's
+/// (error, value) pair unchanged
+#[unsafe(link_section = ".user_text")]
+fn user_read_timed(fd: usize, addr: usize, len: usize, timeout_ms: usize) -> (usize, usize) {
     let error: usize;
     let value: usize;
     unsafe {
@@ -751,6 +836,7 @@ fn user_read(fd: usize, addr: usize, len: usize) -> (usize, usize) {
             inout("a0") fd => error,
             inout("a1") addr => value,
             in("a2") len,
+            in("a3") timeout_ms,
             in("a7") syscall::READ,
         );
     }

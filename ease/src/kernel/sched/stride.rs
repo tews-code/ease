@@ -736,6 +736,7 @@ impl Scheduler {
     pub(super) fn park_if_blocked(&self) {
         self.reschedule(Some(thread::State::Blocked), thread::PostSwitch::Blocked);
     }
+
     /// Park the current thread if it is in Blocked statue until the given `Deadline`
     /// at which point it will be woken.
     pub(super) fn park_if_blocked_until(&self, deadline: Deadline) {
@@ -864,5 +865,18 @@ impl Scheduler {
     pub fn stacks(&self) {
         let sched = self.sched.lock();
         sched.threads.stacks();
+    }
+
+    // QoS
+
+    /// Get the current running thread's QoS
+    pub(super) fn current_qos(&self) -> Qos {
+        self.sched
+            .lock()
+            .threads
+            .tcbs
+            .get(percpu::current_thread())
+            .expect("current thread should not have stale handle")
+            .qos
     }
 }

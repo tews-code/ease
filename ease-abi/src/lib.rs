@@ -99,4 +99,5 @@ pub mod ascii {
     pub const FF: u8 = 0x0C;
     pub const CR: u8 = 0x0D;
     pub const DEL: u8 = 0x7F;
+    pub const ESC: u8 = 0x1B;
 }

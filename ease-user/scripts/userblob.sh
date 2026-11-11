@@ -30,8 +30,17 @@ text_size=$(layout_size text)
 data_size=$(layout_size data)
 expected=$(( text_size + data_size ))
 
+# Collect binary names from both single-file (src/bin/foo.rs) and
+# multi-file (src/bin/foo/main.rs) binaries.
+bins=()
 for src in src/bin/*.rs; do
-    bin=$(basename "$src" .rs)
+    [ -f "$src" ] && bins+=("$(basename "$src" .rs)")
+done
+for src in src/bin/*/main.rs; do
+    [ -f "$src" ] && bins+=("$(basename "$(dirname "$src")")")
+done
+
+for bin in "${bins[@]}"; do
     elf="$TARGET_DIR/$bin"
     blob="$TARGET_DIR/$bin.bin"
     rust-objcopy -O binary "$elf" "$blob"

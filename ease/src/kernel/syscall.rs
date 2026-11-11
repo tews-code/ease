@@ -121,27 +121,43 @@ fn read(frame: &mut trap::Frame) {
     }
     // Build the user buffer and validate it
     let user_buf = usermem::UserBuf::new(frame.a1, frame.a2, usermem::Transfer::ToUser);
-    if let Some(validated_user_buf) = syscall_context.validate_buf(user_buf) {
-        // Kernel buffer to receive the bytes
-        let mut buf = [0u8; READ_BUF_LEN];
+    let Some(validated_user_buf) = syscall_context.validate_buf(user_buf) else {
+        frame.a0 = ease_abi::Error::BadBuffer.into();
+        frame.a1 = 0;
+        return;
+    };
+    // Kernel buffer to receive the bytes
+    let mut buf = [0u8; READ_BUF_LEN];
+    // Check the requested timeout. If it is u32::MAX the caller
+    // doesn't want a timeout.
+    // We trust frame.a3 as the timeout is valid across the entire u32 range.
+    let bytes_read = if frame.a3 as u32 == u32::MAX {
         // Read the bytes via console input; we sleep until at least a byte is available
-        let bytes_read = match console_input::wait_and_read_interruptible(
+        match console_input::wait_and_read_interruptible(
             &mut buf[..validated_user_buf.len().min(READ_BUF_LEN)],
         ) {
             Ok(bytes_read) => bytes_read,
             Err(kernel::sync::Interrupted) => {
                 sched::exit_current_user_thread(thread::ExitReason::Fault)
             }
-        };
-        // Safely copy from the kernel buffer into the user buffer
-        let bytes_copied = validated_user_buf.copy_to_user(&buf[..bytes_read]);
-        // Return the number of bytes read
-        frame.a0 = 0;
-        frame.a1 = bytes_copied;
+        }
     } else {
-        frame.a0 = ease_abi::Error::BadBuffer.into();
-        frame.a1 = 0;
-    }
+        // Read the bytes via console input; we sleep until at least a byte is available or timeout is reached
+        match console_input::wait_and_read_interruptible_until(
+            &mut buf[..validated_user_buf.len().min(READ_BUF_LEN)],
+            frame.a3 as u32,
+        ) {
+            Ok(bytes_read) => bytes_read,
+            Err(kernel::sync::Interrupted) => {
+                sched::exit_current_user_thread(thread::ExitReason::Fault)
+            }
+        }
+    };
+    // Safely copy from the kernel buffer into the user buffer
+    let bytes_copied = validated_user_buf.copy_to_user(&buf[..bytes_read]);
+    // Return the number of bytes read
+    frame.a0 = 0;
+    frame.a1 = bytes_copied;
 }
 
 /// Write from the given buffer to the given file descriptor

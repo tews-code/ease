@@ -1,0 +1,23 @@
+Someday (fun, not needed for hardware bring-up)
+===============================================
+
+Ideas to come back to once EASE runs on real hardware. Not in priority
+order, and lower priority than docs/todo.txt and docs/cleanup.txt.
+
+[ ] Wider code page: VGA8.F16 is CP437, with no emoji and no bell
+    glyph. Add ~100 of the most common emoji. Needs a way to name
+    glyphs past one byte in the byte stream (UTF-8 decoding in the
+    console, or a private mapping).
+[ ] Keyboard emoji selector.
+[ ] Key variant selector: hold a key, then type a number to pick a
+    variant (accents etc.).
+[ ] Bell: the character under the cursor flashes 2-3 times, swapped
+    with a bell glyph. Can be done shell-side with plain bytes (write
+    glyph + BS, SLEEP, write original + BS) once there is a SLEEP
+    syscall. Notes from 2026-11-03: phases must be ~60-100 ms to be
+    seen (2 ms is under one frame); blocks the shell ~0.5 s; needs a
+    printable bell glyph (wider code page above); wrap at the last
+    column breaks the BS; e-ink may want a single flash or none.
+[ ] Colour: explore whether it can be supported without too much
+    memory drain (e.g. per-cell attributes in the console TextBuffer;
+    what the target panel can show).

@@ -244,6 +244,9 @@ cargo test --package ease --lib --target "$HOST_TARGET" \
 # allocator and its lock. Run from its own directory: it is outside the
 # workspace.
 (cd ../ease-ulib && cargo test --lib --target "$HOST_TARGET")
+# The shell's line editor and escape parser, host tested inside the shell
+# binary: its crate root drops no_std/no_main and its entry point under test.
+(cd ../ease-user && cargo test --bin shell --target "$HOST_TARGET")
 
 if [ $MIRI -eq 1 ]; then
     echo ""
@@ -257,6 +260,7 @@ if [ $MIRI -eq 1 ]; then
     cargo +nightly miri test --package ease --lib --target "$HOST_TARGET" \
         --no-default-features --features "$FEATURES"
     (cd ../ease-ulib && cargo +nightly miri test --lib --target "$HOST_TARGET")
+    (cd ../ease-user && cargo +nightly miri test --bin shell --target "$HOST_TARGET")
 fi
 
 echo ""

@@ -24,7 +24,7 @@ SECTIONS {
     } > SRAM_PD0
 
     /* PSRAM */
-    /* Temporarily put all user threads .text in 4KB window in PSRAM */
+    /* Temporarily put all user threads .text in a window in PSRAM */
     .text __user_text_origin : {
         __user_text_start = .;
         *(.text._start)
@@ -33,7 +33,7 @@ SECTIONS {
         __user_text_end = .;
     } > PSRAM
 
-    /* Temporarily put all user threads .data and .bss in 4KB window in PSRAM */
+    /* Temporarily put all user threads .data and .bss in a window in PSRAM */
     .data __user_data_origin : {
         __user_data_start = .;
         *(.data .data.* .sdata .sdata.*)

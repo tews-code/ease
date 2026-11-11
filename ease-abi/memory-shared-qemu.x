@@ -5,13 +5,13 @@
  *
  * The user heap is at the start of PD0
  *
- * We limit all user programs to fit into 8KB .text for now.
- * The .user_text region is followed by .user_data and then .user_bss, also limited to 2KB each.
+ * We limit all user programs to fit into 32KB .text for now.
+ * The .user_text region is followed by .user_data and then .user_bss, limited to 2KB each.
  * Currently user programs are loaded at the end of the first half of PSRAM (0x81400000)
  */
 
 __user_text_origin = 0x81400000;
-__user_text_size = 16K;
+__user_text_size = 32K;
 
 __user_data_origin = __user_text_origin + __user_text_size;
 __user_data_size = 2K;

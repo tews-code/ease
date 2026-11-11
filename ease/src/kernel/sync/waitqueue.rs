@@ -8,20 +8,20 @@
 //! are woken (we do not support wake-one) and evaluate the state to determine if it is the
 //! right state for them. If it is not, then they go back to sleep.
 //!
-//! In order to support threads registering on a wait queues there is a wait queue which
-//! holds an array of `Option<thread::Handle>`. In EASE there are only `thread::MAX` threads so a simple array
-//! is used for the queue. For a thread to register its interest it puts its thread handle into the array.
-//! To deregister it clears that same slot. We use thread handles (rather than thread TCB index) to
-//! avoid stale slots triggering against new threads.
-//!
 //! When a thread is woken from the queue, it is scheduled and immediately loops on a closure. The
 //! closure is that thread's specific requirement on the event (e.g. is empty, or has one slot free).
 //! If the closure evalutes true it breaks the loop and continues, otherwise it goes back to sleep.
-//! The closure also takes a mut ref to the part of the OS that is being waited on, to ensure the
+//! The closure also takes a mut ref to a lock on the part of the OS that is being waited on, to ensure the
 //! closure is run with the appropriate locks held.
 //!
-//! User threads may need to be interrupted (due to a fault), so an interruptible version of the wait
-//! method is also provided, which returns an `Err(Interrupted)` if interrupted.
+//! For a kernel thread to register its interest it puts its thread handle into the array
+//! using [WaitQueue::wait_with] for kernel threads.
+//!
+//! User threads may need to be interrupted (e.g. due to a fault), so an interruptible version of the wait
+//! method [WaitQueue::wait_with_interruptible] is also provided, which returns an `Err(Interrupted)` if interrupted.
+//!
+//! For user threads that want to be woken after a timeout, a third variant [WaitQueue::wait_with_interruptible_until] takes
+//! a timeout parameter in milliseconds. A timeout 0 of runs the closure once with an immediate return.
 //!
 //! The wait queue is one array indexed by thread, one inner lock, usable directly as a static.
 //!
@@ -29,9 +29,14 @@
 
 use super::Interrupted;
 use crate::kernel::percpu;
-use crate::kernel::sched::{self, thread};
+use crate::kernel::sched::{self, Deadline, thread};
 use crate::kernel::sync::{IrqSpinLock, SpinLock, SpinLockGuard};
 
+/// The wait queue
+///
+/// In EASE there are only `thread::MAX` threads so a simple array
+/// is used for the queue. We use thread handles (rather than thread TCB index) to
+/// avoid stale slots triggering against new threads.
 struct WaitQueueInner([Option<thread::Handle>; thread::MAX_COUNT]);
 
 impl WaitQueueInner {
@@ -39,6 +44,7 @@ impl WaitQueueInner {
     const fn new() -> Self {
         Self([const { None }; thread::MAX_COUNT])
     }
+
     /// Register a thread in the wait queue. This is idempotent and does not check existing state
     ///
     /// # Panics #
@@ -47,6 +53,7 @@ impl WaitQueueInner {
         assert!(handle.idx() < thread::MAX_COUNT);
         self.0[handle.idx()] = Some(handle);
     }
+
     /// Deregister a thread from the wait queue. This is idempotent and does not check existing state
     ///
     /// # Panics #
@@ -55,6 +62,7 @@ impl WaitQueueInner {
         assert!(handle.idx() < thread::MAX_COUNT);
         self.0[handle.idx()] = None;
     }
+
     /// Drain the queue
     fn drain(&mut self) -> [Option<thread::Handle>; thread::MAX_COUNT] {
         core::mem::replace(&mut self.0, [const { None }; thread::MAX_COUNT])
@@ -72,8 +80,9 @@ impl WaitQueue {
             inner: IrqSpinLock::new(WaitQueueInner::new()),
         }
     }
-    /// Use for kernel threads that are never exited.
-    /// For user threads that may fault use [Self::wait_with_interruptible].
+
+    /// Adds the current thread to a wait queue, can only be used by kernel threads
+    /// as this is not interruptible. For user threads that may fault use [Self::wait_with_interruptible].
     ///
     /// The first argument is a spinlock on the resource of interest.
     /// The second argument is a closure what examines the resource state
@@ -81,6 +90,14 @@ impl WaitQueue {
     /// if they do not match and the thread can go back to sleep.
     ///
     /// Lock order is (1) Resource (2) WaitQueue (3) Scheduler
+    ///
+    /// The caller must ensure
+    /// - this is only called on kernel threads
+    /// - the provided closure does not block or take the scheduler lock
+    ///
+    /// # Panics
+    /// Panics if called on a user thread that has been marked for exit.
+    #[expect(dead_code)]
     pub(crate) fn wait_with<'a, F, R>(
         &self,
         resource: &'a SpinLock<R>,
@@ -92,11 +109,14 @@ impl WaitQueue {
         self.wait_with_interruptible(resource, f)
             .expect("kernel thread should never be marked for exit")
     }
+
     /// Adds the current thread to the wait queue with a closure to evalute the resource state
     /// on wakeup. Can be used with `static` wait queues.
     ///
     /// This form should be used for user threads, which may need to be torn down. For kernel
-    /// threads use [Self::wait_with].
+    /// threads see [Self::wait_with].
+    ///
+    /// The caller must ensure that the provided closure does not block or take the scheduler lock.
     ///
     /// Lock order is (1) Resource (2) WaitQueue (3) Scheduler
     pub(crate) fn wait_with_interruptible<'a, F, R>(
@@ -121,13 +141,12 @@ impl WaitQueue {
             // while we still hold them in reverse order
             drop(wait_queue);
             // Evaluate the closure to see if the criteria match
-            //
             let mut guard = resource.lock();
             if f(&mut *guard) {
                 // We meet the criteria so revert to Running to execute immediately
                 self.inner.lock().deregister(current_handle);
                 sched::set_self_running();
-                // Return _with the machinery lock still held_
+                // Return _with the machinery lock still held
                 return Ok(guard);
             }
             // We can sleep
@@ -141,6 +160,76 @@ impl WaitQueue {
             }
         }
     }
+
+    /// Adds the current thread to the wait queue with a closure to evalute the resource state
+    /// on wakeup and with a timeout if there is no wakeup for a period. Can be used with `static` wait queues.
+    ///
+    /// This form should be used for user threads (which may need to be torn down) and which must not stay sleeping
+    /// indefinitely. See [WaitQueue::wait_with_interruptible] if no timeout is needed.
+    ///
+    /// The timeout value in milliseconds. `0` evaluates the closure once and immediately returns.
+    ///
+    /// On success returns `Ok` with:
+    /// - `Some` holding the guard on successful closure matches
+    /// - `None` if the timeout was reached before the closure matches
+    ///
+    /// Returns `Err(Interrupted)` on teardown.
+    ///
+    /// The caller must ensure that the provided closure does not block or take the scheduler lock.
+    ///
+    /// Lock order is (1) Resource (2) WaitQueue (3) Scheduler
+    pub(crate) fn wait_with_interruptible_until<'a, F, R>(
+        &self,
+        resource: &'a SpinLock<R>,
+        mut f: F,
+        timeout: u32,
+    ) -> Result<Option<SpinLockGuard<'a, R>>, Interrupted>
+    where
+        F: FnMut(&mut R) -> bool,
+    {
+        // Calculate the timeout deadline before starting closure-running loop
+        let deadline = Deadline::after_ms_with_system_leeway(timeout as u64, sched::current_qos());
+        loop {
+            let current_handle = percpu::current_thread();
+            // Take the wait queue lock to ensure next steps are never split by an interrupt
+            let mut wait_queue = self.inner.lock();
+            // First register this thread
+            wait_queue.register(current_handle);
+            // Mark self as blocked. Note - if the thread is already condemned it will not block
+            // but instead be kept in Running state
+            sched::set_self_blocked_until(deadline);
+            // Drop wait queue lock in case another running thread is starting the
+            // same process and takes the resource lock and then the wait queue lock
+            // while we still hold them in reverse order - would be deadlock
+            drop(wait_queue);
+            // Evaluate the closure to see if the criteria match
+            let mut guard = resource.lock();
+            if f(&mut *guard) {
+                // We meet the criteria so revert to Running to execute immediately
+                self.inner.lock().deregister(current_handle);
+                sched::set_self_running();
+                // Return _with the machinery lock still held
+                return Ok(Some(guard));
+            }
+            // Check if we have passed our deadline
+            if deadline.has_passed() {
+                // We've timedout so go back to running
+                self.inner.lock().deregister(current_handle);
+                sched::set_self_running();
+                return Ok(None);
+            }
+            // We didn't get a closure match and we haven't timed out yet, so We can sleep
+            drop(guard);
+            sched::park_if_blocked_until(deadline);
+            // Check if we have been interrupted, in which case exit with error
+            if sched::current_user_thread_needs_exit() {
+                // Clear the slot
+                self.inner.lock().deregister(current_handle);
+                return Err(Interrupted);
+            }
+        }
+    }
+
     /// Wake all threads that are sleeping on this resource
     ///
     /// Lock order is (1) WaitQueue (2) Scheduler
@@ -364,6 +453,157 @@ mod tests {
             finished,
             "waiter hung: a wakeup was lost (counter = {})",
             *R.lock()
+        );
+    }
+
+    // Outcomes of a timed wait, as stored by the waiter threads below
+    // (0 = still waiting).
+    const TIMED_OUT: usize = 1;
+    const GOT_GUARD: usize = 2;
+    const INTERRUPTED: usize = 3;
+
+    fn outcome<R>(result: &Result<Option<SpinLockGuard<'_, R>>, Interrupted>) -> usize {
+        match result {
+            Ok(None) => TIMED_OUT,
+            Ok(Some(_)) => GOT_GUARD,
+            Err(Interrupted) => INTERRUPTED,
+        }
+    }
+
+    // The condition never holds and nobody wakes the queue: the timed wait
+    // must give up once its timeout has passed and report it as Ok(None),
+    // and it must take its own slot out of the queue on the way.
+    #[test_case]
+    fn waitqueue_timed_wait_expires_when_condition_never_holds() {
+        static WQ: WaitQueue = WaitQueue::new();
+        static R: SpinLock<u32> = SpinLock::new(0);
+        static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+
+        fn waiter() {
+            let result = WQ.wait_with_interruptible_until(&R, |r| *r == 1, 50);
+            let code = outcome(&result);
+            drop(result);
+            OUTCOME.store(code, Ordering::Release);
+        }
+
+        spawn(waiter);
+        assert!(
+            wait_until(1000, || OUTCOME.load(Ordering::Acquire) != 0),
+            "timed wait with a 50 ms timeout had not returned after 1 s"
+        );
+        assert_eq!(
+            OUTCOME.load(Ordering::Acquire),
+            TIMED_OUT,
+            "timed wait returned, but not as a timeout"
+        );
+        assert!(
+            WQ.inner.lock().0.iter().all(|slot| slot.is_none()),
+            "timed-out waiter left its handle registered on the queue"
+        );
+    }
+
+    // A zero timeout is a poll: evaluate the condition once, never park.
+    #[test_case]
+    fn waitqueue_timed_wait_zero_timeout_returns_at_once() {
+        static WQ: WaitQueue = WaitQueue::new();
+        static R: SpinLock<u32> = SpinLock::new(0);
+        static EVALS: AtomicUsize = AtomicUsize::new(0);
+        static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+
+        fn waiter() {
+            let result = WQ.wait_with_interruptible_until(
+                &R,
+                |r| {
+                    EVALS.fetch_add(1, Ordering::AcqRel);
+                    *r == 1
+                },
+                0,
+            );
+            let code = outcome(&result);
+            drop(result);
+            OUTCOME.store(code, Ordering::Release);
+        }
+
+        spawn(waiter);
+        assert!(
+            wait_until(200, || OUTCOME.load(Ordering::Acquire) != 0),
+            "zero-timeout wait parked instead of returning"
+        );
+        assert_eq!(OUTCOME.load(Ordering::Acquire), TIMED_OUT);
+        assert_eq!(
+            EVALS.load(Ordering::Acquire),
+            1,
+            "zero-timeout wait should evaluate the condition exactly once"
+        );
+        assert!(
+            WQ.inner.lock().0.iter().all(|slot| slot.is_none()),
+            "zero-timeout waiter left its handle registered on the queue"
+        );
+    }
+
+    // Woken with the condition true well inside the timeout: the timed wait
+    // behaves like the untimed one and hands back the live resource lock.
+    #[test_case]
+    fn waitqueue_timed_wait_returns_guard_when_woken_in_time() {
+        static WQ: WaitQueue = WaitQueue::new();
+        static R: SpinLock<u32> = SpinLock::new(0);
+        static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+
+        fn waiter() {
+            let mut result = WQ.wait_with_interruptible_until(&R, |r| *r == 1, 5000);
+            let code = outcome(&result);
+            if let Ok(Some(guard)) = result.as_mut() {
+                **guard = 42;
+            }
+            drop(result);
+            OUTCOME.store(code, Ordering::Release);
+        }
+
+        spawn(waiter);
+        sleep(30);
+        assert_eq!(
+            OUTCOME.load(Ordering::Acquire),
+            0,
+            "timed wait returned before the condition held or the timeout passed"
+        );
+        *R.lock() = 1;
+        WQ.wake_all();
+        assert!(
+            wait_until(500, || OUTCOME.load(Ordering::Acquire) != 0),
+            "timed waiter not woken by wake_all"
+        );
+        assert_eq!(OUTCOME.load(Ordering::Acquire), GOT_GUARD);
+        assert_eq!(*R.lock(), 42, "write through the returned guard was lost");
+    }
+
+    // The timeout bounds the whole wait, not each sleep: wakes that find the
+    // condition still false must not restart the countdown. The queue is
+    // woken every 10 ms, far more often than the 100 ms timeout, so a wait
+    // that re-arms on every wake never returns.
+    #[test_case]
+    fn waitqueue_timed_wait_false_wakes_do_not_restart_the_timeout() {
+        static WQ: WaitQueue = WaitQueue::new();
+        static R: SpinLock<u32> = SpinLock::new(0);
+        static OUTCOME: AtomicUsize = AtomicUsize::new(0);
+
+        fn waiter() {
+            let result = WQ.wait_with_interruptible_until(&R, |r| *r == 1, 100);
+            let code = outcome(&result);
+            drop(result);
+            OUTCOME.store(code, Ordering::Release);
+        }
+
+        spawn(waiter);
+        let mut waited = 0;
+        while OUTCOME.load(Ordering::Acquire) == 0 && waited < 1000 {
+            WQ.wake_all();
+            sleep(10);
+            waited += 10;
+        }
+        assert_eq!(
+            OUTCOME.load(Ordering::Acquire),
+            TIMED_OUT,
+            "100 ms timed wait had not timed out after 1 s of false wakes"
         );
     }
 }
