@@ -21,7 +21,7 @@
 //! method [WaitQueue::wait_with_interruptible] is also provided, which returns an `Err(Interrupted)` if interrupted.
 //!
 //! For user threads that want to be woken after a timeout, a third variant [WaitQueue::wait_with_interruptible_until] takes
-//! a timeout parameter in milliseconds. A timeout 0 of runs the closure once with an immediate return.
+//! a timeout parameter in milliseconds. A timeout of 0 runs the closure once with an immediate return.
 //!
 //! The wait queue is one array indexed by thread, one inner lock, usable directly as a static.
 //!
