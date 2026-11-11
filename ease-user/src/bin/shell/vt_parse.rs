@@ -272,6 +272,14 @@ impl EscSeqParser {
     pub fn pending_byte(&mut self) -> Option<u8> {
         self.pushback.take()
     }
+
+    /// Returns whether the parser is mid-sequence or not
+    pub fn is_mid_sequence(&self) -> bool {
+        match self.state {
+            State::Normal => false,
+            State::GotEscape | State::KeyParam(_) | State::ModifierParam { key: _, modifier: _ } => true,
+        }
+    }
 }
 
 #[cfg(test)]

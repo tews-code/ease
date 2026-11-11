@@ -92,10 +92,21 @@ pub extern "C" fn main() {
     let mut write_buf = Vec::<u8>::with_capacity(REDRAW_LINE_LEN);
     print!("{}", PROMPT);
     loop {
-        // Read from STDIN and block until at least one byte is available
-        let Ok(bytes_read) = read(fds::STDIN, &mut read_buf, ESC_TIMEOUT_MS as u32) else {
+        // Read from STDIN and block until at least one byte is available. If we are mid
+        // sequence add a timeout
+        let timeout = if parser.is_mid_sequence() {
+            ESC_TIMEOUT_MS as u32
+        } else {
+            u32::MAX
+        };
+        let Ok(bytes_read) = read(fds::STDIN, &mut read_buf, timeout) else {
             continue;
         };
+        // Check if this was a timeout
+        if bytes_read == 0
+            && let Some(key_event) = parser.esc_seq_timeout() {
+                handle_key(&mut write_buf, &mut editor, key_event)
+            }
         for &byte in &read_buf[..bytes_read] {
             if let Some(key_event) = parser.parse(byte) {
                 handle_key(&mut write_buf, &mut editor, key_event);
