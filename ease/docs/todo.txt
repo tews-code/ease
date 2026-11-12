@@ -118,6 +118,36 @@ Tick with [x] when done, or delete the line.
     as in real terminals: if the reader falls behind and keys pile up,
     a typed Esc, [, A reads as Up.
 
+[ ] Volume lock that sleeps instead of spinning. Noted 2026-11-12 while
+    planning the CHDIR syscall.
+    Today: fs/volume.rs VOLUME is a SpinLock<Option<Volume>>, taken by
+    with_volume and held for the whole operation, including the waits
+    for block I/O (it is a SpinLock, not an IrqSpinLock, so virtio
+    completions can arrive). The holder parks on the Completion with
+    the lock still held.
+    Why it matters now: with one kernel shell there was one caller.
+    With file syscalls, any user thread can be a caller, and a second
+    one spins on its hart for the whole of the first one's disk I/O
+    (milliseconds, not microseconds).
+    Wanted: a waiter sleeps and is woken when the volume is free.
+    Options to weigh:
+      - kernel::sync::Mutex, which already parks waiters. Closest fit:
+        same lock()/guard shape as today.
+      - A WaitQueue with a "busy" flag as the resource. More moving
+        parts for the same effect, but wait_with_interruptible already
+        exists, where Mutex has no interruptible lock.
+    Things the design must settle:
+      - Teardown: a user thread waiting for the volume must be able to
+        give up when its process is killed (interruptible wait), and a
+        thread that holds the volume must finish and release before it
+        exits (exit only where nothing is held).
+      - Lock order: OPEN_FILE_TABLE is an IrqSpinLock taken inside the
+        volume lock (fs/file.rs open); that order must stay.
+      - Host tests: fs is part of the host lib, and Mutex is gated to
+        the kernel target. Needs a host stand-in, as AllocatorLock is
+        for the allocator.
+      - Callers: about two dozen with_volume / VOLUME.lock sites.
+
 [ ] Board role table in board.rs, once a second board makes it pay off.
     - board.rs stays data only: its own small enum of the devices the board
       has (do not import driver types; drivers depend on board, not the
