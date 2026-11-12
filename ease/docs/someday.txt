@@ -21,3 +21,17 @@ order, and lower priority than docs/todo.txt and docs/cleanup.txt.
 [ ] Colour: explore whether it can be supported without too much
     memory drain (e.g. per-cell attributes in the console TextBuffer;
     what the target panel can show).
+[ ] Syscall stubs generated from one description. Noted 2026-11-12.
+    Today each syscall is written by hand three times: the number in
+    ease-abi, the typed wrapper in ease-ulib, and the handler's
+    register decoding in kernel/syscall.rs. With a handful of syscalls
+    that is fine, and the hand-written validation is where the
+    thinking is (copy before parsing, reject instead of truncating,
+    commit only on success), which no generator writes.
+    Trigger: the Doom port. Doom is C, so it needs C declarations and
+    stubs that match the Rust ones exactly; two languages kept in step
+    by hand is where one description generating both pays off (cf.
+    Mach MIG, seL4 CAmkES, Fuchsia FIDL).
+    Before then, the cheaper step: validated newtypes shared by the
+    handlers (a ValidPath beside ValidFd) once a second path-taking
+    syscall exists.
