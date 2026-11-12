@@ -660,8 +660,12 @@ impl Scheduler {
         self.exit(reason);
     }
 
-    /// Get the current thread's process file descriptor table handle
-    /// Returns an error if the current process is not in Alive state.
+    /// Get a token which proves that the process was alive when this token was created.
+    ///
+    /// The [SyscallContext] token holds a snapshot of a handle to the file descriptor table for the process
+    /// as well as the current working directory at the time the token was created.
+    ///
+    /// Takes the scheduler lock.
     ///
     /// # Errors
     /// - Returns [Error::ProcessNotInAliveState] if called on a process that is not Alive.
