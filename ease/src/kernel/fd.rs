@@ -2,6 +2,7 @@
 //!
 //! File descriptors are held in a static arena, and each process holds a handle to its slot.
 
+use ease_abi::MAX_OPEN_FILES;
 use ease_abi::fds::{STDERR, STDIN, STDOUT};
 
 use crate::fs::FileHandle;
@@ -9,8 +10,6 @@ use crate::kernel::collection::Arena;
 use crate::kernel::sched::process;
 use crate::kernel::sync::IrqSpinLock;
 use crate::kernel::validate::{Untrusted, Validate};
-
-pub(super) const MAX_OPEN: usize = 8; // We let each process open up to MAX_OPEN concurrent files
 
 /// Static arena of file descriptor tables. We use IrqSpinLock to safely provide interior mutability.
 /// Handles to the table entries are held in the PCB's `fds` struct member.
@@ -22,9 +21,9 @@ static FILE_DESCRIPTORS: IrqSpinLock<Arena<Table, { process::MAX_COUNT }>> =
 pub(super) enum Error {
     /// When the file descriptor within the table range finds a `None` in the slot
     StaleFileDescriptor,
-    /// A file descriptor that isn't within the range bounded by `MAX_OPEN` concurrent file descriptor indices
+    /// A file descriptor that isn't within the range bounded by `MAX_OPEN_FILES` concurrent file descriptor indices
     UnknownFileDescriptor,
-    /// The process has too many open files, see [MAX_OPEN]. The rejected entry is returned to the caller to be dropped outside the lock
+    /// The process has too many open files, see [MAX_OPEN_FILES]. The rejected entry is returned to the caller to be dropped outside the lock
     TooManyOpenFiles(Entry),
 }
 
@@ -46,7 +45,7 @@ impl Validate<usize> for ValidFd {
     type Error = Error;
     fn validate(value: Untrusted<usize>) -> Result<Self, Self::Error> {
         let value = value.raw();
-        if value >= MAX_OPEN {
+        if value >= MAX_OPEN_FILES {
             Err(Error::UnknownFileDescriptor)
         } else {
             Ok(ValidFd(value))
@@ -165,11 +164,11 @@ pub(super) enum Kind {
 
 #[derive(Default)]
 #[must_use]
-pub(crate) struct Table([Option<Entry>; MAX_OPEN]);
+pub(crate) struct Table([Option<Entry>; MAX_OPEN_FILES]);
 
 impl Table {
     pub(super) const fn new() -> Self {
-        Self([const { None }; MAX_OPEN])
+        Self([const { None }; MAX_OPEN_FILES])
     }
 
     /// Add the base file descriptors for a new process
@@ -252,14 +251,14 @@ mod host_tests {
 
     #[test]
     fn validate_accepts_every_in_range_fd() {
-        for n in 0..MAX_OPEN {
+        for n in 0..MAX_OPEN_FILES {
             assert_eq!(valid(n).get(), n);
         }
     }
 
     #[test]
     fn validate_rejects_out_of_range_fds() {
-        for n in [MAX_OPEN, MAX_OPEN + 1, usize::MAX] {
+        for n in [MAX_OPEN_FILES, MAX_OPEN_FILES + 1, usize::MAX] {
             assert!(
                 matches!(
                     ValidFd::validate(Untrusted::new(n)),
@@ -274,7 +273,7 @@ mod host_tests {
     fn new_table_is_empty() {
         let table = Table::new();
         assert!(table.is_empty());
-        for n in 0..MAX_OPEN {
+        for n in 0..MAX_OPEN_FILES {
             assert!(matches!(
                 table.get(valid(n)),
                 Err(Error::StaleFileDescriptor)
@@ -290,7 +289,7 @@ mod host_tests {
         assert_eq!(kind_at(&table, STDIN), Some(Kind::ConsoleInput));
         assert_eq!(kind_at(&table, STDOUT), Some(Kind::ConsoleOutput));
         assert_eq!(kind_at(&table, STDERR), Some(Kind::DebugConsole));
-        for n in 3..MAX_OPEN {
+        for n in 3..MAX_OPEN_FILES {
             assert_eq!(kind_at(&table, n), None, "fd {n} should be empty");
         }
     }
@@ -328,7 +327,7 @@ mod host_tests {
         // A freed low slot is reused before higher ones
         let _ = table.close(valid(1)).expect("fd 1 is open");
         assert_eq!(table.open(Entry::DebugConsole).ok(), Some(1));
-        for n in 4..MAX_OPEN {
+        for n in 4..MAX_OPEN_FILES {
             assert_eq!(table.open(Entry::ConsoleOutput).ok(), Some(n));
         }
         // Full: the entry comes back to the caller rather than being dropped

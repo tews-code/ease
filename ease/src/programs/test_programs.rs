@@ -450,7 +450,7 @@ pub extern "C" fn user_write_probe() {
     if user_write(0, short_addr, 8) != (Error::BadFd as usize, 0) {
         fail |= 1 << 6;
     }
-    // 7: the first fd past the kernel's table (fd::MAX_OPEN = 8) is refused
+    // 7: the first fd past the kernel's table (ease_abi::MAX_OPEN_FILES = 8) is refused
     if user_write(8, short_addr, 8) != (Error::BadFd as usize, 0) {
         fail |= 1 << 7;
     }
@@ -514,7 +514,7 @@ pub extern "C" fn user_read_probe() {
     if user_read(7, buf_addr, 8) != (Error::BadFd as usize, 0) {
         fail |= 1 << 2;
     }
-    // 3: the first fd past the kernel's table (fd::MAX_OPEN = 8) is refused
+    // 3: the first fd past the kernel's table (ease_abi::MAX_OPEN_FILES = 8) is refused
     if user_read(8, buf_addr, 8) != (Error::BadFd as usize, 0) {
         fail |= 1 << 3;
     }

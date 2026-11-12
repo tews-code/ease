@@ -5,7 +5,7 @@
 //! We take inspiration from the RISCV SBI approach on syscall responses:
 //!  `a0` holds 0 on success or a syscall error code on failure
 //!  `a1` holds the value on success or zero on error
-//!  `a2` for some calls this holds an additional return value on success or zero on error.
+//!  `a2` additionally holds a return value on success or zero on error for some calls.
 //!
 //! Also holds
 //! - Error codes
@@ -25,17 +25,13 @@ pub mod syscall {
     /// Request memory from the kernel for the entire process; must only be called once before the first allocation.
     /// The kernel allocator will round up to a suitable region and return the base address in `a1` and the region size in `a2`.
     pub const ALLOC: usize = 3;
+    /// Change directory
+    pub const CHDIR: usize = 4;
 
     // Test-only syscalls live at 100+ so real syscall growth never
     // collides. The kernel only wires them up in test builds; a
     // production program issuing one gets the unknown-syscall panic.
     pub const TEST_MUTEX_BLOCK: usize = 100;
-}
-
-pub mod fds {
-    pub const STDIN: usize = 0;
-    pub const STDOUT: usize = 1;
-    pub const STDERR: usize = 2;
 }
 
 /// Syscall error codes
@@ -59,7 +55,34 @@ pub enum Error {
     HeapSizeNotSupported = 7,
     /// Not enough memory to satisfy the heap request
     NotEnoughHeapMemory = 8,
+    /// An object already exists
+    AlreadyExists = 9,
+    /// A general file system error
+    FileSystemError = 10,
+    /// A directory was given when a file was expected
+    DirectoryInsteadOfFile = 11,
+    /// The given directory is not valid
+    DirectoryInvalid = 12,
+    /// The change could not be made as the directory is the current working directory
+    DirectoryIsCurrent = 13,
+    /// The directory is not empty
+    DirectoryNotEmpty = 14,
+    /// The directory is full
+    DirFull = 15,
+    /// The directory name is invalid as it has an extension
+    DirNameHasExtension = 16,
+    /// The disk is full
+    DiskFull = 17,
+    /// The file is in use already
+    FileInUse = 18,
+    /// The given name is not a directory
+    NotADirectory = 19,
+    /// The name is invalid
+    InvalidName = 20,
+    /// There are too many open files for this process. See [MAX_OPEN_FILES].
+    TooManyOpenFiles = 21,
 }
+
 /// Convert an error number into the Error enum.
 ///
 /// If the error is successfully mapped, returns `Ok` holding the error variant.
@@ -76,6 +99,19 @@ impl TryFrom<usize> for Error {
             v if v == Error::HeapAlreadyAllocated as usize => Ok(Error::HeapAlreadyAllocated),
             v if v == Error::HeapSizeNotSupported as usize => Ok(Error::HeapSizeNotSupported),
             v if v == Error::NotEnoughHeapMemory as usize => Ok(Error::NotEnoughHeapMemory),
+            v if v == Error::AlreadyExists as usize => Ok(Error::AlreadyExists),
+            v if v == Error::FileSystemError as usize => Ok(Error::FileSystemError),
+            v if v == Error::DirectoryInsteadOfFile as usize => Ok(Error::DirectoryInsteadOfFile),
+            v if v == Error::DirectoryInvalid as usize => Ok(Error::DirectoryInvalid),
+            v if v == Error::DirectoryIsCurrent as usize => Ok(Error::DirectoryIsCurrent),
+            v if v == Error::DirectoryNotEmpty as usize => Ok(Error::DirectoryNotEmpty),
+            v if v == Error::DirFull as usize => Ok(Error::DirFull),
+            v if v == Error::DirNameHasExtension as usize => Ok(Error::DirNameHasExtension),
+            v if v == Error::DiskFull as usize => Ok(Error::DiskFull),
+            v if v == Error::FileInUse as usize => Ok(Error::FileInUse),
+            v if v == Error::NotADirectory as usize => Ok(Error::NotADirectory),
+            v if v == Error::InvalidName as usize => Ok(Error::InvalidName),
+            v if v == Error::TooManyOpenFiles as usize => Ok(Error::TooManyOpenFiles),
             _ => Err(value),
         }
     }
@@ -87,10 +123,13 @@ impl From<Error> for usize {
     }
 }
 
-/// A user program can request at most 4MiB of heap
+/// A user program can request at most this much heap memory
 pub const MAX_HEAP_SIZE: usize = 4 * 1024 * 1024;
 
-// ASCII chars that are used for console and serial control
+/// A user program can open at most this many files concurrently
+pub const MAX_OPEN_FILES: usize = 8;
+
+/// ASCII chars that are used for console and serial control
 pub mod ascii {
     pub const BELL: u8 = 0x07;
     pub const BS: u8 = 0x08;
@@ -100,4 +139,11 @@ pub mod ascii {
     pub const CR: u8 = 0x0D;
     pub const DEL: u8 = 0x7F;
     pub const ESC: u8 = 0x1B;
+}
+
+/// Standard file descriptor values
+pub mod fds {
+    pub const STDIN: usize = 0;
+    pub const STDOUT: usize = 1;
+    pub const STDERR: usize = 2;
 }

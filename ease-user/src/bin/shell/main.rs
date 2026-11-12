@@ -5,18 +5,21 @@
 
 // Host test builds (`cargo test --bin shell` on the host target) link std
 // and the test harness, which brings its own `main`
-#![cfg_attr(not(test), no_std)]
-#![cfg_attr(not(test), no_main)]
+#![cfg_attr(target_os = "none", no_std)]
+#![cfg_attr(target_os = "none", no_main)]
 
 extern crate alloc;
+mod args;
+// mod commands;
 mod line_editor;
 mod vt_parse;
 
 use alloc::vec::Vec;
 use ease_ulib::{ascii, fds};
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 use ease_ulib::{print, put_char, read, write_all};
-#[cfg(not(test))]
+// use crate::args::Args;
+#[cfg(target_os = "none")]
 use crate::vt_parse::{vt_out, KeyEvent};
 use crate::line_editor::{EditResult, LineEditor};
 
@@ -27,13 +30,13 @@ const PROMPT: &str = "ease> ";
 /// The usable length of a line, taking the prompt into account
 const LINE_LEN: usize = WIDTH - PROMPT.len();
 /// The number of bytes needed to redraw a line (in the worst case).
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 const REDRAW_LINE_LEN: usize = 1 + PROMPT.len() + LINE_LEN + vt_out::ERASE_TO_END_OF_LINE.len() + LINE_LEN; // CR, prompt, line, erase, backspace to prompt
 /// Timeout in milliseconds before Esc is treated as a single Esc and not the start of a sequence
 const ESC_TIMEOUT_MS: usize = 50;
 
 /// Matches EditResults
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: KeyEvent) {
     match line_editor.process(key_event) {
         EditResult::Append(ch) => {
@@ -42,6 +45,9 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
         EditResult::Complete => {
             let _ = put_char(ascii::CR);
             let _ = put_char(ascii::LF);
+            // let cmd = core::str::from_utf8(self.line_editor.line())
+            // .expect("should be UTF-8");
+            // execute(&mut self.console, &mut self.wd, cmd);
             print!("{}", PROMPT);
             line_editor.reset();
         },
@@ -61,7 +67,7 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
 }
 
 /// Redraw a line using VT sequences
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 fn redraw_line(write_buf: &mut Vec<u8>, line: &[u8], cursor_pos: usize) {
     write_buf.clear();
     // 1. CR - move to the start of the line
@@ -79,8 +85,51 @@ fn redraw_line(write_buf: &mut Vec<u8>, line: &[u8], cursor_pos: usize) {
     let _ = write_all(fds::STDOUT, write_buf.as_slice());
 }
 
+// /// Execute the given command
+// fn execute(wd: &mut Dir, line: &str) {
+//     let line = line.trim();
+//     if line.is_empty() {
+//         return;
+//     }
+//
+//     let (cmd, rest) = match line.find(' ') {
+//         Some(pos) => (&line[..pos], line[pos + 1..].trim()),
+//         None => (line, ""),
+//     };
+//
+//     match cmd {
+//         "cat" => commands::cat(console, *wd, rest),
+//         "cd" => commands::cd(console, wd, rest),
+//         "clear" => commands::clear(console),
+//         "date" => commands::date(console),
+//         "echo" => commands::echo(console, rest),
+//         "help" => commands::help(console),
+//         "hexdump" => commands::hexdump(console, *wd, rest),
+//         "ls" => commands::ls(console, *wd, rest),
+//         "mkdir" => commands::mkdir(console, *wd, rest),
+//         "panic" => commands::panic(console),
+//         "rm" => commands::rm(console, *wd, rest),
+//         "rmdir" => commands::rmdir(console, *wd, rest),
+//         #[cfg(feature = "paint-stack")]
+//         "stacks" => commands::stacks(console),
+//         "time" => {
+//             // Time another command: `rest` is the command line to run, so
+//             // re-enter the dispatcher around a wall-clock reading. Reuses
+//             // the whole dispatch (any command, its own args, wd changes).
+//             let start_ms = crate::kernel::timer::elapsed_ms();
+//             Self::execute(console, wd, rest);
+//             let elapsed_ms = crate::kernel::timer::elapsed_ms() - start_ms;
+//             let _ = writeln!(console, "time: {} ms", elapsed_ms);
+//         }
+//         "truncate" => commands::truncate(console, *wd, rest),
+//         "touch" => commands::touch(console, *wd, rest),
+//         "write" => commands::write(console, *wd, rest),
+//         _ => commands::unknown(console, cmd),
+//     }
+// }
+
 /// The EASE built-in shell
-#[cfg(not(test))]
+#[cfg(target_os = "none")]
 #[unsafe(no_mangle)]
 pub extern "C" fn main() {
     const READ_BUF_SIZE: usize = 8;
