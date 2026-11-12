@@ -78,6 +78,10 @@ pub(super) const PROGRAMS: &[Program] = &[
         image: Image::Flash(user_read_timed_input_probe),
     },
     Program {
+        name: "user_chdir_probe",
+        image: Image::Flash(user_chdir_probe),
+    },
+    Program {
         name: "user_alloc_probe",
         image: Image::Flash(user_alloc_probe),
     },
@@ -613,6 +617,148 @@ fn user_put_packed(word: usize) {
         }
         shift += 8;
     }
+}
+
+/// Raw CHDIR syscall returning the kernel's error code unchanged
+#[unsafe(link_section = ".user_text")]
+fn user_chdir(addr: usize, len: usize) -> usize {
+    let error: usize;
+    unsafe {
+        core::arch::asm!(
+            "ecall",
+            inout("a0") addr => error,
+            inout("a1") len => _,
+            in("a7") syscall::CHDIR,
+        );
+    }
+    error
+}
+
+/// CHDIR with a path of up to 12 bytes packed into three words, lowest
+/// byte first. The words are stored into a buffer on the user stack with
+/// volatile writes, so the path is built from immediates: a string
+/// constant would sit in kernel read-only data, which U-mode cannot read.
+#[unsafe(link_section = ".user_text")]
+fn user_chdir_packed(words: (u32, u32, u32), len: usize) -> usize {
+    let mut buf = core::mem::MaybeUninit::<[u32; 3]>::uninit();
+    let ptr = buf.as_mut_ptr().cast::<u32>();
+    unsafe {
+        ptr.write_volatile(words.0);
+        ptr.add(1).write_volatile(words.1);
+        ptr.add(2).write_volatile(words.2);
+    }
+    user_chdir(ptr as usize, len)
+}
+
+/// Exercises the CHDIR syscall from U-mode and prints a verdict for the
+/// kernel-side test: `CHDIR OK`, or `CHDIR BAD ` followed by four hex digits
+/// with one bit per failed step, then exits.
+///
+/// The kernel-side test creates the directory `CDTEST` and the file
+/// `CDFILE.TXT` in the root first. The probe checks the refusals (bad
+/// pointer, empty path, over-long path, missing name, a file, bytes that
+/// are not text), then that a successful CHDIR really moves the process:
+/// inside `CDTEST` the relative name `CDTEST` no longer resolves, `..`
+/// leads back to where it does, and an absolute path works from anywhere.
+/// It finishes inside `CDTEST`, so a second run only passes if a new
+/// process starts at the root again.
+#[unsafe(link_section = ".user_text")]
+pub extern "C" fn user_chdir_probe() {
+    use ease_abi::Error;
+    const CDTEST: (u32, u32, u32) = (
+        u32::from_le_bytes(*b"CDTE"),
+        u32::from_le_bytes(*b"ST\0\0"),
+        0,
+    );
+    const CDFILE_TXT: (u32, u32, u32) = (
+        u32::from_le_bytes(*b"CDFI"),
+        u32::from_le_bytes(*b"LE.T"),
+        u32::from_le_bytes(*b"XT\0\0"),
+    );
+    const NOSUCH: (u32, u32, u32) = (
+        u32::from_le_bytes(*b"NOSU"),
+        u32::from_le_bytes(*b"CH\0\0"),
+        0,
+    );
+    const ABS_CDTEST: (u32, u32, u32) = (
+        u32::from_le_bytes(*b"/CDT"),
+        u32::from_le_bytes(*b"EST\0"),
+        0,
+    );
+    const DOT_DOT: (u32, u32, u32) = (u32::from_le_bytes(*b"..\0\0"), 0, 0);
+    const SLASH: (u32, u32, u32) = (u32::from_le_bytes(*b"/\0\0\0"), 0, 0);
+    const NOT_TEXT: (u32, u32, u32) = (u32::from_le_bytes([0xff, 0xfe, 0, 0]), 0, 0);
+
+    let mut fail: usize = 0;
+    // 0: a path outside the process's memory is refused
+    if user_chdir(0x1000, 4) != Error::BadBuffer as usize {
+        fail |= 1 << 0;
+    }
+    // 1: an empty path is refused
+    if user_chdir_packed(CDTEST, 0) != Error::DirectoryInvalid as usize {
+        fail |= 1 << 1;
+    }
+    // 2: a path one byte over the limit is refused, not truncated
+    if user_chdir_packed(CDTEST, ease_abi::MAX_PATH_TEXT + 1) != Error::InvalidName as usize {
+        fail |= 1 << 2;
+    }
+    // 3: a name that does not exist
+    if user_chdir_packed(NOSUCH, 6) != Error::NotFound as usize {
+        fail |= 1 << 3;
+    }
+    // 4: a file is not a directory
+    if user_chdir_packed(CDFILE_TXT, 10) != Error::NotADirectory as usize {
+        fail |= 1 << 4;
+    }
+    // 5: bytes that are not valid text
+    if user_chdir_packed(NOT_TEXT, 2) != Error::InvalidName as usize {
+        fail |= 1 << 5;
+    }
+    // 6: a relative name from the root, where every process starts
+    if user_chdir_packed(CDTEST, 6) != 0 {
+        fail |= 1 << 6;
+    }
+    // 7: the same relative name no longer resolves: the process has moved
+    if user_chdir_packed(CDTEST, 6) != Error::NotFound as usize {
+        fail |= 1 << 7;
+    }
+    // 8: the parent directory
+    if user_chdir_packed(DOT_DOT, 2) != 0 {
+        fail |= 1 << 8;
+    }
+    // 9: back at the root, the relative name resolves again
+    if user_chdir_packed(CDTEST, 6) != 0 {
+        fail |= 1 << 9;
+    }
+    // 10: the root by absolute path
+    if user_chdir_packed(SLASH, 1) != 0 {
+        fail |= 1 << 10;
+    }
+    // 11: an absolute path; the probe ends inside CDTEST on purpose
+    if user_chdir_packed(ABS_CDTEST, 7) != 0 {
+        fail |= 1 << 11;
+    }
+    user_put_char(b'\n' as usize);
+    user_put_packed(const { u32::from_le_bytes(*b"CHDI") as usize });
+    if fail == 0 {
+        user_put_packed(const { u32::from_le_bytes(*b"R OK") as usize });
+    } else {
+        user_put_packed(const { u32::from_le_bytes(*b"R BA") as usize });
+        user_put_packed(const { u32::from_le_bytes(*b"D \0\0") as usize });
+        let mut shift = 16;
+        while shift > 0 {
+            shift -= 4;
+            let nibble = (fail >> shift) & 0xf;
+            let digit = if nibble < 10 {
+                b'0' as usize + nibble
+            } else {
+                b'a' as usize + nibble - 10
+            };
+            user_put_char(digit);
+        }
+    }
+    user_put_char(b'\n' as usize);
+    user_exit();
 }
 
 /// Timed READs on fd 0 with no input queued, then a verdict for the

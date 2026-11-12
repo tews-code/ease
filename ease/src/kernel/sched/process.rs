@@ -78,6 +78,17 @@ impl SyscallContext {
     pub(crate) fn cwd(&self) -> fs::Dir {
         self.cwd
     }
+
+    /// Set the current process current working directory, if the process is alive.
+    ///
+    /// Note that the SyscallContext's cwd is _not_ updated as part of the change, as it
+    /// reflects the snapshot at the start of the system call.
+    ///
+    /// Returns `Err(ProcessNotInAliveState)` if the process is no longer alive.
+    pub(crate) fn set_cwd(&self, new_wd: fs::Dir) -> Result<(), Error> {
+        sched::SCHEDULER.set_current_process_cwd(new_wd)?;
+        Ok(())
+    }
 }
 
 /// Common errors for process creation and management

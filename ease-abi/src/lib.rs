@@ -129,6 +129,9 @@ pub const MAX_HEAP_SIZE: usize = 4 * 1024 * 1024;
 /// A user program can open at most this many files concurrently
 pub const MAX_OPEN_FILES: usize = 8;
 
+/// A user program directory path has at most this number of characters (bytes)
+pub const MAX_PATH_TEXT: usize = 128;
+
 /// ASCII chars that are used for console and serial control
 pub mod ascii {
     pub const BELL: u8 = 0x07;

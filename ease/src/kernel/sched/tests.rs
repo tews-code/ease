@@ -3345,6 +3345,35 @@ fn read_syscall_times_out_with_no_input() {
     );
 }
 
+// CHDIR end to end from U-mode. The test puts a directory and a file in
+// the root, then runs user_chdir_probe, which checks each refusal (bad
+// pointer, empty, over-long, missing, a file, bytes that are not text) and
+// that a successful CHDIR really moves the process (see the probe). The
+// probe ends inside CDTEST, and the second run must still pass: the working
+// directory belongs to a process, and a new process starts at the root.
+#[test_case]
+fn chdir_syscall_validates_its_path_and_moves_the_process() {
+    use crate::fs::{self, Dir};
+    match fs::file::mkdir(Dir::Root, "CDTEST") {
+        Ok(()) | Err(fs::Error::DuplicateDirName) => {}
+        Err(e) => panic!("could not create the CDTEST directory: {:?}", e),
+    }
+    fs::file::touch(Dir::Root, "CDFILE.TXT").expect("could not create CDFILE.TXT");
+    for run in ["first", "second"] {
+        #[cfg(feature = "test-io")]
+        crate::io::test_io::clear();
+        assert!(
+            run_to_exit("user_chdir_probe"),
+            "chdir probe never exited on its {run} run: a CHDIR call did not return"
+        );
+        #[cfg(feature = "test-io")]
+        assert!(
+            crate::io::test_io::contains("CHDIR OK"),
+            "chdir probe did not print CHDIR OK on its {run} run (see CHDIR BAD <mask> on the console; a failure only on the second run means a new process did not start at the root)"
+        );
+    }
+}
+
 // READ with a long timeout still returns as soon as input arrives:
 // user_read_timed_input_probe asks for 30 s, the test injects one byte once
 // the probe has parked, and the probe must exit having read exactly it.

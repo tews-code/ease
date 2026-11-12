@@ -2,6 +2,7 @@
 
 use crate::arch::{trap, umode};
 use crate::drivers::uart;
+use crate::fs;
 use crate::kernel::alloc;
 use crate::kernel::console_input;
 use crate::kernel::validate::{Untrusted, Validate};
@@ -31,7 +32,7 @@ pub(crate) fn handle_ecall(frame: &mut trap::Frame) -> umode::EcallResult {
             frame.set_up_for_divert_to_kernel(umode::user_thread_exit as *const () as usize);
             umode::EcallResult::Diverted
         }
-        syscall::READ | syscall::WRITE | syscall::ALLOC => {
+        syscall::ALLOC | syscall::CHDIR | syscall::READ | syscall::WRITE => {
             kernel::trap::divert_work_to_kernel(
                 frame,
                 frame.mepc + 4,
@@ -73,9 +74,11 @@ pub(crate) fn handle_diverted_user_thread(frame: &mut trap::Frame, syscall: usiz
     unsafe {
         interrupts::with_interrupts_enabled(|| {
             match syscall {
+                syscall::ALLOC => alloc(frame),
+                syscall::CHDIR => chdir(frame),
                 syscall::READ => read(frame),
                 syscall::WRITE => write(frame),
-                syscall::ALLOC => alloc(frame),
+
                 // Test-only: the LOCK-HOLDING exemplar of the interruptible-wait
                 // discipline. The guard lives in an inner scope: on Err(Interrupted)
                 // we leave the scope by normal control flow, the guard drops (mutex
@@ -233,6 +236,25 @@ impl From<process::HeapError> for ease_abi::Error {
     }
 }
 
+impl From<process::Error> for ease_abi::Error {
+    fn from(_value: process::Error) -> Self {
+        ease_abi::Error::Interrupted
+    }
+}
+
+impl From<fs::Error> for ease_abi::Error {
+    fn from(value: fs::Error) -> Self {
+        match value {
+            fs::Error::DirNameHasExtension => ease_abi::Error::DirNameHasExtension,
+            fs::Error::NotADirectory => ease_abi::Error::NotADirectory,
+            fs::Error::NotFound => ease_abi::Error::NotFound,
+            fs::Error::InvalidName => ease_abi::Error::InvalidName,
+            fs::Error::DirectoryInvalid => ease_abi::Error::DirectoryInvalid,
+            _ => ease_abi::Error::FileSystemError,
+        }
+    }
+}
+
 /// Allocate heap memory for a user process.
 ///
 /// A process gets at most one heap; additional requests are refused
@@ -279,4 +301,53 @@ fn test_mutex_block(frame: &mut trap::Frame) {
         // Err(Interrupted): fall out of the scope, dropping _guard.
     }
     sched::exit_current_user_thread(thread::ExitReason::Fault);
+}
+
+/// Change directory for a process.
+fn chdir(frame: &mut trap::Frame) {
+    // Nothing is held yet, so exiting is safe
+    sched::exit_user_thread_if_needs_exit();
+    match try_chdir(Untrusted::new(frame.a0), Untrusted::new(frame.a1)) {
+        Ok(()) => {
+            frame.a0 = 0;
+            frame.a1 = 0;
+        }
+        Err(e) => {
+            frame.a0 = e.into();
+            frame.a1 = 0;
+        }
+    }
+}
+
+/// Change directory for a process
+fn try_chdir(base_addr: Untrusted<usize>, size: Untrusted<usize>) -> Result<(), ease_abi::Error> {
+    // Get the syscall context
+    let context = SyscallContext::current()?;
+    // Check the given path isn't too long
+    let path_text_len = size.raw();
+    if path_text_len > ease_abi::MAX_PATH_TEXT {
+        return Err(ease_abi::Error::InvalidName);
+    };
+    // Check if the path isn't zero chars
+    if path_text_len == 0 {
+        return Err(ease_abi::Error::DirectoryInvalid);
+    }
+    // Reconstitute the user buffer and validate
+    let user_buf =
+        usermem::UserBuf::new(base_addr.raw(), path_text_len, usermem::Transfer::FromUser);
+    let validated_user_buf = context
+        .validate_buf(user_buf)
+        .ok_or(ease_abi::Error::BadBuffer)?;
+    let new_dir_path_buf = &mut [0u8; ease_abi::MAX_PATH_TEXT];
+    let new_dir_path_text_len = validated_user_buf.copy_from_user(new_dir_path_buf);
+    // Convert to a UTF8 string
+    let Ok(new_dir_path) = str::from_utf8(&new_dir_path_buf[..new_dir_path_text_len]) else {
+        return Err(ease_abi::Error::InvalidName);
+    };
+    // Call the filesystem with the given path
+    let mut current_cwd = context.cwd();
+    fs::file::change_directory(&mut current_cwd, new_dir_path)?;
+    // Update the syscall context on success
+    context.set_cwd(current_cwd)?;
+    Ok(())
 }
