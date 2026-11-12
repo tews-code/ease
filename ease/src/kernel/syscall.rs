@@ -340,6 +340,9 @@ fn try_chdir(base_addr: Untrusted<usize>, size: Untrusted<usize>) -> Result<(), 
         .ok_or(ease_abi::Error::BadBuffer)?;
     let new_dir_path_buf = &mut [0u8; ease_abi::MAX_PATH_TEXT];
     let new_dir_path_text_len = validated_user_buf.copy_from_user(new_dir_path_buf);
+    if new_dir_path_text_len != path_text_len {
+        return Err(ease_abi::Error::BadBuffer);
+    }
     // Convert to a UTF8 string
     let Ok(new_dir_path) = str::from_utf8(&new_dir_path_buf[..new_dir_path_text_len]) else {
         return Err(ease_abi::Error::InvalidName);
