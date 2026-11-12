@@ -91,7 +91,7 @@ const _: () = assert!(SECTOR_SIZE == blk::BLOCK_SIZE);
 
 #[derive(Debug, PartialEq, Eq)]
 #[allow(dead_code)]
-pub enum FsError {
+pub(crate) enum Error {
     Bpb(BpbError),
     Device(BlkError),
     Mbr(MbrError),
@@ -117,6 +117,7 @@ pub enum FsError {
     FileInsteadOfDirectory,
     FileSizeMismatch,
     FreeSectorFound,
+    /// The name is non-ASCII, more than 8 chars for the name or more than 3 chars for the extension
     InvalidName,
     ReadPastEndOfFile,
     SeekPastFileEnd,
@@ -125,39 +126,39 @@ pub enum FsError {
     VolumeExceedsPartition,
 }
 
-impl From<BlkError> for FsError {
+impl From<BlkError> for Error {
     fn from(e: BlkError) -> Self {
-        FsError::Device(e)
+        Error::Device(e)
     }
 }
 
-impl From<BpbError> for FsError {
+impl From<BpbError> for Error {
     fn from(e: BpbError) -> Self {
-        FsError::Bpb(e)
+        Error::Bpb(e)
     }
 }
 
-impl From<MbrError> for FsError {
+impl From<MbrError> for Error {
     fn from(e: MbrError) -> Self {
-        FsError::Mbr(e)
+        Error::Mbr(e)
     }
 }
 
-impl From<FatChainClusterError> for FsError {
+impl From<FatChainClusterError> for Error {
     fn from(e: FatChainClusterError) -> Self {
-        FsError::FatChain(e)
+        Error::FatChain(e)
     }
 }
 
 #[derive(Debug)]
 #[expect(dead_code)]
 pub(crate) enum MountError {
-    Fs(FsError),
+    Fs(Error),
     UnsupportedVolumeType,
 }
 
-impl From<FsError> for MountError {
-    fn from(e: FsError) -> Self {
+impl From<Error> for MountError {
+    fn from(e: Error) -> Self {
         MountError::Fs(e)
     }
 }
@@ -202,7 +203,7 @@ pub(crate) fn init() -> Result<VolumeType, MountError> {
 /// Attempt to mount the volume
 ///
 /// Returns the LBA and the BPB on success
-fn mount() -> Result<(u32, Bpb), FsError> {
+fn mount() -> Result<(u32, Bpb), Error> {
     let mut buf = [0u8; blk::BLOCK_SIZE];
     read_block(BOOT_SECTOR, &mut buf)?;
     // First try to read sector 0 as a BPB, then as MBR
@@ -217,11 +218,11 @@ fn mount() -> Result<(u32, Bpb), FsError> {
                 let bpb = Bpb::parse(&buf)?;
                 // Make sure that the partition size and volume size fit
                 if sector_count < bpb.total_sectors {
-                    return Err(FsError::VolumeExceedsPartition);
+                    return Err(Error::VolumeExceedsPartition);
                 }
                 Ok((lba, bpb))
             }
-            Err(_) => Err(FsError::UnknownFormat),
+            Err(_) => Err(Error::UnknownFormat),
         },
     }
 }

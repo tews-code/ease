@@ -5,7 +5,7 @@ use crate::kernel::collection::{Arena, Handle};
 use crate::kernel::sync::IrqSpinLock;
 
 use super::volume::with_volume;
-use super::{Dir, FileInfo, FsError, Location};
+use super::{Dir, Error, FileInfo, Location};
 
 const MAX: usize = 128;
 
@@ -120,11 +120,11 @@ impl OpenFileTable {
         access: Access,
         dir_entry: Location,
         file_info: &FileInfo,
-    ) -> Result<FileHandle, FsError> {
+    ) -> Result<FileHandle, Error> {
         match (access, self.access_by_location(dir_entry)) {
-            (Access::Write, Some(_)) => return Err(FsError::OpeningForWriteButAlreadyOpen),
+            (Access::Write, Some(_)) => return Err(Error::OpeningForWriteButAlreadyOpen),
             (Access::Read, Some(Access::Write)) => {
-                return Err(FsError::OpeningForReadButWriteInProgress);
+                return Err(Error::OpeningForReadButWriteInProgress);
             }
             _ => {}
         }
@@ -143,7 +143,7 @@ impl OpenFileTable {
                 closed: false,
             })
         } else {
-            Err(FsError::TooManyOpenFiles)
+            Err(Error::TooManyOpenFiles)
         }
     }
 
@@ -163,7 +163,7 @@ pub(crate) struct FileHandle {
 }
 
 impl FileHandle {
-    pub(crate) fn close(mut self) -> Result<(), FsError> {
+    pub(crate) fn close(mut self) -> Result<(), Error> {
         // Record that we have tried to close the file
         self.closed = true;
         // Check whether the file was write access
@@ -200,25 +200,25 @@ impl Drop for FileHandle {
 }
 
 /// Change working directory
-pub(crate) fn change_directory(wd: &mut Dir, dirname: &str) -> Result<(), FsError> {
+pub(crate) fn change_directory(wd: &mut Dir, dirname: &str) -> Result<(), Error> {
     with_volume(|vol| vol.change_directory(wd, dirname))
 }
 
 /// Seek within file
 ///
 /// Does not support seek beyond file end
-pub(crate) fn lseek(file: &FileHandle, seek_bytes: u32) -> Result<(), FsError> {
+pub(crate) fn lseek(file: &FileHandle, seek_bytes: u32) -> Result<(), Error> {
     let snapshot = OPEN_FILE_TABLE.lock().snapshot(file);
     let snapshot = with_volume(|vol| vol.seek(snapshot, seek_bytes))?;
     OPEN_FILE_TABLE.lock().set_snapshot(file, snapshot);
     Ok(())
 }
 
-pub(crate) fn mkdir(dir: Dir, dirname: &str) -> Result<(), FsError> {
+pub(crate) fn mkdir(dir: Dir, dirname: &str) -> Result<(), Error> {
     with_volume(|vol| vol.make_dir(dir, dirname))
 }
 
-pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, FsError> {
+pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, Error> {
     // Need both volume and table locks for safe opening
     // The table lock disables IRQs, so must always be the inner lock
     with_volume(|vol| {
@@ -235,11 +235,11 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
     })
 }
 
-pub(crate) fn read_at(file_handle: &FileHandle, buf: &mut [u8]) -> Result<usize, FsError> {
+pub(crate) fn read_at(file_handle: &FileHandle, buf: &mut [u8]) -> Result<usize, Error> {
     with_volume(|vol| {
         let snapshot = OPEN_FILE_TABLE.lock().snapshot(file_handle);
         if snapshot.position > snapshot.size {
-            return Err(FsError::ReadPastEndOfFile);
+            return Err(Error::ReadPastEndOfFile);
         }
         // If the file is empty or we are at the end then we are already done
         if snapshot.size == 0 || snapshot.size == snapshot.position {
@@ -250,7 +250,7 @@ pub(crate) fn read_at(file_handle: &FileHandle, buf: &mut [u8]) -> Result<usize,
         let (snapshot, num_bytes) = vol.read_at(snapshot, buf)?;
 
         if snapshot.position > snapshot.size {
-            return Err(FsError::ReadPastEndOfFile);
+            return Err(Error::ReadPastEndOfFile);
         }
         // Re-lock open file table and save
         OPEN_FILE_TABLE.lock().set_snapshot(file_handle, snapshot);
@@ -258,13 +258,13 @@ pub(crate) fn read_at(file_handle: &FileHandle, buf: &mut [u8]) -> Result<usize,
     })
 }
 
-pub(crate) fn write_at(file_handle: &FileHandle, buf: &[u8]) -> Result<usize, FsError> {
+pub(crate) fn write_at(file_handle: &FileHandle, buf: &[u8]) -> Result<usize, Error> {
     with_volume(|vol| {
         // Check if the file is open for writing
         let snapshot = OPEN_FILE_TABLE
             .lock()
             .writable_snapshot(file_handle)
-            .ok_or(FsError::OpenForWriteButReadAccess)?;
+            .ok_or(Error::OpenForWriteButReadAccess)?;
         // Without holding the open file table lock, pass the small Copy structs to volume
         let (num_bytes, snapshot) = vol.write_at(snapshot, buf)?;
         // Take the open file table lock again, now that vol lock is dropped
@@ -275,7 +275,7 @@ pub(crate) fn write_at(file_handle: &FileHandle, buf: &[u8]) -> Result<usize, Fs
     })
 }
 
-pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
+pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), Error> {
     // Need both volume and table locks for safe deletion
     // The table lock disables IRQs, so must always be the inner lock
     with_volume(|vol| {
@@ -284,21 +284,21 @@ pub(crate) fn rm(dir: Dir, filename: &str) -> Result<(), FsError> {
         // Decline if the file is currently open
         let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
         if OPEN_FILE_TABLE.lock().is_open(location) {
-            return Err(FsError::FileInUse);
+            return Err(Error::FileInUse);
         }
         vol.delete_file(location, &file_info)?;
         Ok(())
     })
 }
 
-pub(crate) fn rmdir(dir: Dir, dirname: &str) -> Result<(), FsError> {
+pub(crate) fn rmdir(dir: Dir, dirname: &str) -> Result<(), Error> {
     with_volume(|vol| vol.delete_directory(dir, dirname))
 }
 
-pub(crate) fn truncate(dir: Dir, filename: &str) -> Result<(), FsError> {
+pub(crate) fn truncate(dir: Dir, filename: &str) -> Result<(), Error> {
     // Try to open the file for write access to ensure exclusive use
     let file = open(Access::Write, dir, filename).map_err(|e| match e {
-        FsError::OpeningForWriteButAlreadyOpen => FsError::FileInUse,
+        Error::OpeningForWriteButAlreadyOpen => Error::FileInUse,
         other => other,
     })?;
     let snapshot = OPEN_FILE_TABLE.lock().snapshot(&file);
@@ -308,10 +308,10 @@ pub(crate) fn truncate(dir: Dir, filename: &str) -> Result<(), FsError> {
     file.close()
 }
 
-pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), FsError> {
+pub(crate) fn touch(dir: Dir, filename: &str) -> Result<(), Error> {
     match with_volume(|vol| vol.create_empty_file(dir, filename)) {
         Ok(_) => Ok(()),
-        Err(FsError::AlreadyExists) => Ok(()), // Touch does not error if the file is already in existence
+        Err(Error::AlreadyExists) => Ok(()), // Touch does not error if the file is already in existence
         Err(fs_error) => Err(fs_error),
     }
 }

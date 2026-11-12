@@ -16,7 +16,7 @@ const ROOT: Dir = Dir::Root;
 /// Directory-entry lookup — the backend of the (now file-module) `open`.
 /// Use for tests that only inspect the entry (size, existence), so they can
 /// stay inside a single `with_volume` closure.
-fn find_size(name: &str) -> Result<u32, FsError> {
+fn find_size(name: &str) -> Result<u32, Error> {
     with_volume(|vol| vol.find_file_dir_entry(ROOT, name)).map(|(_, fi)| fi.file_size)
 }
 
@@ -79,7 +79,7 @@ fn open_case_insensitive() {
 
 #[test_case]
 fn open_not_found() {
-    assert!(matches!(find_size("NOPE.TXT"), Err(FsError::NotFound)));
+    assert!(matches!(find_size("NOPE.TXT"), Err(Error::NotFound)));
 }
 
 #[test_case]
@@ -343,7 +343,7 @@ fn touch_no_extension() {
 fn touch_invalid_name_rejected() {
     with_volume(|vol| {
         let result = vol.create_empty_file(Dir::Root, "TOOLONGNAME.TXT");
-        assert!(matches!(result, Err(FsError::InvalidName)));
+        assert!(matches!(result, Err(Error::InvalidName)));
     });
 }
 
@@ -407,7 +407,7 @@ fn mkdir_duplicate_rejected() {
         vol.make_dir(ROOT, "MKDIR2").unwrap();
         assert!(matches!(
             vol.make_dir(ROOT, "MKDIR2"),
-            Err(FsError::DuplicateDirName)
+            Err(Error::DuplicateDirName)
         ));
     });
 }
@@ -417,7 +417,7 @@ fn mkdir_name_with_extension_rejected() {
     with_volume(|vol| {
         assert!(matches!(
             vol.make_dir(ROOT, "MKDIR3.TXT"),
-            Err(FsError::DirNameHasExtension)
+            Err(Error::DirNameHasExtension)
         ));
     });
 }
@@ -485,7 +485,7 @@ fn seek_past_end_rejected() {
     let mut handle = file::open(Access::Read, ROOT, "BIG.TXT").unwrap();
     let result = file::lseek(&mut handle, size + 1);
     handle.close().unwrap();
-    assert!(matches!(result, Err(FsError::SeekPastFileEnd)));
+    assert!(matches!(result, Err(Error::SeekPastFileEnd)));
 }
 
 #[test_case]
@@ -569,7 +569,7 @@ fn cd_into_file_rejected() {
         let mut wd = Dir::Root;
         assert!(matches!(
             vol.change_directory(&mut wd, "CDFILE.TXT"),
-            Err(FsError::NotADirectory)
+            Err(Error::NotADirectory)
         ));
         assert_eq!(wd, Dir::Root, "wd must be unchanged on error");
     });
@@ -581,7 +581,7 @@ fn cd_nonexistent_rejected() {
         let mut wd = Dir::Root;
         assert!(matches!(
             vol.change_directory(&mut wd, "NOSUCHDIR"),
-            Err(FsError::NotFound)
+            Err(Error::NotFound)
         ));
         assert_eq!(wd, Dir::Root);
     });
@@ -599,7 +599,7 @@ fn rmdir_removes_empty_dir() {
         vol.delete_directory(ROOT, "RMD1").unwrap();
         assert!(matches!(
             vol.find_file_dir_entry(ROOT, "RMD1"),
-            Err(FsError::NotFound)
+            Err(Error::NotFound)
         ));
     });
 }
@@ -625,7 +625,7 @@ fn rmdir_non_empty_rejected() {
             .unwrap();
         assert!(matches!(
             vol.delete_directory(ROOT, "RMD3"),
-            Err(FsError::DirectoryNotEmpty)
+            Err(Error::DirectoryNotEmpty)
         ));
         // A rejected removal leaves the directory in place.
         assert!(vol.find_file_dir_entry(ROOT, "RMD3").is_ok());
@@ -637,11 +637,11 @@ fn rmdir_dot_and_dotdot_rejected() {
     with_volume(|vol| {
         assert!(matches!(
             vol.delete_directory(ROOT, "."),
-            Err(FsError::DirectoryIsCurrent)
+            Err(Error::DirectoryIsCurrent)
         ));
         assert!(matches!(
             vol.delete_directory(ROOT, ".."),
-            Err(FsError::DirectoryIsCurrent)
+            Err(Error::DirectoryIsCurrent)
         ));
     });
 }
@@ -651,7 +651,7 @@ fn rmdir_nonexistent_rejected() {
     with_volume(|vol| {
         assert!(matches!(
             vol.delete_directory(ROOT, "NOSUCHRMD"),
-            Err(FsError::NotFound)
+            Err(Error::NotFound)
         ));
     });
 }
@@ -662,7 +662,7 @@ fn rmdir_regular_file_rejected() {
         vol.create_empty_file(ROOT, "RMDFILE.TXT").unwrap();
         assert!(matches!(
             vol.delete_directory(ROOT, "RMDFILE.TXT"),
-            Err(FsError::NotADirectory)
+            Err(Error::NotADirectory)
         ));
     });
 }
@@ -697,7 +697,7 @@ fn path_create_resolve_and_remove() {
         vol.delete_directory(ROOT, "PATHT/SUB").unwrap();
         assert!(matches!(
             vol.find_file_dir_entry(pdir, "SUB"),
-            Err(FsError::NotFound)
+            Err(Error::NotFound)
         ));
 
         // Clean up so root is left as we found it.
@@ -717,7 +717,7 @@ fn rmdir_guard_refuses_the_working_dir_via_path() {
         let wd = Dir::SubDir(g.first_cluster);
         assert!(matches!(
             vol.delete_directory(wd, "../PGUARD"),
-            Err(FsError::DirectoryIsCurrent)
+            Err(Error::DirectoryIsCurrent)
         ));
         assert!(vol.find_file_dir_entry(ROOT, "PGUARD").is_ok());
         // Clean up.
@@ -738,7 +738,7 @@ fn delete_empty_file() {
         let (slot, info) = vol.find_file_dir_entry(ROOT, "DEL1.TXT").unwrap();
         vol.delete_file(slot, &info).unwrap();
     });
-    assert!(matches!(find_size("DEL1.TXT"), Err(FsError::NotFound)));
+    assert!(matches!(find_size("DEL1.TXT"), Err(Error::NotFound)));
 }
 
 #[test_case]
@@ -756,7 +756,7 @@ fn delete_file_with_content() {
         // File should no longer be found
         assert!(matches!(
             vol.find_file_dir_entry(current_dir, "DELETE.ME"),
-            Err(FsError::NotFound)
+            Err(Error::NotFound)
         ));
 
         // Cluster should be freed (0x0000)
@@ -869,7 +869,7 @@ fn write_at_invalid_name() {
     // The 8.3 name check happens on create, so touch rejects an over-long name.
     assert!(matches!(
         file::touch(ROOT, "TOOLONGNAME.TXT"),
-        Err(FsError::InvalidName)
+        Err(Error::InvalidName)
     ));
 }
 
@@ -879,7 +879,7 @@ fn create_empty_file_does_not_overwrite_existing() {
     // create_empty_file refuses to clobber an existing file
     assert!(matches!(
         with_volume(|vol| vol.create_empty_file(ROOT, "WSTREAM6.TXT")),
-        Err(FsError::AlreadyExists)
+        Err(Error::AlreadyExists)
     ));
     assert_eq!(find_size("WSTREAM6.TXT").unwrap(), 9); // unchanged
     assert_eq!(&read_whole("WSTREAM6.TXT"), b"keep this");
@@ -979,7 +979,7 @@ fn dir_iter_ignores_stale_bytes_beyond_terminator() {
             buf[offset..offset + dir::ENTRY_BYTES].copy_from_slice(&original);
         });
         assert!(
-            matches!(result, Err(FsError::NotFound)),
+            matches!(result, Err(Error::NotFound)),
             "entry beyond the 0x00 terminator must be invisible"
         );
     });

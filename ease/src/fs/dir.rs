@@ -88,7 +88,7 @@
  *
  */
 
-use super::{FsError, Location, VolumeType};
+use super::{Error, Location, VolumeType};
 use crate::kernel::collection::StackVec;
 
 pub(super) const ENTRY_BYTES: usize = 32; // FAT16 and FAT32 both use 32 bytes
@@ -222,6 +222,9 @@ impl FileInfo {
     }
 
     /// Formats the filename as a string (e.g. "HELLO   TXT" → "HELLO.TXT")
+    ///
+    /// # Panics
+    /// Panics if the name is not UTF-8
     pub fn filename(&self) -> StackVec<u8, 12> {
         let name = str::from_utf8(&self.name)
             .expect("should be UTF-8")
@@ -242,17 +245,16 @@ impl FileInfo {
         full_name
     }
 
-    // Parse string into 8.3 file name
-    // Takes "TEST.TXT" and produces (b"TEST    ", b"TXT").
-    // Rules:
-    // - split on .
-    // - uppercase
-    // - pad name to 8 with spaces
-    // - pad extension to 3 with spaces
-    // - Reject names that are too long (>8 name or >3 extension) or contain invalid characters.
-    pub fn parse_83_name(filename: &str) -> Result<([u8; 8], [u8; 3]), FsError> {
+    /// Parse string into 8.3 file name
+    /// Takes "TEST.TXT" and produces (b"TEST    ", b"TXT").
+    /// Rules:
+    /// - split on uppercase
+    /// - pad name to 8 with spaces
+    /// - pad extension to 3 with spaces
+    /// - Reject names that are too long (>8 name or >3 extension) or contain invalid characters.
+    pub fn parse_83_name(filename: &str) -> Result<([u8; 8], [u8; 3]), Error> {
         if !filename.is_ascii() {
-            return Err(FsError::InvalidName);
+            return Err(Error::InvalidName);
         }
         let (name_str, ext_str) = match filename.split_once('.') {
             Some((n, e)) => (n, e),
@@ -260,10 +262,10 @@ impl FileInfo {
         };
         // Validation. Before copying, check lengths:
         if !(1..=8).contains(&name_str.len()) {
-            return Err(FsError::InvalidName);
+            return Err(Error::InvalidName);
         }
         if ext_str.len() > 3 || ext_str.contains('.') {
-            return Err(FsError::InvalidName);
+            return Err(Error::InvalidName);
         }
 
         let mut name = [b' '; 8];

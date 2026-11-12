@@ -6,7 +6,7 @@ use core::fmt::Write;
 use core::ops::ControlFlow;
 
 use crate::fs::file;
-use crate::fs::{Dir, FsError};
+use crate::fs::{Dir, Error};
 #[cfg(feature = "paint-stack")]
 use crate::kernel::sched;
 use crate::kernel::timer;
@@ -333,8 +333,8 @@ pub fn mkdir(console: &mut Console, dir: Dir, arg_str: &str) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
-                    FsError::DuplicateDirName => "directory already exists",
-                    FsError::InvalidName => "invalid directory name",
+                    Error::DuplicateDirName => "directory already exists",
+                    Error::InvalidName => "invalid directory name",
                     _ => "device error",
                 };
                 let _ = writeln!(console, "mkdir: {}: {}", dirname, msg);
@@ -364,8 +364,8 @@ pub fn rm(console: &mut Console, dir: Dir, arg_str: &str) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
-                    FsError::InvalidName => "invalid file name",
-                    FsError::NotFound => "file not found",
+                    Error::InvalidName => "invalid file name",
+                    Error::NotFound => "file not found",
                     _ => "device error",
                 };
                 let _ = writeln!(console, "rm: {}: {}", filename, msg);
@@ -389,11 +389,11 @@ pub fn rmdir(console: &mut Console, dir: Dir, arg_str: &str) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
-                    FsError::DirectoryNotEmpty => "directory not empty",
-                    FsError::DirectoryIsCurrent => "cannot remove '.' or '..'",
-                    FsError::NotADirectory => "not a directory",
-                    FsError::InvalidName => "invalid directory name",
-                    FsError::NotFound => "directory not found",
+                    Error::DirectoryNotEmpty => "directory not empty",
+                    Error::DirectoryIsCurrent => "cannot remove '.' or '..'",
+                    Error::NotADirectory => "not a directory",
+                    Error::InvalidName => "invalid directory name",
+                    Error::NotFound => "directory not found",
                     _ => "device error",
                 };
                 let _ = writeln!(console, "rmdir: {}: {}", dirname, msg);
@@ -430,8 +430,8 @@ pub fn touch(console: &mut Console, dir: Dir, arg_str: &str) {
             Ok(_) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
-                    FsError::DirFull => "directory full",
-                    FsError::InvalidName => "invalid file name",
+                    Error::DirFull => "directory full",
+                    Error::InvalidName => "invalid file name",
                     _ => "device error",
                 };
                 let _ = writeln!(console, "touch: {}: {}", filename, msg);
@@ -455,8 +455,8 @@ pub fn truncate(console: &mut Console, dir: Dir, arg_str: &str) {
             Ok(()) => {}
             Err(fs_error) => {
                 let msg = match fs_error {
-                    FsError::InvalidName => "invalid file name",
-                    FsError::NotFound => "file not found",
+                    Error::InvalidName => "invalid file name",
+                    Error::NotFound => "file not found",
                     _ => "device error",
                 };
                 let _ = writeln!(console, "truncate: {}: {}", filename, msg);
