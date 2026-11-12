@@ -162,16 +162,22 @@ impl From<FsError> for MountError {
     }
 }
 
+/// Volume types supported by EASE.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub(crate) enum VolumeType {
-    Fat16((u32, u32)), // Root directory start sector and root dir num sectors
-    Fat32(u32),        // Root directory file first cluster
+    /// FAT16 volumes. The enum holds the root directory start sector and root directory number of sectors
+    Fat16((u32, u32)),
+    /// FAT32 volumes. The enum holds the root directory file first cluster
+    Fat32(u32),
 }
 
+/// A directory in the file system
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Dir {
-    Root,        // Root directory details are held in VolumeType
-    SubDir(u32), // First cluster
+    /// Root directory details are held in VolumeType
+    Root,
+    /// Sub-directories are held in files. This enum holds the files' first cluster
+    SubDir(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

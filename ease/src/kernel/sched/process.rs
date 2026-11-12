@@ -7,6 +7,7 @@ use super::Deadline;
 use super::stride::{SchedInner, Scheduler};
 use super::thread;
 use super::usermem;
+use crate::fs;
 use crate::kernel::alloc::MemRegion;
 use crate::kernel::collection::{Arena, StackVec};
 use crate::kernel::fd;
@@ -23,8 +24,12 @@ pub(super) const MAX_THREADS_PER_PROC: usize = 6;
 
 /// A token to ensure the current thread's process is in Alive state at the
 /// start of a syscall.
+///
+/// Takes a snapshot of the file descriptor table handle and the current working directory
+/// as at the start of the syscall.
 pub(crate) struct SyscallContext {
     fds: fd::Handle,
+    cwd: fs::Dir,
     _marker: PhantomData<*const ()>, // !Sync and !Send
 }
 
@@ -43,11 +48,7 @@ impl SyscallContext {
     /// # Panics
     /// Panics if called on a kernel thread
     pub(crate) fn current() -> Result<Self, Error> {
-        let fds = sched::SCHEDULER.current_process_fds()?;
-        Ok(Self {
-            fds,
-            _marker: PhantomData,
-        })
+        sched::SCHEDULER.current_syscall_context()
     }
 
     /// Validate a U-Mode created `UserBuf` against the current thread's process memory map and
@@ -71,6 +72,11 @@ impl SyscallContext {
     /// Get the SyscallContext process file descriptor table handle
     pub(crate) fn fds(&self) -> fd::Handle {
         self.fds
+    }
+
+    /// Get the SyscallContext process current working directory
+    pub(crate) fn cwd(&self) -> fs::Dir {
+        self.cwd
     }
 }
 
@@ -117,6 +123,8 @@ struct AliveState {
     fds: fd::Handle,
     /// Forged entry return address for new user threads in this process
     entry_ra: usize,
+    /// The process current working directory. All threads in the process share this directory.
+    cwd: fs::Dir,
 }
 
 /// The process is being torn down by the `teardown_thread` and will release the file descriptors
@@ -151,7 +159,11 @@ impl State {
         // Safe to replace with the Invalid placeholder, as we hold &mut and restore at the end of the method, so no one else sees Invalid
         match core::mem::replace(self, Self::Invalid) {
             Self::Starting => {
-                *self = State::Alive(AliveState { fds, entry_ra });
+                *self = State::Alive(AliveState {
+                    fds,
+                    entry_ra,
+                    cwd: fs::Dir::Root,
+                }); // We start all processes in the root dir
                 Ok(())
             }
             other_state => {
@@ -240,6 +252,19 @@ impl ControlBlock {
     /// Returns [Error::ProcessNotInAliveState] on failure.
     fn get_alive(&self) -> Result<&AliveState, Error> {
         if let State::Alive(state) = &self.state {
+            Ok(state)
+        } else {
+            Err(Error::ProcessNotInAliveState)
+        }
+    }
+
+    /// Get an exclusive mut borrow on the AliveState for this process. Note that this reborrows
+    /// all the way up to the Scheduler lock.  Returns a &mut reference to the `AliveState` on success.
+    ///
+    /// # Errors
+    /// Returns [Error::ProcessNotInAliveState] on failure.
+    fn get_alive_mut(&mut self) -> Result<&mut AliveState, Error> {
+        if let State::Alive(state) = &mut self.state {
             Ok(state)
         } else {
             Err(Error::ProcessNotInAliveState)
@@ -350,13 +375,20 @@ impl Processes {
         &self.pcb(process).mem_map
     }
 
-    /// Returns the file descriptor handle of the given process if the process is Alive.
+    /// Sets the current working directory of the given process if the process is Alive.
     ///
     /// # Errors
-    /// - Returns [Error::ProcessHandleIsStale] if the process handle is stale
-    /// - Returns [Error::ProcessNotInAliveState] if called on a process that is not Alive
-    pub(super) fn get_fds_if_alive(&self, process: Handle) -> Result<fd::Handle, Error> {
-        Ok(self.get_pcb(process)?.get_alive()?.fds)
+    /// Returns [Error::ProcessNotInAliveState] if called on a process that is not Alive.
+    ///
+    /// # Panics
+    /// Panics if the process handle is stale
+    pub(super) fn set_cwd_if_alive(
+        &mut self,
+        process: Handle,
+        new_wd: fs::Dir,
+    ) -> Result<(), Error> {
+        self.pcb_mut(process).get_alive_mut()?.cwd = new_wd;
+        Ok(())
     }
 }
 
@@ -636,13 +668,18 @@ impl Scheduler {
     ///
     /// # Panics
     /// Panics if the thread is not a user thread
-    pub(super) fn current_process_fds(&self) -> Result<fd::Handle, Error> {
+    pub(super) fn current_syscall_context(&self) -> Result<SyscallContext, Error> {
         let sched = self.sched.lock();
         let process = sched
             .threads
             .process_handle_of(percpu::current_thread())
             .expect("current thread should be a user thread");
-        sched.processes.get_fds_if_alive(process)
+        let alive_state = sched.processes.pcb(process).get_alive()?;
+        Ok(SyscallContext {
+            fds: alive_state.fds,
+            cwd: alive_state.cwd,
+            _marker: PhantomData,
+        })
     }
 
     /// Validates a given user buffer against the given user thread and its process memory map.
@@ -719,5 +756,21 @@ impl Scheduler {
             .to_pmp(&user_context.stack);
         pmp_config.activate();
         Ok(())
+    }
+
+    /// Set the current thread's process current working directory.
+    ///
+    /// # Errors
+    /// - Returns [Error::ProcessNotInAliveState] if called on a process that is not Alive.
+    ///
+    /// # Panics
+    /// Panics if the thread is not a user thread
+    pub(super) fn set_current_process_cwd(&self, new_wd: fs::Dir) -> Result<(), Error> {
+        let mut sched = self.sched.lock();
+        let process = sched
+            .threads
+            .process_handle_of(percpu::current_thread())
+            .expect("current thread should be a user thread");
+        sched.processes.set_cwd_if_alive(process, new_wd)
     }
 }
