@@ -10,15 +10,15 @@
 
 extern crate alloc;
 mod args;
-// mod commands;
+#[cfg(target_os = "none")]
+mod commands;
 mod line_editor;
 mod vt_parse;
 
 use alloc::vec::Vec;
 use ease_ulib::{ascii, fds};
 #[cfg(target_os = "none")]
-use ease_ulib::{print, put_char, read, write_all};
-// use crate::args::Args;
+use ease_ulib::{print, println, put_char, read, write_all};
 #[cfg(target_os = "none")]
 use crate::vt_parse::{vt_out, KeyEvent};
 use crate::line_editor::{EditResult, LineEditor};
@@ -45,9 +45,11 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
         EditResult::Complete => {
             let _ = put_char(ascii::CR);
             let _ = put_char(ascii::LF);
-            // let cmd = core::str::from_utf8(self.line_editor.line())
-            // .expect("should be UTF-8");
-            // execute(&mut self.console, &mut self.wd, cmd);
+            if let Ok(cmd) = core::str::from_utf8(line_editor.line()) {
+                execute(cmd);
+            } else {
+                println!("{}", "Invalid string.")
+            }
             print!("{}", PROMPT);
             line_editor.reset();
         },
@@ -85,48 +87,49 @@ fn redraw_line(write_buf: &mut Vec<u8>, line: &[u8], cursor_pos: usize) {
     let _ = write_all(fds::STDOUT, write_buf.as_slice());
 }
 
-// /// Execute the given command
-// fn execute(wd: &mut Dir, line: &str) {
-//     let line = line.trim();
-//     if line.is_empty() {
-//         return;
-//     }
-//
-//     let (cmd, rest) = match line.find(' ') {
-//         Some(pos) => (&line[..pos], line[pos + 1..].trim()),
-//         None => (line, ""),
-//     };
-//
-//     match cmd {
-//         "cat" => commands::cat(console, *wd, rest),
-//         "cd" => commands::cd(console, wd, rest),
-//         "clear" => commands::clear(console),
-//         "date" => commands::date(console),
-//         "echo" => commands::echo(console, rest),
-//         "help" => commands::help(console),
-//         "hexdump" => commands::hexdump(console, *wd, rest),
-//         "ls" => commands::ls(console, *wd, rest),
-//         "mkdir" => commands::mkdir(console, *wd, rest),
-//         "panic" => commands::panic(console),
-//         "rm" => commands::rm(console, *wd, rest),
-//         "rmdir" => commands::rmdir(console, *wd, rest),
-//         #[cfg(feature = "paint-stack")]
-//         "stacks" => commands::stacks(console),
-//         "time" => {
-//             // Time another command: `rest` is the command line to run, so
-//             // re-enter the dispatcher around a wall-clock reading. Reuses
-//             // the whole dispatch (any command, its own args, wd changes).
-//             let start_ms = crate::kernel::timer::elapsed_ms();
-//             Self::execute(console, wd, rest);
-//             let elapsed_ms = crate::kernel::timer::elapsed_ms() - start_ms;
-//             let _ = writeln!(console, "time: {} ms", elapsed_ms);
-//         }
-//         "truncate" => commands::truncate(console, *wd, rest),
-//         "touch" => commands::touch(console, *wd, rest),
-//         "write" => commands::write(console, *wd, rest),
-//         _ => commands::unknown(console, cmd),
-//     }
-// }
+/// Execute the given command
+#[cfg(target_os = "none")]
+fn execute(line: &str) {
+    let line = line.trim();
+    if line.is_empty() {
+        return;
+    }
+
+    let (cmd, rest) = match line.find(' ') {
+        Some(pos) => (&line[..pos], line[pos + 1..].trim()),
+        None => (line, ""),
+    };
+
+    match cmd {
+        // "cat" => commands::cat(console, *wd, rest),
+        "cd" => commands::cd(rest),
+        "clear" => commands::clear(),
+        // "date" => commands::date(console),
+        "echo" => commands::echo(rest),
+        "help" => commands::help(),
+        // "hexdump" => commands::hexdump(console, *wd, rest),
+        // "ls" => commands::ls(console, *wd, rest),
+        // "mkdir" => commands::mkdir(console, *wd, rest),
+        "panic" => commands::panic(),
+        // "rm" => commands::rm(console, *wd, rest),
+        // "rmdir" => commands::rmdir(console, *wd, rest),
+        // #[cfg(feature = "paint-stack")]
+        // "stacks" => commands::stacks(console),
+        // "time" => {
+        //     // Time another command: `rest` is the command line to run, so
+        //     // re-enter the dispatcher around a wall-clock reading. Reuses
+        //     // the whole dispatch (any command, its own args, wd changes).
+        //     let start_ms = crate::kernel::timer::elapsed_ms();
+        //     Self::execute(console, wd, rest);
+        //     let elapsed_ms = crate::kernel::timer::elapsed_ms() - start_ms;
+        //     let _ = writeln!(console, "time: {} ms", elapsed_ms);
+        // }
+        // "truncate" => commands::truncate(console, *wd, rest),
+        // "touch" => commands::touch(console, *wd, rest),
+        // "write" => commands::write(console, *wd, rest),
+        _ => commands::unknown(cmd),
+    }
+}
 
 /// The EASE built-in shell
 #[cfg(target_os = "none")]

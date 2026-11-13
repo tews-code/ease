@@ -4,6 +4,11 @@ use core::arch::asm;
 use core::num::NonZeroUsize;
 use ease_abi::{Error, fds, syscall};
 
+/// Change working directory
+pub fn chdir(path: &str) -> Result<(), Error> {
+    ecall2(syscall::CHDIR, path.as_ptr().addr(), path.len()).map(|_| ())
+}
+
 /// Print a single u8 byte to standard out
 pub fn put_char(ch: u8) -> Result<(), Error> {
     let buf = [ch; 1];
@@ -78,6 +83,8 @@ pub(crate) fn request_heap(size: usize) -> Result<Region, Error> {
     })
 }
 
+//  ECALLs
+
 /// Common syscall asm and error decoded for zero argument syscalls
 /// `error` in a0, `value` in a1, zero means success
 fn ecall0(syscall: usize) -> Result<usize, Error> {
@@ -117,6 +124,28 @@ fn ecall1_ret2(syscall: usize, arg: usize) -> Result<(usize, usize), Error> {
     }
     if error == 0 {
         Ok((val1, val2))
+    } else {
+        Err(Error::try_from(error).expect("kernel returned an unknown error code"))
+    }
+}
+
+/// Common syscall asm and error decoded for two argument syscalls.
+///
+/// Returns a Result with an `Ok(value)` on success
+fn ecall2(syscall: usize, arg0: usize, arg1: usize) -> Result<usize, Error> {
+    let error: usize;
+    let value: usize;
+    unsafe {
+        asm!(
+            "ecall",
+             clobber_abi("C"),
+             inout("a0") arg0 => error,
+             inout("a1") arg1 => value,
+             in("a7") syscall,
+        );
+    }
+    if error == 0 {
+        Ok(value)
     } else {
         Err(Error::try_from(error).expect("kernel returned an unknown error code"))
     }

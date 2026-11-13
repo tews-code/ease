@@ -11,6 +11,10 @@ pub mod vt_out {
     pub const CURSOR_RIGHT: &[u8] = b"\x1b[C";
     /// Erase to the end of the line
     pub const ERASE_TO_END_OF_LINE: &[u8] = b"\x1b[K";
+    /// Move the cursor to the top left home - location (1, 1)
+    pub const CURSOR_HOME: &[u8] = b"\x1b[H";
+    /// Clear the whole screen
+    pub const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
 }
 
 /// Special key modifier

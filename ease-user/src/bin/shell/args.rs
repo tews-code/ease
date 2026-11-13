@@ -19,7 +19,7 @@ pub enum ArgsError<'a> {
 pub struct Args<'a> {
     flags: Vec<&'a str>,
     flag_values: Vec<(&'a str, &'a str)>,
-    positionals: Vec<&'a str>,
+    pub positionals: Vec<&'a str>,
     rest: &'a str,
 }
 
