@@ -150,3 +150,31 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     table is lost. Seen 2026-10-29 after a userloader assert at 47 ms.
     Fix: treat a None handle as "not on this hart" (map/is_some_and)
     rather than unwrapping; audit the other per_cpu reads in the dump.
+
+[ ] ease-user is not formatted by ci.sh: the "Unconditionally reformat"
+    step runs cargo fmt for ease, ease-abi and ease-ulib only, and
+    `cargo fmt --check` in ease-user reports diffs across the shell
+    files. Add ease-user to that step (one large formatting-only commit).
+    Noted 2026-11-13 while reviewing the user shell's cd port.
+
+[ ] Line editor edits by character, not by byte. Noted 2026-11-13 while
+    reviewing the user shell's cd port. Do this next.
+    Today: ease-user's LineEditor holds the line as bytes. vt_parse
+    turns any byte it does not recognise into KeyEvent::Char(byte) and
+    process() pushes it, so the cursor moves and backspace deletes one
+    byte at a time. A multi-byte character can be cut in half (type é,
+    backspace, Enter), and a stray byte of 0x80 or above lands on the
+    line as it is. The shell then has to check the line with from_utf8
+    before it can run it as a command.
+    Wanted: cursor movement, insert, backspace and delete work on whole
+    characters, so the line is valid UTF-8 by construction (it could be
+    a String) and the check at the shell's boundary goes away.
+    Things to settle:
+      - Input arrives one byte at a time: where the bytes of a
+        multi-byte character are collected before they reach the line,
+        and what happens to a sequence that never completes or is
+        invalid.
+      - Cursor position counts characters, bytes or screen columns;
+        redraw_line needs columns.
+      - History lines and the saved line follow the same type.
+      - LINE_LEN is a byte limit today; say which it is afterwards.
