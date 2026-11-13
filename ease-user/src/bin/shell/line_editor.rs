@@ -1,11 +1,11 @@
 //! Line editor for shell
 
-use alloc::vec::Vec;
-use alloc::collections::VecDeque;
-use ease_ulib::ascii;
-use crate::vt_parse::{Key, KeyEvent};
 #[cfg(test)]
 use crate::vt_parse::Modifier;
+use crate::vt_parse::{Key, KeyEvent};
+use alloc::collections::VecDeque;
+use alloc::vec::Vec;
+use ease_ulib::ascii;
 
 pub const LINE_LEN: usize = 74; // 80 columns - 6 char prompt
 const HISTORY_SIZE: usize = 10;
@@ -31,9 +31,9 @@ pub enum EditResult {
 /// Line editor with cursor movement, insert/delete, and command history.
 pub struct LineEditor {
     line: Vec<u8>,
-    saved_line: Vec<u8>,            // Stores current line when browsing history
-    cursor: usize,                  // Cursor position
-    history_index: Option<usize>,   // History row currently being used.
+    saved_line: Vec<u8>,          // Stores current line when browsing history
+    cursor: usize,                // Cursor position
+    history_index: Option<usize>, // History row currently being used.
     history: VecDeque<Vec<u8>>,
 }
 
@@ -100,8 +100,7 @@ impl LineEditor {
                             self.line = core::mem::take(&mut self.saved_line);
                         } else {
                             // Find the newest entry
-                            let Some(entry) = self.history.iter().rev().nth(index - 1)
-                            else {
+                            let Some(entry) = self.history.iter().rev().nth(index - 1) else {
                                 return EditResult::Reject;
                             };
                             self.history_index = Some(index - 1);
@@ -131,9 +130,9 @@ impl LineEditor {
                     Key::ArrowUp => {
                         if self.history.is_empty()
                             || self.history_index == Some(self.history.len() - 1)
-                            {
-                                return EditResult::Reject;
-                            };
+                        {
+                            return EditResult::Reject;
+                        };
                         if self.history_index.is_none() {
                             // Store current line
                             self.saved_line = core::mem::take(&mut self.line);
@@ -142,8 +141,7 @@ impl LineEditor {
                         let index = self.history_index.map_or(0, |i| i + 1);
                         self.history_index = Some(index);
                         // Find the newest entry
-                        let Some(entry) = self.history.iter().rev().nth(index)
-                        else {
+                        let Some(entry) = self.history.iter().rev().nth(index) else {
                             return EditResult::Reject;
                         };
                         self.line = entry.clone();
@@ -202,7 +200,7 @@ impl LineEditor {
                         } else {
                             EditResult::Reject
                         }
-                    },
+                    }
                     Key::Insert => EditResult::Reject,
                     Key::PageUp => EditResult::Reject,
                     Key::PageDown => EditResult::Reject,
@@ -489,7 +487,10 @@ mod tests {
             ed.reset();
         }
         for _ in 0..HISTORY_SIZE {
-            assert!(matches!(ed.process(key(Key::ArrowUp)), EditResult::LineEdit));
+            assert!(matches!(
+                ed.process(key(Key::ArrowUp)),
+                EditResult::LineEdit
+            ));
         }
         assert_eq!(ed.line(), b"cmd1");
         assert!(matches!(ed.process(key(Key::ArrowUp)), EditResult::Reject));

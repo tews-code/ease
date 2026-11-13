@@ -11,9 +11,9 @@
 // use crate::kernel::sched;
 // use crate::kernel::timer;
 
-use ease_ulib::{chdir, fds, println, write_all};
 use crate::args::Args;
 use crate::vt_parse::vt_out;
+use ease_ulib::{chdir, fds, println, write_all};
 
 // /// Reads file content to console
 // #[allow(dead_code)]

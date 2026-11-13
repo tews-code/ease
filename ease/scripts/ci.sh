@@ -150,12 +150,13 @@ qemu_stage() {
     cargo test --bin ease --no-default-features --features "$features"
 }
 
-# Unconditionally reformat to pass clippy. ease-abi and ease-ulib aren't
-# reached by a plain `cargo fmt` here (it formats only the current package;
-# ease-ulib is outside the workspace), so name them.
+# Unconditionally reformat to pass clippy. ease-abi, ease-ulib and ease-user
+# aren't reached by a plain `cargo fmt` here (it formats only the current
+# package; ease-ulib and ease-user are outside the workspace), so name them.
 cargo fmt
 cargo fmt --manifest-path ../ease-abi/Cargo.toml
 cargo fmt --manifest-path ../ease-ulib/Cargo.toml
+cargo fmt --manifest-path ../ease-user/Cargo.toml
 
 echo ""
 echo "=== Clippy (packages) ==="
@@ -266,6 +267,10 @@ fi
 echo ""
 echo "=== Documentation ==="
 cargo doc --no-deps --target riscv32imac-unknown-none-elf
+# The user library and programs, each from its own directory (outside the
+# workspace). ease-user's .cargo/config.toml already sets the target.
+(cd ../ease-ulib && cargo doc --no-deps --target riscv32imac-unknown-none-elf)
+(cd ../ease-user && cargo doc --no-deps)
 
 [ $ALL -eq 1 ] && all_diagnostic_runs
 

@@ -29,10 +29,7 @@ impl Args<'_> {
     }
 
     pub fn flag_value(&self, flag: &str) -> Option<&str> {
-        self.flag_values
-            .iter()
-            .find(|fv| fv.0 == flag)
-            .map(|v| v.1)
+        self.flag_values.iter().find(|fv| fv.0 == flag).map(|v| v.1)
     }
 
     pub fn parse<'a>(

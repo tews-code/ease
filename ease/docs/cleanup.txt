@@ -151,7 +151,7 @@ Planned features and roadmap work live in docs/todo.txt, not here.
     Fix: treat a None handle as "not on this hart" (map/is_some_and)
     rather than unwrapping; audit the other per_cpu reads in the dump.
 
-[ ] ease-user is not formatted by ci.sh: the "Unconditionally reformat"
+[x] ease-user is not formatted by ci.sh: the "Unconditionally reformat"
     step runs cargo fmt for ease, ease-abi and ease-ulib only, and
     `cargo fmt --check` in ease-user reports diffs across the shell
     files. Add ease-user to that step (one large formatting-only commit).

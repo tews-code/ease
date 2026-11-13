@@ -6,8 +6,8 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use ease_ulib::heap_init;
 use ease_ulib::println;
 

@@ -34,11 +34,7 @@ impl Modifier {
         let shift = (r & 1) != 0;
         let alt = (r & 2) != 0;
         let ctrl = (r & 4) != 0;
-        Self {
-            alt,
-            ctrl,
-            shift,
-        }
+        Self { alt, ctrl, shift }
     }
 }
 
@@ -134,7 +130,12 @@ impl EscSeqParser {
     /// Helper function at the end of sequence
     ///
     /// Caller must ensure this is only called on end of sequence bytes 0x40..0x7E inclusive
-    fn end_sequence(&mut self, final_byte: u8, modifier_raw: u8, key_param: u8) -> Option<KeyEvent> {
+    fn end_sequence(
+        &mut self,
+        final_byte: u8,
+        modifier_raw: u8,
+        key_param: u8,
+    ) -> Option<KeyEvent> {
         // End of sequence, so  make sure we are back to Normal
         self.state = State::Normal;
         // Get the modifier for this modifier byte value
@@ -155,9 +156,9 @@ impl EscSeqParser {
                     6 => Some(KeyEvent::Special(Key::PageDown, modifier)),
                     _ => None,
                 }
-            },
+            }
             // We do not support further sequences, e.g. M for mouse event.
-            _ => None
+            _ => None,
         }
     }
 
@@ -186,7 +187,7 @@ impl EscSeqParser {
                     }
                     ascii::CR => {
                         // Enter
-                        Some(KeyEvent::Special(Key::Enter, Modifier::default(),))
+                        Some(KeyEvent::Special(Key::Enter, Modifier::default()))
                     }
                     ascii::BS | ascii::DEL => {
                         Some(KeyEvent::Special(Key::Backspace, Modifier::default()))
@@ -198,7 +199,7 @@ impl EscSeqParser {
                 match byte {
                     b'[' => {
                         // Escape sequence is continuing
-                        self.state = State::KeyParam(0);    // Note that 0 is an invalid key value so will not propagate to an incorrect character or special key
+                        self.state = State::KeyParam(0); // Note that 0 is an invalid key value so will not propagate to an incorrect character or special key
                         None
                     }
                     // We don't support SS3 - everything else is treated as a plain escape
@@ -220,7 +221,10 @@ impl EscSeqParser {
                     }
                     b';' => {
                         // Modifier key is also held, need to accumulate those digits
-                        self.state = State::ModifierParam { key: n, modifier: 0};
+                        self.state = State::ModifierParam {
+                            key: n,
+                            modifier: 0,
+                        };
                         None
                     }
                     0x20..=0x3F => None, // Just swallow these unwanted bytes
@@ -238,7 +242,10 @@ impl EscSeqParser {
                     b'0'..=b'9' => {
                         // Accumulate the modifier's value using m*10 + val
                         let val = byte - b'0'; // Cannot underflow due to match arm
-                        self.state = State::ModifierParam {key, modifier: m.saturating_mul(10).saturating_add(val)};
+                        self.state = State::ModifierParam {
+                            key,
+                            modifier: m.saturating_mul(10).saturating_add(val),
+                        };
                         None
                     }
                     0x20..=0x3F => None, // Just swallow these unwanted bytes
@@ -281,7 +288,12 @@ impl EscSeqParser {
     pub fn is_mid_sequence(&self) -> bool {
         match self.state {
             State::Normal => false,
-            State::GotEscape | State::KeyParam(_) | State::ModifierParam { key: _, modifier: _ } => true,
+            State::GotEscape
+            | State::KeyParam(_)
+            | State::ModifierParam {
+                key: _,
+                modifier: _,
+            } => true,
         }
     }
 }
@@ -291,7 +303,11 @@ mod tests {
     use super::*;
 
     /// No-modifier shorthand used throughout the tests.
-    const NO_MOD: Modifier = Modifier { alt: false, ctrl: false, shift: false };
+    const NO_MOD: Modifier = Modifier {
+        alt: false,
+        ctrl: false,
+        shift: false,
+    };
 
     /// Helper: feed a byte slice into the parser and collect all events,
     /// draining pushback after each byte (the same loop shape as main.rs).
@@ -321,19 +337,28 @@ mod tests {
     #[test]
     fn enter() {
         let mut p = EscSeqParser::default();
-        assert_eq!(p.parse(ascii::CR), Some(KeyEvent::Special(Key::Enter, NO_MOD)));
+        assert_eq!(
+            p.parse(ascii::CR),
+            Some(KeyEvent::Special(Key::Enter, NO_MOD))
+        );
     }
 
     #[test]
     fn backspace_del() {
         let mut p = EscSeqParser::default();
-        assert_eq!(p.parse(ascii::DEL), Some(KeyEvent::Special(Key::Backspace, NO_MOD)));
+        assert_eq!(
+            p.parse(ascii::DEL),
+            Some(KeyEvent::Special(Key::Backspace, NO_MOD))
+        );
     }
 
     #[test]
     fn backspace_bs() {
         let mut p = EscSeqParser::default();
-        assert_eq!(p.parse(ascii::BS), Some(KeyEvent::Special(Key::Backspace, NO_MOD)));
+        assert_eq!(
+            p.parse(ascii::BS),
+            Some(KeyEvent::Special(Key::Backspace, NO_MOD))
+        );
     }
 
     // ── VT100 letter-final keys (family 1) ──────────────────────────
@@ -351,7 +376,10 @@ mod tests {
         let mut p = EscSeqParser::default();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
-        assert_eq!(p.parse(b'B'), Some(KeyEvent::Special(Key::ArrowDown, NO_MOD)));
+        assert_eq!(
+            p.parse(b'B'),
+            Some(KeyEvent::Special(Key::ArrowDown, NO_MOD))
+        );
     }
 
     #[test]
@@ -359,7 +387,10 @@ mod tests {
         let mut p = EscSeqParser::default();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
-        assert_eq!(p.parse(b'C'), Some(KeyEvent::Special(Key::ArrowRight, NO_MOD)));
+        assert_eq!(
+            p.parse(b'C'),
+            Some(KeyEvent::Special(Key::ArrowRight, NO_MOD))
+        );
     }
 
     #[test]
@@ -367,21 +398,30 @@ mod tests {
         let mut p = EscSeqParser::default();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
-        assert_eq!(p.parse(b'D'), Some(KeyEvent::Special(Key::ArrowLeft, NO_MOD)));
+        assert_eq!(
+            p.parse(b'D'),
+            Some(KeyEvent::Special(Key::ArrowLeft, NO_MOD))
+        );
     }
 
     #[test]
     fn home() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[H");
-        assert_eq!(events, [None, None, Some(KeyEvent::Special(Key::Home, NO_MOD))]);
+        assert_eq!(
+            events,
+            [None, None, Some(KeyEvent::Special(Key::Home, NO_MOD))]
+        );
     }
 
     #[test]
     fn end() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[F");
-        assert_eq!(events, [None, None, Some(KeyEvent::Special(Key::End, NO_MOD))]);
+        assert_eq!(
+            events,
+            [None, None, Some(KeyEvent::Special(Key::End, NO_MOD))]
+        );
     }
 
     // ── VT220 tilde-final keys (family 2) ───────────────────────────
@@ -390,28 +430,60 @@ mod tests {
     fn insert() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[2~");
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Special(Key::Insert, NO_MOD))]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                Some(KeyEvent::Special(Key::Insert, NO_MOD))
+            ]
+        );
     }
 
     #[test]
     fn delete() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[3~");
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Special(Key::Delete, NO_MOD))]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                Some(KeyEvent::Special(Key::Delete, NO_MOD))
+            ]
+        );
     }
 
     #[test]
     fn page_up() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[5~");
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Special(Key::PageUp, NO_MOD))]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                Some(KeyEvent::Special(Key::PageUp, NO_MOD))
+            ]
+        );
     }
 
     #[test]
     fn page_down() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[6~");
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Special(Key::PageDown, NO_MOD))]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                Some(KeyEvent::Special(Key::PageDown, NO_MOD))
+            ]
+        );
     }
 
     // ── Modifiers ───────────────────────────────────────────────────
@@ -421,8 +493,15 @@ mod tests {
         // ESC [ 1 ; 5 A — Ctrl+Up
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[1;5A");
-        let ctrl = Modifier { alt: false, ctrl: true, shift: false };
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::ArrowUp, ctrl)));
+        let ctrl = Modifier {
+            alt: false,
+            ctrl: true,
+            shift: false,
+        };
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::ArrowUp, ctrl))
+        );
     }
 
     #[test]
@@ -430,8 +509,15 @@ mod tests {
         // ESC [ 3 ; 2 ~ — Shift+Delete
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[3;2~");
-        let shift = Modifier { alt: false, ctrl: false, shift: true };
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::Delete, shift)));
+        let shift = Modifier {
+            alt: false,
+            ctrl: false,
+            shift: true,
+        };
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::Delete, shift))
+        );
     }
 
     #[test]
@@ -439,8 +525,15 @@ mod tests {
         // ESC [ 1 ; 6 C — Ctrl+Shift+Right
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[1;6C");
-        let ctrl_shift = Modifier { alt: false, ctrl: true, shift: true };
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::ArrowRight, ctrl_shift)));
+        let ctrl_shift = Modifier {
+            alt: false,
+            ctrl: true,
+            shift: true,
+        };
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::ArrowRight, ctrl_shift))
+        );
     }
 
     #[test]
@@ -448,8 +541,15 @@ mod tests {
         // ESC [ 1 ; 3 D — Alt+Left
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[1;3D");
-        let alt = Modifier { alt: true, ctrl: false, shift: false };
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::ArrowLeft, alt)));
+        let alt = Modifier {
+            alt: true,
+            ctrl: false,
+            shift: false,
+        };
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::ArrowLeft, alt))
+        );
     }
 
     #[test]
@@ -457,8 +557,15 @@ mod tests {
         // ESC [ 1 ; 7 H — Ctrl+Alt+Home
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[1;7H");
-        let ctrl_alt = Modifier { alt: true, ctrl: true, shift: false };
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::Home, ctrl_alt)));
+        let ctrl_alt = Modifier {
+            alt: true,
+            ctrl: true,
+            shift: false,
+        };
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::Home, ctrl_alt))
+        );
     }
 
     // ── Modifier::from_raw edge cases ───────────────────────────────
@@ -492,11 +599,14 @@ mod tests {
         // The full caller loop: ESC then 'x' produces Esc + Char('x')
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1bx");
-        assert_eq!(events, [
-            None,                                               // ESC consumed
-            Some(KeyEvent::Special(Key::Esc, NO_MOD)),          // 'x' triggers bare Esc
-            Some(KeyEvent::Char(b'x')),                         // pushback 'x' parsed
-        ]);
+        assert_eq!(
+            events,
+            [
+                None,                                      // ESC consumed
+                Some(KeyEvent::Special(Key::Esc, NO_MOD)), // 'x' triggers bare Esc
+                Some(KeyEvent::Char(b'x')),                // pushback 'x' parsed
+            ]
+        );
     }
 
     // ── Unknown sequences ───────────────────────────────────────────
@@ -524,11 +634,16 @@ mod tests {
         // ESC [ 3 ~ then 'a' — the tilde must not appear as Char('~')
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[3~a");
-        assert_eq!(events, [
-            None, None, None,
-            Some(KeyEvent::Special(Key::Delete, NO_MOD)),
-            Some(KeyEvent::Char(b'a')),
-        ]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                None,
+                Some(KeyEvent::Special(Key::Delete, NO_MOD)),
+                Some(KeyEvent::Char(b'a')),
+            ]
+        );
     }
 
     // ── Abort (non-sequence byte mid-CSI) ───────────────────────────
@@ -549,7 +664,10 @@ mod tests {
         // ESC [ $ A — the '$' (0x24, an intermediate byte) is consumed
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[$A");
-        assert_eq!(*events.last().unwrap(), Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)));
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::ArrowUp, NO_MOD))
+        );
     }
 
     // ── Timeout ─────────────────────────────────────────────────────
@@ -564,7 +682,10 @@ mod tests {
     fn timeout_in_got_escape_returns_esc() {
         let mut p = EscSeqParser::default();
         let _ = p.parse(ascii::ESC);
-        assert_eq!(p.esc_seq_timeout(), Some(KeyEvent::Special(Key::Esc, NO_MOD)));
+        assert_eq!(
+            p.esc_seq_timeout(),
+            Some(KeyEvent::Special(Key::Esc, NO_MOD))
+        );
         // Back to Normal
         assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
     }
@@ -610,10 +731,17 @@ mod tests {
     fn consecutive_arrows() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"\x1b[A\x1b[B");
-        assert_eq!(events, [
-            None, None, Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)),
-            None, None, Some(KeyEvent::Special(Key::ArrowDown, NO_MOD)),
-        ]);
+        assert_eq!(
+            events,
+            [
+                None,
+                None,
+                Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)),
+                None,
+                None,
+                Some(KeyEvent::Special(Key::ArrowDown, NO_MOD)),
+            ]
+        );
     }
 
     // ── Digit overflow (saturating) ─────────────────────────────────
@@ -632,12 +760,17 @@ mod tests {
     fn mixed_typing_and_sequences() {
         let mut p = EscSeqParser::default();
         let events = parse_all(&mut p, b"hi\x0d\x1b[A!");
-        assert_eq!(events, [
-            Some(KeyEvent::Char(b'h')),
-            Some(KeyEvent::Char(b'i')),
-            Some(KeyEvent::Special(Key::Enter, NO_MOD)),
-            None, None, Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)),
-            Some(KeyEvent::Char(b'!')),
-        ]);
+        assert_eq!(
+            events,
+            [
+                Some(KeyEvent::Char(b'h')),
+                Some(KeyEvent::Char(b'i')),
+                Some(KeyEvent::Special(Key::Enter, NO_MOD)),
+                None,
+                None,
+                Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)),
+                Some(KeyEvent::Char(b'!')),
+            ]
+        );
     }
 }

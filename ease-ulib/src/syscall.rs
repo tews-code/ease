@@ -42,7 +42,7 @@ pub fn write(fd: usize, buf: &[u8]) -> Result<usize, Error> {
 }
 
 /// Writes the complete buffer in a user slice to file descriptor `fd`.
-/// Loops over [write] until the buffer is empty.
+/// Loops over [write()] until the buffer is empty.
 ///
 /// Returns `Ok(())` on success or `Err(Error)` on failure.
 pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {

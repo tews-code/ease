@@ -15,13 +15,13 @@ mod commands;
 mod line_editor;
 mod vt_parse;
 
+use crate::line_editor::{EditResult, LineEditor};
+#[cfg(target_os = "none")]
+use crate::vt_parse::{KeyEvent, vt_out};
 use alloc::vec::Vec;
 use ease_ulib::{ascii, fds};
 #[cfg(target_os = "none")]
 use ease_ulib::{print, println, put_char, read, write_all};
-#[cfg(target_os = "none")]
-use crate::vt_parse::{vt_out, KeyEvent};
-use crate::line_editor::{EditResult, LineEditor};
 
 /// Terminal is assumed to have an 80 character width
 const WIDTH: usize = 80;
@@ -31,7 +31,8 @@ const PROMPT: &str = "ease> ";
 const LINE_LEN: usize = WIDTH - PROMPT.len();
 /// The number of bytes needed to redraw a line (in the worst case).
 #[cfg(target_os = "none")]
-const REDRAW_LINE_LEN: usize = 1 + PROMPT.len() + LINE_LEN + vt_out::ERASE_TO_END_OF_LINE.len() + LINE_LEN; // CR, prompt, line, erase, backspace to prompt
+const REDRAW_LINE_LEN: usize =
+    1 + PROMPT.len() + LINE_LEN + vt_out::ERASE_TO_END_OF_LINE.len() + LINE_LEN; // CR, prompt, line, erase, backspace to prompt
 /// Timeout in milliseconds before Esc is treated as a single Esc and not the start of a sequence
 const ESC_TIMEOUT_MS: usize = 50;
 
@@ -41,24 +42,24 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
     match line_editor.process(key_event) {
         EditResult::Append(ch) => {
             let _ = put_char(ch);
-        },
+        }
         EditResult::Complete => {
             let _ = put_char(ascii::CR);
             let _ = put_char(ascii::LF);
             if let Ok(cmd) = core::str::from_utf8(line_editor.line()) {
                 execute(cmd);
             } else {
-                println!("{}", "Invalid string.")
+                println!("Invalid string.")
             }
             print!("{}", PROMPT);
             line_editor.reset();
-        },
+        }
         EditResult::CursorMoveRight => {
             let _ = write_all(fds::STDOUT, vt_out::CURSOR_RIGHT);
-        },
+        }
         EditResult::CursorMoveLeft => {
             let _ = put_char(ascii::BS);
-        },
+        }
         EditResult::LineEdit => {
             let line = line_editor.line();
             let cursor_pos = line_editor.cursor();
@@ -156,9 +157,10 @@ pub extern "C" fn main() {
         };
         // Check if this was a timeout
         if bytes_read == 0
-            && let Some(key_event) = parser.esc_seq_timeout() {
-                handle_key(&mut write_buf, &mut editor, key_event)
-            }
+            && let Some(key_event) = parser.esc_seq_timeout()
+        {
+            handle_key(&mut write_buf, &mut editor, key_event)
+        }
         for &byte in &read_buf[..bytes_read] {
             if let Some(key_event) = parser.parse(byte) {
                 handle_key(&mut write_buf, &mut editor, key_event);
