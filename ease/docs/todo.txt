@@ -183,6 +183,71 @@ Tick with [x] when done, or delete the line.
       a host script mmaps it and scans for the control block. Avoid the
       gdbstub (halts the VM per access).
 
+[ ] Shell runs from flash (XIP) instead of being copied into PSRAM.
+    Decided 2026-11-17: the shell and its (minimal) built-in commands
+    live in flash and are never loaded. Loading from disc (the ELF
+    loader) is for other programs: our own binaries and Doom.
+    Today: ease-user links every program at the PSRAM text window
+    (__user_text_origin, 0x81400000). The kernel embeds shell.bin with
+    include_bytes!, so it sits somewhere in the kernel's .rodata, and
+    userloader copies text and data into the PSRAM windows at spawn.
+    Wanted: the shell's .text and read-only data are linked at a fixed
+    window in flash and run there. Only .data is copied (from its load
+    address in flash) and .bss zeroed. Programs loaded from disc keep
+    the PSRAM window.
+    Why a fixed window: the shell is linked on its own, so its code
+    must be linked at the address where it will sit, and the place
+    include_bytes! lands today is not known when the shell links.
+    Size, measured 2026-11-17 (code + read-only data): 33.8 KB as the
+    dev profile the kernel embeds, 25.6 KB as release (debug assertions
+    are 7.4 KB of the difference). See the str Debug item in
+    cleanup.txt for a further 6 KB.
+    Design:
+      - memory-shared-qemu.x: a second pair of symbols for the shell's
+        flash window, origin and size. NAPOT (RP2350 PMP): the size is
+        a power of two and the origin a multiple of it. The shell's
+        data origin is stated on its own; today __user_data_origin is
+        derived from the text origin.
+      - Shell linker script, separate from the other user programs:
+        FLASH in MEMORY; .text and read-only data at the flash window;
+        .data with its run address in RAM and its load address in flash
+        right after the code (as the kernel's own .data); .bss in RAM.
+        build.rs passes it to the shell binary only (cargo has a
+        per-binary link-arg directive); wait-exit, heap-probe and the
+        other test blobs keep user-memory-qemu.x.
+      - memory-qemu.x: an output section in FLASH at the window origin,
+        as large as the whole window, holding the embedded shell image.
+        The bytes need their own named input section with KEEP, or they
+        land in .rodata. Nothing else may share the window, because
+        U-mode gets R+X over all of it: ASSERT that the kernel's own
+        flash contents end below the window.
+      - userloader: a plan for a flash-resident image. No text copy, no
+        fence.i, data copied from the flash load address, bss zeroed.
+        The test-only Image::Flash is close to this shape.
+      - usermem: Role::Text is Backing::Fixed(__user_text_start) for
+        every process today. It becomes per image: the flash window for
+        the shell, the PSRAM window for loaded programs.
+    Open decisions:
+      - Where the window goes. A fixed address well above the kernel is
+        simplest (for example 1 MB into the 16 MB flash).
+      - Where the shell's .data and .bss live. Leaving them in the
+        present PSRAM windows is the smallest change.
+    Steps:
+    [ ] 1. Reserve the window: the shared symbols, and the empty output
+           section with its ASSERTs in memory-qemu.x. Nothing uses it.
+    [ ] 2. Place the embedded shell image in the window (named section
+           + KEEP). The shell is still linked for PSRAM and still
+           copied, so behaviour does not change.
+    [ ] 3. Switch over: the shell's own linker script, the loader plan
+           for a flash-resident image, and Role::Text backed by the
+           flash window for the shell. Tests: the shell's entry address
+           is inside the flash window; a loaded test blob still runs
+           from PSRAM.
+    [ ] 4. Update the memory map comment in memory-qemu.x and the header
+           of memory-shared-qemu.x.
+    Related: the .rodata item and the process memory layout item below
+    (its entry 1, "Text R+X fixed (flash/blob)").
+
 [ ] Separate .rodata from .text (linker scripts + PMP), so read-only data
     is R only, not R+X. Hardening: today constant data is executable.
     Current state:
