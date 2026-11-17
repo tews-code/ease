@@ -1,5 +1,6 @@
 //! Parse shell command arguments
 
+use alloc::fmt::Display;
 use alloc::vec::Vec;
 
 /// The number of parsed items (e.g flags) that EASE supports
@@ -10,9 +11,19 @@ pub enum ArgsError<'a> {
     /// The command has too many characters
     CommandTooLong,
     /// A command with a flag has the flag but not the flag's value
-    FlagMissingValue,
+    FlagMissingValue(&'a str),
     /// An unknown flag has been found
     UnknownFlag(&'a str),
+}
+
+impl Display for ArgsError<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CommandTooLong => write!(f, "Command too long."),
+            Self::FlagMissingValue(flag) => write!(f, "The flag {} needs a value.", flag),
+            Self::UnknownFlag(flag) => write!(f, "The flag {} is unknown.", flag),
+        }
+    }
 }
 
 /// Struct holding flags and positional arguments
@@ -52,12 +63,14 @@ impl Args<'_> {
                             flag_values.push((flag_chars, value))
                         }
                     } else {
-                        return Err(ArgsError::FlagMissingValue);
+                        return Err(ArgsError::FlagMissingValue(flag_chars));
                     }
                 } else {
                     // This must be just a flag - check validitity
                     for (i, ch) in flag_chars.char_indices() {
-                        let flag_char = &flag_chars[i..i + ch.len_utf8()];
+                        let Some(flag_char) = flag_chars.get(i..i + ch.len_utf8()) else {
+                            continue;
+                        };
                         if flag_set.contains(&flag_char) {
                             if flags.len() == COMMAND_DEPTH {
                                 return Err(ArgsError::CommandTooLong);
@@ -194,6 +207,6 @@ mod tests {
     #[test]
     fn parse_value_flag_missing_value() {
         let args = Args::parse("-s", &[], &["s"]);
-        assert!(matches!(args, Err(ArgsError::FlagMissingValue)));
+        assert!(matches!(args, Err(ArgsError::FlagMissingValue("s"))));
     }
 }

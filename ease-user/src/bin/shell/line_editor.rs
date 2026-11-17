@@ -4,18 +4,19 @@
 use crate::vt_parse::Modifier;
 use crate::vt_parse::{Key, KeyEvent};
 use alloc::collections::VecDeque;
+use alloc::string::String;
 use alloc::vec::Vec;
-use ease_ulib::ascii;
 
-pub const LINE_LEN: usize = 74; // 80 columns - 6 char prompt
+use crate::LINE_COLUMNS_MAX;
+
 const HISTORY_SIZE: usize = 10;
 
 /// Result of processing a key event. The caller uses `line()` and `cursor()` to
 /// get the current state after each result.
 #[must_use]
 pub enum EditResult {
-    /// Append a byte to the end of the line
-    Append(u8),
+    /// Append a char to the end of the line
+    Append(char),
     /// Enter pressed
     Complete,
     /// Cursor has moved one character to the right
@@ -30,11 +31,11 @@ pub enum EditResult {
 
 /// Line editor with cursor movement, insert/delete, and command history.
 pub struct LineEditor {
-    line: Vec<u8>,
-    saved_line: Vec<u8>,          // Stores current line when browsing history
+    line: Vec<char>,              // Line being edited
+    saved_line: Vec<char>,        // Stores current line when browsing history
     cursor: usize,                // Cursor position
     history_index: Option<usize>, // History row currently being used.
-    history: VecDeque<Vec<u8>>,
+    history: VecDeque<String>,    // Line history
 }
 
 impl LineEditor {
@@ -49,14 +50,14 @@ impl LineEditor {
         }
     }
 
-    /// Returns the current line contents as a byte slice.
-    pub fn line(&self) -> &[u8] {
-        self.line.as_slice()
-    }
-
-    /// Returns the current cursor position (byte offset into the line).
+    /// Returns the current cursor position (char offset into the line).
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    /// Returns the current line as a `String`
+    pub fn line(&self) -> String {
+        self.line.iter().collect()
     }
 
     /// Clears the line and resets the cursor. Call after processing a completed command.
@@ -65,15 +66,25 @@ impl LineEditor {
         self.cursor = 0;
     }
 
+    /// Add a line to the history as a `String` (to save memory)
+    ///
+    /// If the history is already full, the oldest history `String` is dropped
+    fn add_to_history(&mut self) {
+        let s: String = self.line.iter().collect();
+        if self.history.len() == HISTORY_SIZE {
+            self.history.pop_front();
+        }
+        self.history.push_back(s);
+    }
+
     /// Process a line
     ///
     /// Takes a KeyEvent and returns an EditResult
     pub fn process(&mut self, event: KeyEvent) -> EditResult {
         match event {
-            KeyEvent::Char(ascii::TAB) => EditResult::Reject, // Discard tab
             KeyEvent::Char(ch) => {
                 // Check if we've reached our limit
-                if self.line.len() == LINE_LEN {
+                if self.line.len() == LINE_COLUMNS_MAX {
                     return EditResult::Reject;
                 }
                 if self.cursor == self.line.len() {
@@ -104,7 +115,7 @@ impl LineEditor {
                                 return EditResult::Reject;
                             };
                             self.history_index = Some(index - 1);
-                            self.line = entry.clone();
+                            self.line = entry.chars().collect();
                         }
                         self.cursor = self.line.len();
                         EditResult::LineEdit
@@ -144,7 +155,7 @@ impl LineEditor {
                         let Some(entry) = self.history.iter().rev().nth(index) else {
                             return EditResult::Reject;
                         };
-                        self.line = entry.clone();
+                        self.line = entry.chars().collect();
                         self.cursor = self.line.len();
                         EditResult::LineEdit
                     }
@@ -176,11 +187,7 @@ impl LineEditor {
                         }
                     }
                     Key::Enter => {
-                        self.history.push_back(self.line.clone());
-                        // Check if we are out of space - in which case forget the oldest entry
-                        if self.history.len() > HISTORY_SIZE {
-                            self.history.pop_front();
-                        }
+                        self.add_to_history();
                         self.cursor = 0;
                         self.history_index = None;
                         self.saved_line.clear();
@@ -204,6 +211,7 @@ impl LineEditor {
                     Key::Insert => EditResult::Reject,
                     Key::PageUp => EditResult::Reject,
                     Key::PageDown => EditResult::Reject,
+                    Key::Tab => EditResult::Reject,
                 }
             }
         }
@@ -214,8 +222,8 @@ impl LineEditor {
 mod tests {
     use super::*;
 
-    fn byte(ch: u8) -> KeyEvent {
-        KeyEvent::Char(ch)
+    fn ch(c: char) -> KeyEvent {
+        KeyEvent::Char(c)
     }
 
     fn key(k: Key) -> KeyEvent {
@@ -224,17 +232,17 @@ mod tests {
 
     // Helper: type a string into the editor
     fn type_str(ed: &mut LineEditor, s: &str) {
-        for b in s.bytes() {
-            let _ = ed.process(byte(b));
+        for c in s.chars() {
+            let _ = ed.process(ch(c));
         }
     }
 
     #[test]
     fn test_type_char() {
         let mut ed = LineEditor::new();
-        let result = ed.process(byte(b'a'));
-        assert!(matches!(result, EditResult::Append(b'a')));
-        assert_eq!(ed.line(), b"a");
+        let result = ed.process(ch('a'));
+        assert!(matches!(result, EditResult::Append('a')));
+        assert_eq!(ed.line(), "a");
         assert_eq!(ed.cursor(), 1);
     }
 
@@ -242,14 +250,14 @@ mod tests {
     fn test_type_builds_line() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "hello");
-        assert_eq!(ed.line(), b"hello");
+        assert_eq!(ed.line(), "hello");
         assert_eq!(ed.cursor(), 5);
     }
 
     #[test]
     fn test_tab_rejected() {
         let mut ed = LineEditor::new();
-        let result = ed.process(byte(ascii::TAB));
+        let result = ed.process(key(Key::Tab));
         assert!(matches!(result, EditResult::Reject));
     }
 
@@ -257,7 +265,7 @@ mod tests {
     fn test_enter_completes() {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "echo hi");
-        assert_eq!(ed.line(), b"echo hi");
+        assert_eq!(ed.line(), "echo hi");
         let result = ed.process(key(Key::Enter));
         assert!(matches!(result, EditResult::Complete));
     }
@@ -267,7 +275,7 @@ mod tests {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "test");
         let _ = ed.process(key(Key::Enter));
-        assert_eq!(ed.line(), b"test");
+        assert_eq!(ed.line(), "test");
         assert_eq!(ed.cursor(), 0);
         ed.reset();
         assert!(ed.line().is_empty());
@@ -286,7 +294,7 @@ mod tests {
         type_str(&mut ed, "abc");
         let result = ed.process(key(Key::Backspace));
         assert!(matches!(result, EditResult::LineEdit));
-        assert_eq!(ed.line(), b"ab");
+        assert_eq!(ed.line(), "ab");
         assert_eq!(ed.cursor(), 2);
     }
 
@@ -305,8 +313,8 @@ mod tests {
         assert!(matches!(result, EditResult::CursorMoveLeft));
         assert_eq!(ed.cursor(), 2);
         // Insert in middle
-        let _ = ed.process(byte(b'X'));
-        assert_eq!(ed.line(), b"abXc");
+        let _ = ed.process(ch('X'));
+        assert_eq!(ed.line(), "abXc");
         assert_eq!(ed.cursor(), 3);
     }
 
@@ -344,9 +352,9 @@ mod tests {
         let mut ed = LineEditor::new();
         type_str(&mut ed, "ac");
         let _ = ed.process(key(Key::ArrowLeft));
-        let result = ed.process(byte(b'b'));
+        let result = ed.process(ch('b'));
         assert!(matches!(result, EditResult::LineEdit));
-        assert_eq!(ed.line(), b"abc");
+        assert_eq!(ed.line(), "abc");
     }
 
     #[test]
@@ -355,7 +363,7 @@ mod tests {
         type_str(&mut ed, "abcd");
         let _ = ed.process(key(Key::ArrowLeft));
         let _ = ed.process(key(Key::Backspace));
-        assert_eq!(ed.line(), b"abd");
+        assert_eq!(ed.line(), "abd");
         assert_eq!(ed.cursor(), 2);
     }
 
@@ -394,7 +402,7 @@ mod tests {
         // Arrow up should show "second" (most recent)
         let result = ed.process(key(Key::ArrowUp));
         assert!(matches!(result, EditResult::LineEdit));
-        assert_eq!(ed.line(), b"second");
+        assert_eq!(ed.line(), "second");
     }
 
     #[test]
@@ -408,13 +416,13 @@ mod tests {
         ed.reset();
         // Up once -> "second"
         let _ = ed.process(key(Key::ArrowUp));
-        assert_eq!(ed.line(), b"second");
+        assert_eq!(ed.line(), "second");
         // Up again -> "first"
         let _ = ed.process(key(Key::ArrowUp));
-        assert_eq!(ed.line(), b"first");
+        assert_eq!(ed.line(), "first");
         // Down -> back to "second"
         let _ = ed.process(key(Key::ArrowDown));
-        assert_eq!(ed.line(), b"second");
+        assert_eq!(ed.line(), "second");
     }
 
     #[test]
@@ -426,10 +434,10 @@ mod tests {
         type_str(&mut ed, "current");
         // Browse into history
         let _ = ed.process(key(Key::ArrowUp));
-        assert_eq!(ed.line(), b"old");
+        assert_eq!(ed.line(), "old");
         // Come back — should restore "current"
         let _ = ed.process(key(Key::ArrowDown));
-        assert_eq!(ed.line(), b"current");
+        assert_eq!(ed.line(), "current");
     }
 
     #[test]
@@ -471,7 +479,7 @@ mod tests {
         ed.reset();
         type_str(&mut ed, "hi");
         let _ = ed.process(key(Key::ArrowUp));
-        assert_eq!(ed.line(), b"long command");
+        assert_eq!(ed.line(), "long command");
         assert_eq!(ed.cursor(), 12); // cursor at end of recalled line
     }
 
@@ -492,19 +500,96 @@ mod tests {
                 EditResult::LineEdit
             ));
         }
-        assert_eq!(ed.line(), b"cmd1");
+        assert_eq!(ed.line(), "cmd1");
         assert!(matches!(ed.process(key(Key::ArrowUp)), EditResult::Reject));
     }
 
     #[test]
     fn test_full_line_rejects_input() {
         let mut ed = LineEditor::new();
-        for _ in 0..LINE_LEN {
-            let _ = ed.process(byte(b'x'));
+        for _ in 0..LINE_COLUMNS_MAX {
+            let _ = ed.process(ch('x'));
         }
-        assert_eq!(ed.line().len(), LINE_LEN);
-        let result = ed.process(byte(b'y'));
+        assert_eq!(ed.line().chars().count(), LINE_COLUMNS_MAX);
+        let result = ed.process(ch('y'));
         assert!(matches!(result, EditResult::Reject));
-        assert_eq!(ed.line().len(), LINE_LEN);
+        assert_eq!(ed.line().chars().count(), LINE_COLUMNS_MAX);
+    }
+
+    // ── Multi-byte characters ───────────────────────────────────────
+    // The line is edited by character: é is 2 bytes, € is 3, 😀 is 4,
+    // and each is one cursor position.
+
+    #[test]
+    fn test_multibyte_char_is_one_position() {
+        let mut ed = LineEditor::new();
+        let result = ed.process(ch('é'));
+        assert!(matches!(result, EditResult::Append('é')));
+        type_str(&mut ed, "€😀");
+        assert_eq!(ed.line(), "é€😀");
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn test_backspace_removes_whole_multibyte_char() {
+        // The defect this work fixes: backspace used to remove one byte
+        // and leave half a character on the line.
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "aé");
+        let result = ed.process(key(Key::Backspace));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.line(), "a");
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn test_delete_removes_whole_multibyte_char() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "a€b");
+        let _ = ed.process(key(Key::ArrowLeft));
+        let _ = ed.process(key(Key::ArrowLeft));
+        assert_eq!(ed.cursor(), 1);
+        let result = ed.process(key(Key::Delete));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.line(), "ab");
+        assert_eq!(ed.cursor(), 1);
+    }
+
+    #[test]
+    fn test_insert_between_multibyte_chars() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "é€");
+        let _ = ed.process(key(Key::ArrowLeft));
+        let result = ed.process(ch('x'));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.line(), "éx€");
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn test_history_round_trips_multibyte_line() {
+        // A line goes into history as a String and comes back as chars.
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "héllo €");
+        let _ = ed.process(key(Key::Enter));
+        ed.reset();
+        let result = ed.process(key(Key::ArrowUp));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.line(), "héllo €");
+        // 7 characters, although the line is 10 bytes
+        assert_eq!(ed.cursor(), 7);
+    }
+
+    #[test]
+    fn test_line_limit_counts_chars_not_bytes() {
+        let mut ed = LineEditor::new();
+        for _ in 0..LINE_COLUMNS_MAX {
+            let result = ed.process(ch('€'));
+            assert!(!matches!(result, EditResult::Reject));
+        }
+        assert_eq!(ed.line().chars().count(), LINE_COLUMNS_MAX);
+        assert_eq!(ed.line().len(), LINE_COLUMNS_MAX * 3);
+        let result = ed.process(ch('€'));
+        assert!(matches!(result, EditResult::Reject));
     }
 }

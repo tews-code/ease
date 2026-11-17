@@ -2,8 +2,7 @@
 //!
 //! Parses raw bytes into [KeyEvent]s. Control sequences are parsed
 //! to identify more complex keystrokes.
-
-use ease_ulib::ascii;
+//! See [KeyEventParser] for the API.
 
 /// VT escape sequences, used to instruct the console
 pub mod vt_out {
@@ -15,6 +14,36 @@ pub mod vt_out {
     pub const CURSOR_HOME: &[u8] = b"\x1b[H";
     /// Clear the whole screen
     pub const CLEAR_SCREEN: &[u8] = b"\x1b[2J";
+}
+
+/// Special keys as chars
+mod special {
+    use ease_ulib::ascii;
+    pub const BS: char = ascii::BS as char;
+    pub const CR: char = ascii::CR as char;
+    pub const DEL: char = ascii::DEL as char;
+    pub const ESC: char = ascii::ESC as char;
+    pub const TAB: char = ascii::TAB as char;
+}
+
+/// Special keys recognised by the parsers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Key {
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    Backspace,
+    Delete,
+    End,
+    Enter,
+    Esc,
+    Home,
+    Insert,
+    PageDown,
+    PageUp,
+    Tab,
 }
 
 /// Special key modifier
@@ -38,32 +67,130 @@ impl Modifier {
     }
 }
 
-/// Special keys recognised by the escape sequence parser.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Key {
-    ArrowUp,
-    ArrowDown,
-    ArrowLeft,
-    ArrowRight,
-    Backspace,
-    Delete,
-    End,
-    Enter,
-    Esc,
-    Home,
-    Insert,
-    PageDown,
-    PageUp,
-}
-
 /// Keyboard events produced by the parser from the input bytes
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyEvent {
-    /// Regular byte (letter, number, symbol)
-    Char(u8),
+    /// Regular char (letter, number, symbol), could be multi-byte
+    Char(char),
     /// Special key (arrow, Enter, etc.) and possible modifier (ctrl, alt, shift)
     Special(Key, Modifier),
+}
+
+/// KeyEventParser combines a multi-byte char decoder with an
+/// escape sequence parser, and its [KeyEventParser::parse] method
+/// takes a sequence of bytes and returns [KeyEvent]s
+pub struct KeyEventParser {
+    ch_decoder: CharDecoder,
+    esc_seq_parser: EscSeqParser,
+}
+
+impl KeyEventParser {
+    /// New [KeyEventParser]
+    pub const fn new() -> Self {
+        Self {
+            ch_decoder: CharDecoder::new(),
+            esc_seq_parser: EscSeqParser::new(),
+        }
+    }
+
+    /// Helper function to map Char(ch) to special key events
+    fn map_special_char(key_event: Option<KeyEvent>) -> Option<KeyEvent> {
+        match key_event {
+            Some(KeyEvent::Char(special::BS | special::DEL)) => {
+                Some(KeyEvent::Special(Key::Backspace, Modifier::default()))
+            }
+            Some(KeyEvent::Char(special::CR)) => {
+                Some(KeyEvent::Special(Key::Enter, Modifier::default()))
+            }
+            Some(KeyEvent::Char(special::TAB)) => {
+                Some(KeyEvent::Special(Key::Tab, Modifier::default()))
+            }
+            other => other,
+        }
+    }
+
+    /// Takes a series of bytes and returns [KeyEvent]s.
+    ///
+    /// Returns `None` if no [KeyEvent] has been identified and another byte
+    /// is needed.
+    /// Invalid sequences are dropped immediately.
+    pub fn parse(&mut self, byte: u8) -> Option<KeyEvent> {
+        // First decode the byte as a char
+        let ch = self.ch_decoder.parse(byte)?;
+        // Then look for an escape sequence
+        Self::map_special_char(self.esc_seq_parser.parse(ch))
+    }
+
+    /// Returns the pushed back event (if present)
+    pub fn pending_event(&mut self) -> Option<KeyEvent> {
+        let ch = self.esc_seq_parser.pending_char()?;
+        Self::map_special_char(self.esc_seq_parser.parse(ch))
+    }
+
+    /// Returns whether the escape sequence parser is mid-sequence
+    pub fn is_mid_sequence(&self) -> bool {
+        self.esc_seq_parser.is_mid_sequence()
+    }
+
+    /// Returns Esc if the escape sequence parser has timed out
+    pub fn esc_seq_timeout(&mut self) -> Option<KeyEvent> {
+        self.esc_seq_parser.esc_seq_timeout()
+    }
+}
+
+/// A decoder for accumulating bytes into `char`.
+/// There are min 1 and max 4 bytes per char.
+#[derive(Default)]
+struct CharDecoder {
+    /// Byte buffer
+    buf: [u8; 4],
+    /// Next position to add a byte in the buffer
+    pos: usize,
+}
+
+impl CharDecoder {
+    /// New char decoder with size zero to indicate it is empty
+    const fn new() -> Self {
+        Self {
+            buf: [0u8; 4],
+            pos: 0,
+        }
+    }
+
+    /// Parse a byte
+    ///
+    /// Returns `None` if the sequence is incomplete, or `Some(char)` if completed.
+    /// Invalid byte sequences are immediately discarded without pushback but the
+    /// last byte is kept and parsed again
+    fn parse(&mut self, byte: u8) -> Option<char> {
+        // Add the byte to our buffer
+        self.buf[self.pos] = byte;
+        self.pos += 1;
+        // Now attempt to turn in a one-char str
+        // Note that pos is never set to larger than 4 (buffer size) so no guard
+        let buf = &self.buf[..self.pos];
+        match str::from_utf8(buf) {
+            Ok(s) => {
+                // Reset and return the char
+                self.pos = 0;
+                s.chars().next()
+            }
+            Err(e) => match e.error_len() {
+                None => None, // Mid-sequence, wait for next byte
+                Some(_) => {
+                    // If the latest byte the problem discard
+                    if self.pos == 1 {
+                        self.pos = 0;
+                        None
+                    } else {
+                        // Invalid sequence, discard all but latest byte
+                        self.pos = 0;
+                        self.parse(byte)
+                    }
+                }
+            },
+        }
+    }
 }
 
 /// Parser state enum
@@ -80,7 +207,7 @@ enum State {
     ModifierParam { key: u8, modifier: u8 },
 }
 
-/// VT-100/ANSI escape sequence parser. Converts raw byte sequences into [KeyEvent]s.
+/// VT-100/ANSI escape sequence parser. Converts `char` sequences into [KeyEvent]s.
 ///
 /// Parses ECMA-48 control sequences (CSI).
 /// The full CSI control sequence has three byte classes:
@@ -111,16 +238,16 @@ enum State {
 ///
 /// Note SS3 (Esc, O, single byte) is not supported in EASE.
 #[derive(Default)]
-pub struct EscSeqParser {
+struct EscSeqParser {
     /// Current parser state
     state: State,
     /// Byte that would otherwise be lost in a sequence
-    pushback: Option<u8>,
+    pushback: Option<char>,
 }
 
 impl EscSeqParser {
     /// Create a new EscSeqParser in Normal state with empty pushback
-    pub(super) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             state: State::Normal,
             pushback: None,
@@ -132,7 +259,7 @@ impl EscSeqParser {
     /// Caller must ensure this is only called on end of sequence bytes 0x40..0x7E inclusive
     fn end_sequence(
         &mut self,
-        final_byte: u8,
+        final_char: char,
         modifier_raw: u8,
         key_param: u8,
     ) -> Option<KeyEvent> {
@@ -140,14 +267,14 @@ impl EscSeqParser {
         self.state = State::Normal;
         // Get the modifier for this modifier byte value
         let modifier = Modifier::from_raw(modifier_raw);
-        match final_byte {
-            b'A' => Some(KeyEvent::Special(Key::ArrowUp, modifier)),
-            b'B' => Some(KeyEvent::Special(Key::ArrowDown, modifier)),
-            b'C' => Some(KeyEvent::Special(Key::ArrowRight, modifier)),
-            b'D' => Some(KeyEvent::Special(Key::ArrowLeft, modifier)),
-            b'H' => Some(KeyEvent::Special(Key::Home, modifier)),
-            b'F' => Some(KeyEvent::Special(Key::End, modifier)),
-            b'~' => {
+        match final_char {
+            'A' => Some(KeyEvent::Special(Key::ArrowUp, modifier)),
+            'B' => Some(KeyEvent::Special(Key::ArrowDown, modifier)),
+            'C' => Some(KeyEvent::Special(Key::ArrowRight, modifier)),
+            'D' => Some(KeyEvent::Special(Key::ArrowLeft, modifier)),
+            'H' => Some(KeyEvent::Special(Key::Home, modifier)),
+            'F' => Some(KeyEvent::Special(Key::End, modifier)),
+            '~' => {
                 // End of a digit sequence
                 match key_param {
                     2 => Some(KeyEvent::Special(Key::Insert, modifier)),
@@ -162,42 +289,33 @@ impl EscSeqParser {
         }
     }
 
-    /// Feeds a byte into the parser and returns an `Option<KeyEvent>`.
+    /// Feeds a char into the parser and returns an `Option<KeyEvent>`.
     ///
-    /// Returns the [KeyEvent] if the byte sequence is matched, or
-    /// `None` if the byte fed into the parser does not complete a `KeyEvent`
-    /// and more bytes are needed to complete an escape sequence.
+    /// Returns the [KeyEvent] if the char sequence is matched, or
+    /// `None` if the char fed into the parser does not complete a `KeyEvent`
+    /// and more chars are needed to complete an escape sequence.
     ///
-    /// If the sequence fails part way, all but the last pushback byte is lost.
-    ///
+    /// If the sequence fails part way, all but the last pushback char is lost.
     ///
     /// Normal ──ESC──► GotEscape ──'['──► KeyParam(n) ──';'──► ModifierParam{key,mod} ──final──► Normal
     /// ▲                │                 │ digits: n*10+d        │ digits: mod*10+d
     /// │                └─other: Esc +    └─final 0x40–0x7E ──────┴──► map (final, key, mod) → Key or nothing
-    /// │                  pushback                                   other byte (control etc.) → abort + pushback
+    /// │                  pushback                                   other char (control etc.) → abort + pushback
     ///
-    pub fn parse(&mut self, byte: u8) -> Option<KeyEvent> {
+    fn parse(&mut self, ch: char) -> Option<KeyEvent> {
         match self.state {
             State::Normal => {
-                match byte {
-                    ascii::ESC => {
-                        // Esc key - could be start of sequence
-                        self.state = State::GotEscape;
-                        None
-                    }
-                    ascii::CR => {
-                        // Enter
-                        Some(KeyEvent::Special(Key::Enter, Modifier::default()))
-                    }
-                    ascii::BS | ascii::DEL => {
-                        Some(KeyEvent::Special(Key::Backspace, Modifier::default()))
-                    }
-                    _ => Some(KeyEvent::Char(byte)),
+                if ch == special::ESC {
+                    // Esc key - could be start of sequence
+                    self.state = State::GotEscape;
+                    None
+                } else {
+                    Some(KeyEvent::Char(ch))
                 }
             }
             State::GotEscape => {
-                match byte {
-                    b'[' => {
+                match ch {
+                    '[' => {
                         // Escape sequence is continuing
                         self.state = State::KeyParam(0); // Note that 0 is an invalid key value so will not propagate to an incorrect character or special key
                         None
@@ -205,21 +323,21 @@ impl EscSeqParser {
                     // We don't support SS3 - everything else is treated as a plain escape
                     _ => {
                         self.state = State::Normal;
-                        // Push back the last byte so it is not lost
-                        self.pushback = Some(byte);
+                        // Push back the last char so it is not lost
+                        self.pushback = Some(ch);
                         Some(KeyEvent::Special(Key::Esc, Modifier::default()))
                     }
                 }
             }
             State::KeyParam(n) => {
-                match byte {
-                    b'0'..=b'9' => {
+                match ch {
+                    '0'..='9' => {
                         // Accumulate the digit's value using n*10 + val
-                        let val = byte - b'0'; // Cannot underflow due to match arm
+                        let val = ch as u8 - b'0'; // Cannot underflow due to match arm
                         self.state = State::KeyParam(n.saturating_mul(10).saturating_add(val));
                         None
                     }
-                    b';' => {
+                    ';' => {
                         // Modifier key is also held, need to accumulate those digits
                         self.state = State::ModifierParam {
                             key: n,
@@ -227,33 +345,33 @@ impl EscSeqParser {
                         };
                         None
                     }
-                    0x20..=0x3F => None, // Just swallow these unwanted bytes
-                    0x40..=0x7E => self.end_sequence(byte, 0, n),
-                    // Failed sequence, save the last byte but ESC [ are lost
+                    '\x20'..='\x3F' => None, // Just swallow these unwanted chars
+                    '\x40'..='\x7E' => self.end_sequence(ch, 0, n),
+                    // Failed sequence, save the last char but ESC [ are lost
                     _ => {
                         self.state = State::Normal;
-                        self.pushback = Some(byte);
+                        self.pushback = Some(ch);
                         None
                     }
                 }
             }
             State::ModifierParam { key, modifier: m } => {
-                match byte {
-                    b'0'..=b'9' => {
+                match ch {
+                    '0'..='9' => {
                         // Accumulate the modifier's value using m*10 + val
-                        let val = byte - b'0'; // Cannot underflow due to match arm
+                        let val = ch as u8 - b'0'; // Cannot underflow due to match arm
                         self.state = State::ModifierParam {
                             key,
                             modifier: m.saturating_mul(10).saturating_add(val),
                         };
                         None
                     }
-                    0x20..=0x3F => None, // Just swallow these unwanted bytes
-                    0x40..=0x7E => self.end_sequence(byte, m, key),
-                    // Failed sequence, save the last byte but ESC [ and key are lost
+                    '\x20'..='\x3F' => None, // Just swallow these unwanted chars
+                    '\x40'..='\x7E' => self.end_sequence(ch, m, key),
+                    // Failed sequence, save the last char but ESC [ and key are lost
                     _ => {
                         self.state = State::Normal;
-                        self.pushback = Some(byte);
+                        self.pushback = Some(ch);
                         None
                     }
                 }
@@ -261,9 +379,9 @@ impl EscSeqParser {
         }
     }
 
-    /// Called when no more bytes arrive within the timeout. Returns `Some(Esc)` if
+    /// Called when no more chars arrive within the timeout. Returns `Some(Esc)` if
     /// a bare ESC was pending, or `None` if an incomplete CSI sequence is discarded.
-    pub fn esc_seq_timeout(&mut self) -> Option<KeyEvent> {
+    fn esc_seq_timeout(&mut self) -> Option<KeyEvent> {
         self.pushback = None;
         match self.state {
             State::Normal => None,
@@ -278,14 +396,14 @@ impl EscSeqParser {
         }
     }
 
-    /// Takes the pushed-back byte, if any. A byte is pushed back when an escape sequence
-    /// terminates with a byte that wasn't part of the sequence.
-    pub fn pending_byte(&mut self) -> Option<u8> {
+    /// Takes the pushed-back char, if any. A char is pushed back when an escape sequence
+    /// terminates with a char that wasn't part of the sequence.
+    fn pending_char(&mut self) -> Option<char> {
         self.pushback.take()
     }
 
     /// Returns whether the parser is mid-sequence or not
-    pub fn is_mid_sequence(&self) -> bool {
+    fn is_mid_sequence(&self) -> bool {
         match self.state {
             State::Normal => false,
             State::GotEscape
@@ -301,6 +419,8 @@ impl EscSeqParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
+    use ease_ulib::ascii;
 
     /// No-modifier shorthand used throughout the tests.
     const NO_MOD: Modifier = Modifier {
@@ -309,14 +429,15 @@ mod tests {
         shift: false,
     };
 
-    /// Helper: feed a byte slice into the parser and collect all events,
-    /// draining pushback after each byte (the same loop shape as main.rs).
-    fn parse_all(p: &mut EscSeqParser, bytes: &[u8]) -> alloc::vec::Vec<Option<KeyEvent>> {
-        let mut events = alloc::vec::Vec::new();
+    /// Helper: feed a byte slice into the parser and collect every result,
+    /// draining the pushed-back event after each byte (the same loop shape
+    /// as main.rs).
+    fn parse_all(p: &mut KeyEventParser, bytes: &[u8]) -> Vec<Option<KeyEvent>> {
+        let mut events = Vec::new();
         for &b in bytes {
             events.push(p.parse(b));
-            while let Some(pb) = p.pending_byte() {
-                events.push(p.parse(pb));
+            while let Some(event) = p.pending_event() {
+                events.push(Some(event));
             }
         }
         events
@@ -326,17 +447,17 @@ mod tests {
 
     #[test]
     fn regular_ascii_bytes() {
-        let mut p = EscSeqParser::default();
-        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
-        assert_eq!(p.parse(b'z'), Some(KeyEvent::Char(b'z')));
-        assert_eq!(p.parse(b' '), Some(KeyEvent::Char(b' ')));
-        assert_eq!(p.parse(b'0'), Some(KeyEvent::Char(b'0')));
-        assert_eq!(p.parse(b'~'), Some(KeyEvent::Char(b'~')));
+        let mut p = KeyEventParser::new();
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
+        assert_eq!(p.parse(b'z'), Some(KeyEvent::Char('z')));
+        assert_eq!(p.parse(b' '), Some(KeyEvent::Char(' ')));
+        assert_eq!(p.parse(b'0'), Some(KeyEvent::Char('0')));
+        assert_eq!(p.parse(b'~'), Some(KeyEvent::Char('~')));
     }
 
     #[test]
     fn enter() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(
             p.parse(ascii::CR),
             Some(KeyEvent::Special(Key::Enter, NO_MOD))
@@ -345,7 +466,7 @@ mod tests {
 
     #[test]
     fn backspace_del() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(
             p.parse(ascii::DEL),
             Some(KeyEvent::Special(Key::Backspace, NO_MOD))
@@ -354,7 +475,7 @@ mod tests {
 
     #[test]
     fn backspace_bs() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(
             p.parse(ascii::BS),
             Some(KeyEvent::Special(Key::Backspace, NO_MOD))
@@ -365,7 +486,7 @@ mod tests {
 
     #[test]
     fn arrow_up() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
         assert_eq!(p.parse(b'A'), Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)));
@@ -373,7 +494,7 @@ mod tests {
 
     #[test]
     fn arrow_down() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
         assert_eq!(
@@ -384,7 +505,7 @@ mod tests {
 
     #[test]
     fn arrow_right() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
         assert_eq!(
@@ -395,7 +516,7 @@ mod tests {
 
     #[test]
     fn arrow_left() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.parse(ascii::ESC), None);
         assert_eq!(p.parse(b'['), None);
         assert_eq!(
@@ -406,7 +527,7 @@ mod tests {
 
     #[test]
     fn home() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[H");
         assert_eq!(
             events,
@@ -416,7 +537,7 @@ mod tests {
 
     #[test]
     fn end() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[F");
         assert_eq!(
             events,
@@ -428,7 +549,7 @@ mod tests {
 
     #[test]
     fn insert() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[2~");
         assert_eq!(
             events,
@@ -443,7 +564,7 @@ mod tests {
 
     #[test]
     fn delete() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[3~");
         assert_eq!(
             events,
@@ -458,7 +579,7 @@ mod tests {
 
     #[test]
     fn page_up() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[5~");
         assert_eq!(
             events,
@@ -473,7 +594,7 @@ mod tests {
 
     #[test]
     fn page_down() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[6~");
         assert_eq!(
             events,
@@ -491,7 +612,7 @@ mod tests {
     #[test]
     fn ctrl_arrow_up() {
         // ESC [ 1 ; 5 A — Ctrl+Up
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[1;5A");
         let ctrl = Modifier {
             alt: false,
@@ -507,7 +628,7 @@ mod tests {
     #[test]
     fn shift_delete() {
         // ESC [ 3 ; 2 ~ — Shift+Delete
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[3;2~");
         let shift = Modifier {
             alt: false,
@@ -523,7 +644,7 @@ mod tests {
     #[test]
     fn ctrl_shift_arrow_right() {
         // ESC [ 1 ; 6 C — Ctrl+Shift+Right
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[1;6C");
         let ctrl_shift = Modifier {
             alt: false,
@@ -539,7 +660,7 @@ mod tests {
     #[test]
     fn alt_arrow_left() {
         // ESC [ 1 ; 3 D — Alt+Left
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[1;3D");
         let alt = Modifier {
             alt: true,
@@ -555,7 +676,7 @@ mod tests {
     #[test]
     fn ctrl_alt_home() {
         // ESC [ 1 ; 7 H — Ctrl+Alt+Home
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[1;7H");
         let ctrl_alt = Modifier {
             alt: true,
@@ -586,25 +707,25 @@ mod tests {
 
     #[test]
     fn bare_esc_pushes_back_following_byte() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.parse(ascii::ESC), None);
-        // A non-bracket byte after ESC → bare Esc, with the byte pushed back
+        // A non-bracket char after ESC → bare Esc, with the char pushed back
         assert_eq!(p.parse(b'x'), Some(KeyEvent::Special(Key::Esc, NO_MOD)));
-        assert_eq!(p.pending_byte(), Some(b'x'));
-        assert_eq!(p.pending_byte(), None); // drained
+        assert_eq!(p.pending_event(), Some(KeyEvent::Char('x')));
+        assert_eq!(p.pending_event(), None); // drained
     }
 
     #[test]
     fn bare_esc_pushback_drains_to_char() {
         // The full caller loop: ESC then 'x' produces Esc + Char('x')
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1bx");
         assert_eq!(
             events,
             [
                 None,                                      // ESC consumed
                 Some(KeyEvent::Special(Key::Esc, NO_MOD)), // 'x' triggers bare Esc
-                Some(KeyEvent::Char(b'x')),                // pushback 'x' parsed
+                Some(KeyEvent::Char('x')),                 // pushback 'x' parsed
             ]
         );
     }
@@ -614,25 +735,25 @@ mod tests {
     #[test]
     fn unknown_csi_final_drops_silently() {
         // ESC [ Z (Shift+Tab) — valid sequence, not a key we support
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[Z");
         assert_eq!(events, [None, None, None]);
-        assert_eq!(p.pending_byte(), None); // no pushback
+        assert_eq!(p.pending_event(), None); // no pushback
     }
 
     #[test]
     fn unknown_tilde_key_param_drops_silently() {
         // ESC [ 1 5 ~ (F5) — valid sequence, key param 15 not in our table
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[15~");
         assert_eq!(*events.last().unwrap(), None);
-        assert_eq!(p.pending_byte(), None);
+        assert_eq!(p.pending_event(), None);
     }
 
     #[test]
     fn delete_does_not_leak_tilde() {
         // ESC [ 3 ~ then 'a' — the tilde must not appear as Char('~')
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[3~a");
         assert_eq!(
             events,
@@ -641,7 +762,7 @@ mod tests {
                 None,
                 None,
                 Some(KeyEvent::Special(Key::Delete, NO_MOD)),
-                Some(KeyEvent::Char(b'a')),
+                Some(KeyEvent::Char('a')),
             ]
         );
     }
@@ -651,10 +772,10 @@ mod tests {
     #[test]
     fn control_byte_mid_csi_aborts_and_pushes_back() {
         // ESC [ then a control byte (0x01 = Ctrl+A) — not part of the CSI
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, &[ascii::ESC, b'[', 0x01]);
         // The abort drops ESC [, pushback produces Char(0x01)
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Char(0x01))]);
+        assert_eq!(events, [None, None, None, Some(KeyEvent::Char('\x01'))]);
     }
 
     // ── Intermediate bytes swallowed ────────────────────────────────
@@ -662,7 +783,7 @@ mod tests {
     #[test]
     fn intermediate_bytes_swallowed() {
         // ESC [ $ A — the '$' (0x24, an intermediate byte) is consumed
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[$A");
         assert_eq!(
             *events.last().unwrap(),
@@ -674,62 +795,62 @@ mod tests {
 
     #[test]
     fn timeout_in_normal_returns_none() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         assert_eq!(p.esc_seq_timeout(), None);
     }
 
     #[test]
     fn timeout_in_got_escape_returns_esc() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let _ = p.parse(ascii::ESC);
         assert_eq!(
             p.esc_seq_timeout(),
             Some(KeyEvent::Special(Key::Esc, NO_MOD))
         );
         // Back to Normal
-        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
     }
 
     #[test]
     fn timeout_in_key_param_discards() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let _ = p.parse(ascii::ESC);
         let _ = p.parse(b'[');
         assert_eq!(p.esc_seq_timeout(), None);
         // Back to Normal
-        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
     }
 
     #[test]
     fn timeout_in_modifier_param_discards() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let _ = p.parse(ascii::ESC);
         let _ = p.parse(b'[');
         let _ = p.parse(b'1');
         let _ = p.parse(b';');
         assert_eq!(p.esc_seq_timeout(), None);
-        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
     }
 
     // ── State reset ─────────────────────────────────────────────────
 
     #[test]
     fn state_resets_after_complete_sequence() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let _ = parse_all(&mut p, b"\x1b[A");
-        assert_eq!(p.parse(b'x'), Some(KeyEvent::Char(b'x')));
+        assert_eq!(p.parse(b'x'), Some(KeyEvent::Char('x')));
     }
 
     #[test]
     fn state_resets_after_unknown_final() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let _ = parse_all(&mut p, b"\x1b[Z");
-        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char(b'a')));
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
     }
 
     #[test]
     fn consecutive_arrows() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[A\x1b[B");
         assert_eq!(
             events,
@@ -749,7 +870,7 @@ mod tests {
     #[test]
     fn long_digit_run_saturates_and_drops() {
         // ESC [ 9 9 9 ~ — saturates to 255, which is not in the tilde table
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"\x1b[999~");
         assert_eq!(*events.last().unwrap(), None);
     }
@@ -758,19 +879,320 @@ mod tests {
 
     #[test]
     fn mixed_typing_and_sequences() {
-        let mut p = EscSeqParser::default();
+        let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, b"hi\x0d\x1b[A!");
         assert_eq!(
             events,
             [
-                Some(KeyEvent::Char(b'h')),
-                Some(KeyEvent::Char(b'i')),
+                Some(KeyEvent::Char('h')),
+                Some(KeyEvent::Char('i')),
                 Some(KeyEvent::Special(Key::Enter, NO_MOD)),
                 None,
                 None,
                 Some(KeyEvent::Special(Key::ArrowUp, NO_MOD)),
-                Some(KeyEvent::Char(b'!')),
+                Some(KeyEvent::Char('!')),
             ]
         );
+    }
+
+    // ── Keys mapped from single chars ───────────────────────────────
+
+    #[test]
+    fn tab_is_a_key() {
+        let mut p = KeyEventParser::new();
+        assert_eq!(
+            p.parse(ascii::TAB),
+            Some(KeyEvent::Special(Key::Tab, NO_MOD))
+        );
+    }
+
+    #[test]
+    fn other_control_chars_pass_through_as_chars() {
+        // Ctrl-C (0x03) has no key of its own; the line editor decides.
+        let mut p = KeyEventParser::new();
+        assert_eq!(p.parse(0x03), Some(KeyEvent::Char('\x03')));
+    }
+
+    #[test]
+    fn pushed_back_char_is_mapped_to_its_key() {
+        // ESC then Enter: the CR is pushed back, and must still come out
+        // as Enter and not as a raw Char.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, &[ascii::ESC, ascii::CR]);
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(KeyEvent::Special(Key::Esc, NO_MOD)),
+                Some(KeyEvent::Special(Key::Enter, NO_MOD)),
+            ]
+        );
+    }
+
+    #[test]
+    fn esc_esc_leaves_second_esc_pending() {
+        // The second ESC ends the first as a bare Esc and starts again.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, &[ascii::ESC, ascii::ESC]);
+        assert_eq!(events, [None, Some(KeyEvent::Special(Key::Esc, NO_MOD))]);
+        assert!(p.is_mid_sequence());
+        assert_eq!(
+            p.esc_seq_timeout(),
+            Some(KeyEvent::Special(Key::Esc, NO_MOD))
+        );
+        assert!(!p.is_mid_sequence());
+    }
+
+    #[test]
+    fn is_mid_sequence_tracks_the_escape_parser() {
+        let mut p = KeyEventParser::new();
+        assert!(!p.is_mid_sequence());
+        let _ = p.parse(ascii::ESC);
+        assert!(p.is_mid_sequence());
+        let _ = p.parse(b'[');
+        assert!(p.is_mid_sequence());
+        let _ = p.parse(b'A');
+        assert!(!p.is_mid_sequence());
+    }
+
+    // ── Multi-byte chars through the whole parser ───────────────────
+
+    #[test]
+    fn multibyte_chars_arrive_whole() {
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, "é€😀".as_bytes());
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(KeyEvent::Char('é')),
+                None,
+                None,
+                Some(KeyEvent::Char('€')),
+                None,
+                None,
+                None,
+                Some(KeyEvent::Char('😀')),
+            ]
+        );
+    }
+
+    #[test]
+    fn is_not_mid_sequence_inside_a_multibyte_char() {
+        // Only an escape sequence arms the read timeout; a half-received
+        // char waits for its next byte.
+        let mut p = KeyEventParser::new();
+        assert_eq!(p.parse(0xE2), None);
+        assert!(!p.is_mid_sequence());
+    }
+
+    #[test]
+    fn enter_after_truncated_char_is_not_lost() {
+        // E2 82 is the start of € with its last byte missing.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, &[0xE2, 0x82, ascii::CR]);
+        assert_eq!(
+            events,
+            [None, None, Some(KeyEvent::Special(Key::Enter, NO_MOD))]
+        );
+    }
+
+    #[test]
+    fn arrow_after_truncated_char_still_parses() {
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, b"\xE2\x82\x1b[A");
+        assert_eq!(
+            *events.last().unwrap(),
+            Some(KeyEvent::Special(Key::ArrowUp, NO_MOD))
+        );
+        // The stale E2 82 is gone: a late AC must not complete a €
+        assert_eq!(p.parse(0xAC), None);
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
+    }
+
+    #[test]
+    fn multibyte_char_mid_csi_aborts_and_pushes_back() {
+        // ESC [ then é: not part of a sequence, so the sequence is
+        // dropped and the é comes back through the pushback.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, b"\x1b[\xC3\xA9");
+        assert_eq!(events, [None, None, None, None, Some(KeyEvent::Char('é'))]);
+        assert!(!p.is_mid_sequence());
+    }
+
+    // ── CharDecoder ─────────────────────────────────────────────────
+
+    /// Helper: feed bytes into a decoder and collect every result.
+    fn decode_all(d: &mut CharDecoder, bytes: &[u8]) -> Vec<Option<char>> {
+        bytes.iter().map(|&b| d.parse(b)).collect()
+    }
+
+    #[test]
+    fn decoder_ascii_comes_out_at_once() {
+        let mut d = CharDecoder::new();
+        for byte in 0x00..=0x7Fu8 {
+            assert_eq!(d.parse(byte), Some(char::from(byte)));
+        }
+    }
+
+    #[test]
+    fn decoder_two_byte_char() {
+        let mut d = CharDecoder::new();
+        assert_eq!(decode_all(&mut d, "é".as_bytes()), [None, Some('é')]);
+    }
+
+    #[test]
+    fn decoder_three_byte_char() {
+        let mut d = CharDecoder::new();
+        assert_eq!(decode_all(&mut d, "€".as_bytes()), [None, None, Some('€')]);
+    }
+
+    #[test]
+    fn decoder_four_byte_char() {
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, "😀".as_bytes()),
+            [None, None, None, Some('😀')]
+        );
+    }
+
+    #[test]
+    fn decoder_first_and_last_char_of_each_length() {
+        let mut d = CharDecoder::new();
+        for c in [
+            '\u{0}',
+            '\u{7F}',
+            '\u{80}',
+            '\u{7FF}',
+            '\u{800}',
+            '\u{D7FF}', // last before the surrogates
+            '\u{E000}', // first after the surrogates
+            '\u{FFFF}',
+            '\u{10000}',
+            '\u{10FFFF}',
+        ] {
+            let mut buf = [0u8; 4];
+            let bytes = c.encode_utf8(&mut buf).as_bytes();
+            let (last, rest) = bytes.split_last().unwrap();
+            for &b in rest {
+                assert_eq!(d.parse(b), None, "{c:?}");
+            }
+            assert_eq!(d.parse(*last), Some(c), "{c:?}");
+        }
+    }
+
+    #[test]
+    fn decoder_stray_continuation_byte_is_dropped() {
+        // The chars after it must arrive on time and all of them.
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, &[0x80, b'a', b'b']),
+            [None, Some('a'), Some('b')]
+        );
+    }
+
+    #[test]
+    fn decoder_byte_that_is_never_valid_is_dropped() {
+        // C0 and C1 could only start an overlong form; F5..FF are too big.
+        let mut d = CharDecoder::new();
+        for bad in [0xC0, 0xC1, 0xF5, 0xF8, 0xFE, 0xFF] {
+            assert_eq!(d.parse(bad), None, "{bad:#x}");
+            assert_eq!(d.parse(b'a'), Some('a'), "{bad:#x}");
+        }
+    }
+
+    #[test]
+    fn decoder_ascii_after_truncated_char_is_kept() {
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, &[0xE2, 0x82, b'a', b'b']),
+            [None, None, Some('a'), Some('b')]
+        );
+    }
+
+    #[test]
+    fn decoder_new_char_after_truncated_char_is_kept() {
+        // E2 (start of €) then a whole é
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, &[0xE2, 0xC3, 0xA9]),
+            [None, None, Some('é')]
+        );
+    }
+
+    #[test]
+    fn decoder_bad_byte_after_truncated_char_drops_both() {
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, &[0xE2, 0xFF, b'a']),
+            [None, None, Some('a')]
+        );
+    }
+
+    #[test]
+    fn decoder_overlong_forms_are_rejected() {
+        // Each of these would decode to a char that has a shorter form.
+        let mut d = CharDecoder::new();
+        for bytes in [
+            &[0xC0, 0x80][..],             // NUL in 2 bytes
+            &[0xC1, 0xBF][..],             // DEL in 2 bytes
+            &[0xE0, 0x80, 0x80][..],       // NUL in 3 bytes
+            &[0xE0, 0x9F, 0xBF][..],       // U+07FF in 3 bytes
+            &[0xF0, 0x80, 0x80, 0x80][..], // NUL in 4 bytes
+            &[0xF0, 0x8F, 0xBF, 0xBF][..], // U+FFFF in 4 bytes
+        ] {
+            for &b in bytes {
+                assert_eq!(d.parse(b), None, "{bytes:x?}");
+            }
+            assert_eq!(d.parse(b'a'), Some('a'), "{bytes:x?}");
+        }
+    }
+
+    #[test]
+    fn decoder_surrogates_are_rejected() {
+        // U+D800 and U+DFFF written as 3-byte sequences
+        let mut d = CharDecoder::new();
+        for bytes in [[0xED, 0xA0, 0x80], [0xED, 0xBF, 0xBF]] {
+            assert_eq!(decode_all(&mut d, &bytes), [None, None, None]);
+            assert_eq!(d.parse(b'a'), Some('a'));
+        }
+    }
+
+    #[test]
+    fn decoder_above_last_code_point_is_rejected() {
+        // F4 90 80 80 would be U+110000
+        let mut d = CharDecoder::new();
+        assert_eq!(
+            decode_all(&mut d, &[0xF4, 0x90, 0x80, 0x80]),
+            [None, None, None, None]
+        );
+        assert_eq!(d.parse(b'a'), Some('a'));
+    }
+
+    #[test]
+    fn decoder_any_byte_after_any_prefix_recovers() {
+        // Whatever arrives, the decoder must not panic (the buffer index
+        // stays in range) and must decode plain ASCII straight afterwards.
+        for prefix in [
+            &[][..],
+            &[0xC3][..],
+            &[0xE2][..],
+            &[0xE2, 0x82][..],
+            &[0xF0][..],
+            &[0xF0, 0x9F][..],
+            &[0xF0, 0x9F, 0x98][..],
+        ] {
+            for byte in 0x00..=0xFFu8 {
+                let mut d = CharDecoder::new();
+                let _ = decode_all(&mut d, prefix);
+                let got = d.parse(byte);
+                if byte.is_ascii() {
+                    assert_eq!(got, Some(char::from(byte)), "{prefix:x?} {byte:#x}");
+                }
+                // Three ASCII bytes flush anything still held
+                let tail = decode_all(&mut d, b"xyz");
+                assert_eq!(tail.last(), Some(&Some('z')), "{prefix:x?} {byte:#x}");
+            }
+        }
     }
 }

@@ -91,7 +91,7 @@ pub fn cd(arg_str: &str) {
     let mut args = match Args::parse(arg_str, &[], &[]) {
         Ok(args) => args,
         Err(e) => {
-            println!("cd: invalid arguments - {:?}", e);
+            println!("cd: invalid arguments - {}", e);
             return;
         }
     };
@@ -291,7 +291,7 @@ pub fn ls(console: &mut Console, dir: Dir, arg_str: &str) {
     let args = match Args::parse(arg_str, &["l"], &[]) {
         Ok(args) => args,
         Err(e) => {
-            println!("ls: invalid arguments - {:?}", e);
+            println!("ls: invalid arguments - {}", e);
             return;
         }
     };
