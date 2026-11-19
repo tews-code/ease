@@ -130,8 +130,13 @@ Planned features and roadmap work live in docs/todo.txt, not here.
       - Assumes the console byte stream is UTF-8. The virtio keyboard
         still pushes CP437 bytes (pound = 0x9C), which the decoder
         will drop until the keyboard pushes UTF-8.
-      - Open: reject control characters (char::is_control) instead of
-        only TAB, so Ctrl-C and friends never land on the line.
+      - Done 2026-11-19: control characters never land on the line.
+        The parser turns a control byte into KeyEvent::Ctrl with its
+        caret-notation letter (0x03 is Ctrl('C')); LF is Enter, like
+        CR; C1 characters (U+0080 to U+009F) are dropped. The line
+        editor binds A/E, B/F, P/N, D, C (abandon the line) and L
+        (clear screen), and rejects the rest. The kill commands
+        (Ctrl-K, Ctrl-U, Ctrl-W) were considered and left out.
     Spotted on the way: LINE_LEN is defined twice (main.rs from WIDTH
     and PROMPT, line_editor.rs as a bare 74).
 [x] Shell carries about 6 KB of str Debug formatting in a 32 KB text

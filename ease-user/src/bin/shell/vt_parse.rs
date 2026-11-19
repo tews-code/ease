@@ -23,6 +23,7 @@ mod special {
     pub const CR: char = ascii::CR as char;
     pub const DEL: char = ascii::DEL as char;
     pub const ESC: char = ascii::ESC as char;
+    pub const LF: char = ascii::LF as char;
     pub const TAB: char = ascii::TAB as char;
 }
 
@@ -72,6 +73,8 @@ impl Modifier {
 pub enum KeyEvent {
     /// Regular char (letter, number, symbol), could be multi-byte
     Char(char),
+    /// Control char. Note that the char is stored as the uppercase caret-notation char (e.g. Ctrl('C'))
+    Ctrl(char),
     /// Special key (arrow, Enter, etc.) and possible modifier (ctrl, alt, shift)
     Special(Key, Modifier),
 }
@@ -95,15 +98,23 @@ impl KeyEventParser {
 
     /// Helper function to map Char(ch) to special key events
     fn map_special_char(key_event: Option<KeyEvent>) -> Option<KeyEvent> {
+        const CARET_NOTATION: u8 = 0x40;
+
         match key_event {
             Some(KeyEvent::Char(special::BS | special::DEL)) => {
                 Some(KeyEvent::Special(Key::Backspace, Modifier::default()))
             }
-            Some(KeyEvent::Char(special::CR)) => {
+            Some(KeyEvent::Char(special::CR | special::LF)) => {
                 Some(KeyEvent::Special(Key::Enter, Modifier::default()))
             }
             Some(KeyEvent::Char(special::TAB)) => {
                 Some(KeyEvent::Special(Key::Tab, Modifier::default()))
+            }
+            Some(KeyEvent::Char(ch)) if ch.is_control() => {
+                match ch {
+                    '\u{80}'..='\u{9F}' => None, // C1 set is not supported, drop
+                    _ => Some(KeyEvent::Ctrl(char::from(ch as u8 + CARET_NOTATION))),
+                }
             }
             other => other,
         }
@@ -465,6 +476,46 @@ mod tests {
     }
 
     #[test]
+    fn line_feed_is_enter() {
+        // LF (Ctrl-J) is Enter, as in readline: it is what arrives when
+        // text reaches the console with Unix line endings.
+        let mut p = KeyEventParser::new();
+        assert_eq!(
+            p.parse(ascii::LF),
+            Some(KeyEvent::Special(Key::Enter, NO_MOD))
+        );
+    }
+
+    #[test]
+    fn pushed_back_line_feed_is_enter() {
+        // ESC then LF: the LF is pushed back and must still be Enter.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, &[ascii::ESC, ascii::LF]);
+        assert_eq!(
+            events,
+            [
+                None,
+                Some(KeyEvent::Special(Key::Esc, NO_MOD)),
+                Some(KeyEvent::Special(Key::Enter, NO_MOD)),
+            ]
+        );
+    }
+
+    #[test]
+    fn cr_lf_is_two_enters() {
+        // Known behaviour: a Windows line ending gives an empty second line.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, &[ascii::CR, ascii::LF]);
+        assert_eq!(
+            events,
+            [
+                Some(KeyEvent::Special(Key::Enter, NO_MOD)),
+                Some(KeyEvent::Special(Key::Enter, NO_MOD)),
+            ]
+        );
+    }
+
+    #[test]
     fn backspace_del() {
         let mut p = KeyEventParser::new();
         assert_eq!(
@@ -774,8 +825,8 @@ mod tests {
         // ESC [ then a control byte (0x01 = Ctrl+A) — not part of the CSI
         let mut p = KeyEventParser::new();
         let events = parse_all(&mut p, &[ascii::ESC, b'[', 0x01]);
-        // The abort drops ESC [, pushback produces Char(0x01)
-        assert_eq!(events, [None, None, None, Some(KeyEvent::Char('\x01'))]);
+        // The abort drops ESC [, pushback produces Ctrl('A')
+        assert_eq!(events, [None, None, None, Some(KeyEvent::Ctrl('A'))]);
     }
 
     // ── Intermediate bytes swallowed ────────────────────────────────
@@ -907,10 +958,57 @@ mod tests {
     }
 
     #[test]
-    fn other_control_chars_pass_through_as_chars() {
-        // Ctrl-C (0x03) has no key of its own; the line editor decides.
+    fn other_control_chars_are_ctrl_keys() {
+        // Ctrl-C (0x03) has no key of its own; it comes out as Ctrl with
+        // its caret-notation letter and the line editor decides.
         let mut p = KeyEventParser::new();
-        assert_eq!(p.parse(0x03), Some(KeyEvent::Char('\x03')));
+        assert_eq!(p.parse(0x03), Some(KeyEvent::Ctrl('C')));
+    }
+
+    #[test]
+    fn every_control_byte_maps_to_its_caret_letter() {
+        // Byte + 0x40 for the whole C0 range: 0x00 is ^@, 0x1F is ^_.
+        // BS, TAB, LF, CR and ESC have keys of their own.
+        let mut p = KeyEventParser::new();
+        for byte in 0x00..=0x1Fu8 {
+            if matches!(
+                byte,
+                ascii::BS | ascii::TAB | ascii::LF | ascii::CR | ascii::ESC
+            ) {
+                continue;
+            }
+            let letter = char::from(byte + 0x40);
+            assert_eq!(
+                p.parse(byte),
+                Some(KeyEvent::Ctrl(letter)),
+                "byte {byte:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_control_char_comes_out_as_char() {
+        // Whatever each control byte becomes, it is never a Char that the
+        // line editor would put on the line.
+        for byte in (0x00..=0x1Fu8).chain([ascii::DEL]) {
+            let mut p = KeyEventParser::new();
+            let event = p.parse(byte).or_else(|| p.esc_seq_timeout());
+            assert!(
+                !matches!(event, Some(KeyEvent::Char(_))),
+                "byte {byte:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn c1_control_chars_are_dropped() {
+        // U+0085 (NEL) is the two bytes C2 85. It is a control character
+        // but not a Ctrl key, so it produces nothing.
+        let mut p = KeyEventParser::new();
+        let events = parse_all(&mut p, "\u{85}\u{80}\u{9F}".as_bytes());
+        assert!(events.iter().all(Option::is_none));
+        // The parser is still usable afterwards
+        assert_eq!(p.parse(b'a'), Some(KeyEvent::Char('a')));
     }
 
     #[test]

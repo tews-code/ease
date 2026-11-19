@@ -44,7 +44,19 @@ const ESC_TIMEOUT_MS: usize = 50;
 #[cfg(target_os = "none")]
 fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: KeyEvent) {
     match line_editor.process(key_event) {
+        EditResult::Abandon => {
+            print!("^C");
+            let _ = put_char(ascii::CR);
+            let _ = put_char(ascii::LF);
+            print!("{}", PROMPT);
+            line_editor.reset();
+        }
         EditResult::Append(ch) => print!("{ch}"),
+        EditResult::ClearScreen => {
+            let _ = write_all(fds::STDOUT, vt_out::CLEAR_SCREEN);
+            let _ = write_all(fds::STDOUT, vt_out::CURSOR_HOME);
+            redraw_line(write_buf, line_editor.line().as_str(), line_editor.cursor());
+        }
         EditResult::Complete => {
             let _ = put_char(ascii::CR);
             let _ = put_char(ascii::LF);

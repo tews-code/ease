@@ -15,8 +15,12 @@ const HISTORY_SIZE: usize = 10;
 /// get the current state after each result.
 #[must_use]
 pub enum EditResult {
+    /// Abandon a line (Ctrl-C)
+    Abandon,
     /// Append a char to the end of the line
     Append(char),
+    /// Clear the screen (Ctrl-L)
+    ClearScreen,
     /// Enter pressed
     Complete,
     /// Cursor has moved one character to the right
@@ -77,6 +81,102 @@ impl LineEditor {
         self.history.push_back(s);
     }
 
+    /// History down
+    fn history_next(&mut self) -> EditResult {
+        let Some(index) = self.history_index else {
+            return EditResult::Reject;
+        };
+        if self.history.is_empty() {
+            return EditResult::Reject;
+        };
+        if index == 0 {
+            self.history_index = None;
+            self.line = core::mem::take(&mut self.saved_line);
+        } else {
+            // Find the newest entry
+            let Some(entry) = self.history.iter().rev().nth(index - 1) else {
+                return EditResult::Reject;
+            };
+            self.history_index = Some(index - 1);
+            self.line = entry.chars().collect();
+        }
+        self.cursor = self.line.len();
+        EditResult::LineEdit
+    }
+
+    /// Move cursor left
+    fn move_left(&mut self) -> EditResult {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            EditResult::CursorMoveLeft
+        } else {
+            // Already at prompt, reject
+            EditResult::Reject
+        }
+    }
+
+    /// Move cursor right
+    fn move_right(&mut self) -> EditResult {
+        if self.cursor < self.line.len() {
+            self.cursor += 1;
+            EditResult::CursorMoveRight
+        } else {
+            // Already at end of line, reject
+            EditResult::Reject
+        }
+    }
+
+    /// History up
+    fn history_previous(&mut self) -> EditResult {
+        if self.history.is_empty() || self.history_index == Some(self.history.len() - 1) {
+            return EditResult::Reject;
+        };
+        if self.history_index.is_none() {
+            // Store current line
+            self.saved_line = core::mem::take(&mut self.line);
+        };
+        // Update history index
+        let index = self.history_index.map_or(0, |i| i + 1);
+        self.history_index = Some(index);
+        // Find the newest entry
+        let Some(entry) = self.history.iter().rev().nth(index) else {
+            return EditResult::Reject;
+        };
+        self.line = entry.chars().collect();
+        self.cursor = self.line.len();
+        EditResult::LineEdit
+    }
+
+    /// Delete at cursor
+    fn delete(&mut self) -> EditResult {
+        if self.cursor < self.line.len() {
+            let _ = self.line.remove(self.cursor);
+            EditResult::LineEdit
+        } else {
+            EditResult::Reject
+        }
+    }
+
+    /// Cursor to end of line
+    fn end(&mut self) -> EditResult {
+        if self.cursor < self.line.len() {
+            self.cursor = self.line.len();
+            EditResult::LineEdit
+        } else {
+            EditResult::Reject
+        }
+    }
+
+    /// Cursor to start of line
+    fn home(&mut self) -> EditResult {
+        if self.cursor > 0 {
+            self.cursor = 0;
+            EditResult::LineEdit
+        } else {
+            EditResult::Reject
+        }
+    }
+
     /// Process a line
     ///
     /// Takes a KeyEvent and returns an EditResult
@@ -97,68 +197,31 @@ impl LineEditor {
                     EditResult::LineEdit
                 }
             }
+            KeyEvent::Ctrl(ch) => {
+                match ch {
+                    'A' => self.home(),
+                    'E' => self.end(),
+                    'B' => self.move_left(),
+                    'C' => {
+                        self.cursor = 0;
+                        self.history_index = None;
+                        self.saved_line.clear();
+                        EditResult::Abandon
+                    }
+                    'D' => self.delete(),
+                    'F' => self.move_right(),
+                    'L' => EditResult::ClearScreen,
+                    'N' => self.history_next(),
+                    'P' => self.history_previous(),
+                    _ => EditResult::Reject, // Ignore ^K, ^U, ^W
+                }
+            }
             KeyEvent::Special(key, _modifier) => {
                 match key {
-                    Key::ArrowDown => {
-                        let Some(index) = self.history_index else {
-                            return EditResult::Reject;
-                        };
-                        if self.history.is_empty() {
-                            return EditResult::Reject;
-                        };
-                        if index == 0 {
-                            self.history_index = None;
-                            self.line = core::mem::take(&mut self.saved_line);
-                        } else {
-                            // Find the newest entry
-                            let Some(entry) = self.history.iter().rev().nth(index - 1) else {
-                                return EditResult::Reject;
-                            };
-                            self.history_index = Some(index - 1);
-                            self.line = entry.chars().collect();
-                        }
-                        self.cursor = self.line.len();
-                        EditResult::LineEdit
-                    }
-                    Key::ArrowLeft => {
-                        if self.cursor > 0 {
-                            self.cursor -= 1;
-                            EditResult::CursorMoveLeft
-                        } else {
-                            // Already at prompt, reject
-                            EditResult::Reject
-                        }
-                    }
-                    Key::ArrowRight => {
-                        if self.cursor < self.line.len() {
-                            self.cursor += 1;
-                            EditResult::CursorMoveRight
-                        } else {
-                            // Already at end of line, reject
-                            EditResult::Reject
-                        }
-                    }
-                    Key::ArrowUp => {
-                        if self.history.is_empty()
-                            || self.history_index == Some(self.history.len() - 1)
-                        {
-                            return EditResult::Reject;
-                        };
-                        if self.history_index.is_none() {
-                            // Store current line
-                            self.saved_line = core::mem::take(&mut self.line);
-                        };
-                        // Update history index
-                        let index = self.history_index.map_or(0, |i| i + 1);
-                        self.history_index = Some(index);
-                        // Find the newest entry
-                        let Some(entry) = self.history.iter().rev().nth(index) else {
-                            return EditResult::Reject;
-                        };
-                        self.line = entry.chars().collect();
-                        self.cursor = self.line.len();
-                        EditResult::LineEdit
-                    }
+                    Key::ArrowDown => self.history_next(),
+                    Key::ArrowLeft => self.move_left(),
+                    Key::ArrowRight => self.move_right(),
+                    Key::ArrowUp => self.history_previous(),
                     Key::Backspace => {
                         if self.cursor > 0 {
                             // Remove the character at the cursor
@@ -170,28 +233,13 @@ impl LineEditor {
                             EditResult::Reject
                         }
                     }
-                    Key::Delete => {
-                        if self.cursor < self.line.len() {
-                            let _ = self.line.remove(self.cursor);
-                            EditResult::LineEdit
-                        } else {
-                            EditResult::Reject
-                        }
-                    }
-                    Key::End => {
-                        if self.cursor < self.line.len() {
-                            self.cursor = self.line.len();
-                            EditResult::LineEdit
-                        } else {
-                            EditResult::Reject
-                        }
-                    }
+                    Key::Delete => self.delete(),
+                    Key::End => self.end(),
                     Key::Enter => {
                         self.add_to_history();
                         self.cursor = 0;
                         self.history_index = None;
                         self.saved_line.clear();
-
                         EditResult::Complete
                     }
                     Key::Esc => {
@@ -200,14 +248,7 @@ impl LineEditor {
                         self.history_index = None;
                         EditResult::LineEdit
                     }
-                    Key::Home => {
-                        if self.cursor > 0 {
-                            self.cursor = 0;
-                            EditResult::LineEdit
-                        } else {
-                            EditResult::Reject
-                        }
-                    }
+                    Key::Home => self.home(),
                     Key::Insert => EditResult::Reject,
                     Key::PageUp => EditResult::Reject,
                     Key::PageDown => EditResult::Reject,
@@ -591,5 +632,163 @@ mod tests {
         assert_eq!(ed.line().len(), LINE_COLUMNS_MAX * 3);
         let result = ed.process(ch('€'));
         assert!(matches!(result, EditResult::Reject));
+    }
+
+    // ── Ctrl keys ───────────────────────────────────────────────────
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::Ctrl(c)
+    }
+
+    #[test]
+    fn test_ctrl_a_e_move_to_start_and_end() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "hello");
+        let result = ed.process(ctrl('A'));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.cursor(), 0);
+        // Already at the start
+        assert!(matches!(ed.process(ctrl('A')), EditResult::Reject));
+        let result = ed.process(ctrl('E'));
+        assert!(matches!(result, EditResult::LineEdit));
+        assert_eq!(ed.cursor(), 5);
+        // Already at the end
+        assert!(matches!(ed.process(ctrl('E')), EditResult::Reject));
+        assert_eq!(ed.line(), "hello");
+    }
+
+    #[test]
+    fn test_ctrl_b_f_move_one_char() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "ab");
+        assert!(matches!(ed.process(ctrl('F')), EditResult::Reject));
+        assert!(matches!(ed.process(ctrl('B')), EditResult::CursorMoveLeft));
+        assert_eq!(ed.cursor(), 1);
+        assert!(matches!(ed.process(ctrl('F')), EditResult::CursorMoveRight));
+        assert_eq!(ed.cursor(), 2);
+        let _ = ed.process(ctrl('A'));
+        assert!(matches!(ed.process(ctrl('B')), EditResult::Reject));
+    }
+
+    #[test]
+    fn test_ctrl_d_deletes_at_cursor() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "abc");
+        // Nothing under the cursor at the end of the line
+        assert!(matches!(ed.process(ctrl('D')), EditResult::Reject));
+        let _ = ed.process(ctrl('A'));
+        assert!(matches!(ed.process(ctrl('D')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "bc");
+        assert_eq!(ed.cursor(), 0);
+    }
+
+    #[test]
+    fn test_ctrl_p_n_walk_history() {
+        // P is previous (older, like Up), N is next (newer, like Down).
+        let mut ed = LineEditor::new();
+        for line in ["one", "two"] {
+            type_str(&mut ed, line);
+            let _ = ed.process(key(Key::Enter));
+            ed.reset();
+        }
+        type_str(&mut ed, "dra");
+        // Nothing newer than the line being typed
+        assert!(matches!(ed.process(ctrl('N')), EditResult::Reject));
+        assert!(matches!(ed.process(ctrl('P')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "two");
+        assert!(matches!(ed.process(ctrl('P')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "one");
+        assert!(matches!(ed.process(ctrl('P')), EditResult::Reject));
+        assert!(matches!(ed.process(ctrl('N')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "two");
+        assert!(matches!(ed.process(ctrl('N')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "dra");
+        assert_eq!(ed.cursor(), 3);
+    }
+
+    #[test]
+    fn test_ctrl_keys_mix_with_arrow_keys() {
+        // Ctrl-P then Down is the same walk as Up then Ctrl-N.
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "one");
+        let _ = ed.process(key(Key::Enter));
+        ed.reset();
+        let _ = ed.process(ctrl('P'));
+        assert_eq!(ed.line(), "one");
+        assert!(matches!(
+            ed.process(key(Key::ArrowDown)),
+            EditResult::LineEdit
+        ));
+        assert_eq!(ed.line(), "");
+        let _ = ed.process(key(Key::ArrowUp));
+        assert!(matches!(ed.process(ctrl('N')), EditResult::LineEdit));
+        assert_eq!(ed.line(), "");
+    }
+
+    #[test]
+    fn test_unbound_ctrl_key_is_rejected_and_not_typed() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "ab");
+        for c in ['@', 'G', 'Q', 'Z', '\\', '_'] {
+            assert!(matches!(ed.process(ctrl(c)), EditResult::Reject), "^{c}");
+        }
+        assert_eq!(ed.line(), "ab");
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn test_ctrl_l_keeps_the_line() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "abc");
+        let _ = ed.process(key(Key::ArrowLeft));
+        assert!(matches!(ed.process(ctrl('L')), EditResult::ClearScreen));
+        assert_eq!(ed.line(), "abc");
+        assert_eq!(ed.cursor(), 2);
+    }
+
+    #[test]
+    fn test_ctrl_c_abandons_without_history() {
+        let mut ed = LineEditor::new();
+        type_str(&mut ed, "oops");
+        assert!(matches!(ed.process(ctrl('C')), EditResult::Abandon));
+        ed.reset();
+        assert_eq!(ed.line(), "");
+        assert_eq!(ed.cursor(), 0);
+        // The abandoned line was not remembered
+        assert!(matches!(ed.process(key(Key::ArrowUp)), EditResult::Reject));
+    }
+
+    #[test]
+    fn test_ctrl_c_while_browsing_history_starts_fresh() {
+        // Up twice, then Ctrl-C: the next line starts from scratch, so Up
+        // shows the newest entry again and Down returns to an empty line,
+        // not to the line that was being typed before the abandon.
+        let mut ed = LineEditor::new();
+        for line in ["one", "two"] {
+            type_str(&mut ed, line);
+            let _ = ed.process(key(Key::Enter));
+            ed.reset();
+        }
+        type_str(&mut ed, "draft");
+        let _ = ed.process(key(Key::ArrowUp));
+        let _ = ed.process(key(Key::ArrowUp));
+        assert_eq!(ed.line(), "one");
+        assert!(matches!(ed.process(ctrl('C')), EditResult::Abandon));
+        ed.reset();
+        // Not browsing any more: nothing newer to go down to
+        assert!(matches!(
+            ed.process(key(Key::ArrowDown)),
+            EditResult::Reject
+        ));
+        assert!(matches!(
+            ed.process(key(Key::ArrowUp)),
+            EditResult::LineEdit
+        ));
+        assert_eq!(ed.line(), "two");
+        assert!(matches!(
+            ed.process(key(Key::ArrowDown)),
+            EditResult::LineEdit
+        ));
+        assert_eq!(ed.line(), "");
     }
 }
