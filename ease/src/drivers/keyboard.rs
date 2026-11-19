@@ -196,7 +196,9 @@ impl Decoder {
                     | input::key_code::OPT_LEFT
                     | input::key_code::OPT_RIGHT
                     | input::key_code::CONTROL_LEFT
-                    | input::key_code::CONTROL_RIGHT => {
+                    | input::key_code::CONTROL_RIGHT
+                    | input::key_code::COMMAND_LEFT
+                    | input::key_code::COMMAND_RIGHT => {
                         self.pressed_keys.set(key_code as usize);
                         Emit::Quiet
                     }
@@ -246,7 +248,9 @@ impl Decoder {
                     | input::key_code::OPT_LEFT
                     | input::key_code::OPT_RIGHT
                     | input::key_code::CONTROL_LEFT
-                    | input::key_code::CONTROL_RIGHT => {
+                    | input::key_code::CONTROL_RIGHT
+                    | input::key_code::COMMAND_LEFT
+                    | input::key_code::COMMAND_RIGHT => {
                         self.pressed_keys.clear(key_code as usize);
                         Emit::Quiet
                     }
@@ -437,6 +441,21 @@ mod test {
         assert_eq!(d.decode_event(&ev(1, 97, 1)), Emit::Quiet); // right down
         assert_eq!(d.decode_event(&ev(1, 29, 0)), Emit::Quiet); // left up
         assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(0x01));
+    }
+
+    #[test_case]
+    fn decoder_command_keys_are_quiet_modifiers() {
+        // Command (125 left, 126 right) means nothing to EASE: press,
+        // repeat and release are all quiet, and typing carries on as
+        // normal while it is held.
+        let mut d = Decoder::new();
+        for code in [125, 126] {
+            assert_eq!(d.decode_event(&ev(1, code, 1)), Emit::Quiet); // down
+            assert_eq!(d.decode_event(&ev(1, code, 2)), Emit::Quiet); // repeat
+            assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
+            assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
+            assert_eq!(d.decode_event(&ev(1, code, 0)), Emit::Quiet); // up
+        }
     }
 
     #[test_case]

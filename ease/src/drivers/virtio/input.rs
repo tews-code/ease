@@ -61,6 +61,8 @@ pub(crate) mod key_code {
     pub(crate) const PAGE_DOWN: u16 = 109;
     pub(crate) const INSERT: u16 = 110;
     pub(crate) const DELETE: u16 = 111;
+    pub(crate) const COMMAND_LEFT: u16 = 125;
+    pub(crate) const COMMAND_RIGHT: u16 = 126;
 }
 
 // Virtio input events use the Linux evdev format
