@@ -109,10 +109,10 @@ fn ctrl_code(ascii_code: u8, ctrl: bool) -> u8 {
 
 fn escape_sequence(key_code: u16) -> Option<&'static [u8]> {
     match key_code {
-        input::key_code::UP_ARROW => Some(b"\x1b[A"),
-        input::key_code::DOWN_ARROW => Some(b"\x1b[B"),
-        input::key_code::RIGHT_ARROW => Some(b"\x1b[C"),
-        input::key_code::LEFT_ARROW => Some(b"\x1b[D"),
+        input::key_code::ARROW_UP => Some(b"\x1b[A"),
+        input::key_code::ARROW_DOWN => Some(b"\x1b[B"),
+        input::key_code::ARROW_RIGHT => Some(b"\x1b[C"),
+        input::key_code::ARROW_LEFT => Some(b"\x1b[D"),
         input::key_code::HOME => Some(b"\x1b[H"),
         input::key_code::END => Some(b"\x1b[F"),
         input::key_code::INSERT => Some(b"\x1b[2~"),
@@ -154,17 +154,21 @@ impl Decoder {
     }
 
     fn held_shift(&self) -> bool {
-        self.pressed_keys.get(input::key_code::LEFT_SHIFT as usize)
-            || self.pressed_keys.get(input::key_code::RIGHT_SHIFT as usize)
+        self.pressed_keys.get(input::key_code::SHIFT_LEFT as usize)
+            || self.pressed_keys.get(input::key_code::SHIFT_RIGHT as usize)
     }
 
     fn held_opt(&self) -> bool {
-        self.pressed_keys.get(input::key_code::LEFT_OPT as usize)
-            || self.pressed_keys.get(input::key_code::RIGHT_OPT as usize)
+        self.pressed_keys.get(input::key_code::OPT_LEFT as usize)
+            || self.pressed_keys.get(input::key_code::OPT_RIGHT as usize)
     }
 
     fn held_ctrl(&self) -> bool {
-        self.pressed_keys.get(input::key_code::CONTROL as usize)
+        self.pressed_keys
+            .get(input::key_code::CONTROL_LEFT as usize)
+            || self
+                .pressed_keys
+                .get(input::key_code::CONTROL_RIGHT as usize)
     }
 
     fn decode_event(&mut self, event: &input::Event) -> Emit {
@@ -187,11 +191,12 @@ impl Decoder {
             }
             EventKind::KeyPressed(key_code) | EventKind::KeyHeld(key_code) => {
                 match key_code {
-                    input::key_code::LEFT_SHIFT
-                    | input::key_code::RIGHT_SHIFT
-                    | input::key_code::LEFT_OPT
-                    | input::key_code::RIGHT_OPT
-                    | input::key_code::CONTROL => {
+                    input::key_code::SHIFT_LEFT
+                    | input::key_code::SHIFT_RIGHT
+                    | input::key_code::OPT_LEFT
+                    | input::key_code::OPT_RIGHT
+                    | input::key_code::CONTROL_LEFT
+                    | input::key_code::CONTROL_RIGHT => {
                         self.pressed_keys.set(key_code as usize);
                         Emit::Quiet
                     }
@@ -236,11 +241,12 @@ impl Decoder {
             }
             EventKind::KeyReleased(key_code) => {
                 match key_code {
-                    input::key_code::LEFT_SHIFT
-                    | input::key_code::RIGHT_SHIFT
-                    | input::key_code::LEFT_OPT
-                    | input::key_code::RIGHT_OPT
-                    | input::key_code::CONTROL => {
+                    input::key_code::SHIFT_LEFT
+                    | input::key_code::SHIFT_RIGHT
+                    | input::key_code::OPT_LEFT
+                    | input::key_code::OPT_RIGHT
+                    | input::key_code::CONTROL_LEFT
+                    | input::key_code::CONTROL_RIGHT => {
                         self.pressed_keys.clear(key_code as usize);
                         Emit::Quiet
                     }
@@ -412,6 +418,33 @@ mod test {
         assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
         assert_eq!(d.decode_event(&ev(1, 29, 0)), Emit::Quiet); // ctrl up
         // Regression: ctrl release must actually clear the modifier
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
+    }
+
+    #[test_case]
+    fn decoder_right_ctrl_is_ctrl() {
+        // Right ctrl (97) is a quiet modifier and masks like left ctrl (29).
+        let mut d = Decoder::new();
+        assert_eq!(d.decode_event(&ev(1, 97, 1)), Emit::Quiet); // right ctrl down
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(0x01)); // ctrl-a
+        assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
+        assert_eq!(d.decode_event(&ev(1, 97, 0)), Emit::Quiet); // right ctrl up
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
+        assert_eq!(d.decode_event(&ev(1, 30, 0)), Emit::Quiet);
+        // Either key holds the modifier: releasing one while the other is
+        // still down leaves ctrl on.
+        assert_eq!(d.decode_event(&ev(1, 29, 1)), Emit::Quiet); // left down
+        assert_eq!(d.decode_event(&ev(1, 97, 1)), Emit::Quiet); // right down
+        assert_eq!(d.decode_event(&ev(1, 29, 0)), Emit::Quiet); // left up
+        assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(0x01));
+    }
+
+    #[test_case]
+    fn decoder_command_key_is_not_ctrl() {
+        // 125 is 29 | 97: a bitwise OR of the two ctrl codes must not be
+        // what held_ctrl looks up.
+        let mut d = Decoder::new();
+        let _ = d.decode_event(&ev(1, 125, 1)); // left command down
         assert_eq!(d.decode_event(&ev(1, 30, 1)), Emit::Char(b'a'));
     }
 

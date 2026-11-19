@@ -44,19 +44,20 @@ pub(crate) mod evdev {
 
 pub(crate) mod key_code {
     pub(crate) const BACKSPACE: u16 = 14;
-    pub(crate) const CONTROL: u16 = 29;
-    pub(crate) const LEFT_SHIFT: u16 = 42;
-    pub(crate) const RIGHT_SHIFT: u16 = 54;
-    pub(crate) const LEFT_OPT: u16 = 56;
+    pub(crate) const CONTROL_LEFT: u16 = 29;
+    pub(crate) const CONTROL_RIGHT: u16 = 97;
+    pub(crate) const SHIFT_LEFT: u16 = 42;
+    pub(crate) const SHIFT_RIGHT: u16 = 54;
+    pub(crate) const OPT_LEFT: u16 = 56;
     pub(crate) const CAPS_LOCK: u16 = 58;
-    pub(crate) const RIGHT_OPT: u16 = 100;
+    pub(crate) const OPT_RIGHT: u16 = 100;
     pub(crate) const HOME: u16 = 102;
-    pub(crate) const UP_ARROW: u16 = 103;
+    pub(crate) const ARROW_UP: u16 = 103;
     pub(crate) const PAGE_UP: u16 = 104;
-    pub(crate) const LEFT_ARROW: u16 = 105;
-    pub(crate) const RIGHT_ARROW: u16 = 106;
+    pub(crate) const ARROW_LEFT: u16 = 105;
+    pub(crate) const ARROW_RIGHT: u16 = 106;
     pub(crate) const END: u16 = 107;
-    pub(crate) const DOWN_ARROW: u16 = 108;
+    pub(crate) const ARROW_DOWN: u16 = 108;
     pub(crate) const PAGE_DOWN: u16 = 109;
     pub(crate) const INSERT: u16 = 110;
     pub(crate) const DELETE: u16 = 111;
