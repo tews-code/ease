@@ -5,6 +5,7 @@
 //! on RISC-V inline assembly via `arch::disable_interrupts`.SpinLock (below)
 //! is target-independent and provides the host substitute via `AllocatorLock`.
 
+mod arc;
 #[cfg(target_os = "none")]
 mod completion;
 #[cfg(not(target_has_atomic = "64"))]
