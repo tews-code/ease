@@ -338,3 +338,19 @@ Tick with [x] when done, or delete the line.
       - Keyboard only: the UART (terminal bytes, no releases) can't take
         part. The RP2350 SPI keyboard driver should produce the same raw
         events, so the game never sees which keyboard it is.
+
+[ ] join() for kernel threads. Noted 2026-11-20 while testing the
+    hand-written Arc: Mara Bos's test spawns a thread and joins it,
+    and the kernel has no way to wait for a thread to finish.
+    Today: sched::spawn and sched::Builder::spawn return a
+    thread::Handle, which has no join. Tests that need a thread's
+    result set a flag and wait on it, and finished helper threads are
+    parked with sleep_until(u64::MAX).
+    Wanted: the spawner can block until the thread's closure has
+    returned (and everything it captured has been dropped).
+
+[ ] User threads: spawn, build and join. Noted 2026-11-20.
+    A user program can start a thread, configure it first (the user
+    counterpart of the kernel's sched::Builder), and wait for it to
+    finish. Needs syscalls and their ease-ulib wrappers. The kernel
+    side of join is the item above.
