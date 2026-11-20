@@ -18,6 +18,9 @@ struct ArcData<T> {
 }
 
 /// The atomic reference counted object wrapper
+///
+/// Each Arc is a handle to the ArcData, and can be cloned and shared between threads.
+/// Dropping the last Arc will also drop the ArcData.
 #[expect(dead_code)]
 pub struct Arc<T> {
     ptr: NonNull<ArcData<T>>, // Raw pointer as handle lifetime is separate to object lifetime
@@ -71,6 +74,51 @@ impl<T> Arc<T> {
         // reference count has become zero, ensuring that the pointer is
         // always valid
         unsafe { self.ptr.as_ref() }
+    }
+
+    /// Get a mutable reference to the object.
+    ///
+    /// Only returns Some mutable reference if there is just one reference
+    /// holder. If there is more than one reference holder, then `None` is returned.
+    ///
+    /// This method does not take &mut self to avoid Deref ambiguity, call
+    /// using `Arc::get_mut(&mut a)`.
+    pub fn get_mut(arc: &mut Self) -> Option<&mut T> {
+        if arc.data().ref_count.load(Ordering::Relaxed) == 1 {
+            fence(Ordering::Acquire);
+            // Safety: Since we only have one reference holder, we have
+            // exclusive access, and the &mut reference ensures no other thread
+            // can get access.
+            Some(unsafe { &mut arc.ptr.as_mut().data })
+        } else {
+            None
+        }
+    }
+
+    /// Consumes the Arc and returns the data if this is the only reference
+    /// holder returns the data, or None if not the only reference holder.
+    ///
+    /// Only takes the object if there is exactly one reference holder in which case
+    /// the data is taken and returned, otherwise returns `None`. Regardless, this Arc is dropped.
+    ///
+    /// Takes arc: Self to avoid clashing with other Deref, call using
+    /// `Arc::into_inner()`.
+    pub fn into_inner(arc: Self) -> Option<T> {
+        // Prevent Drop from running
+        let arc = core::mem::ManuallyDrop::new(arc);
+        // Normal decrements only need Release ordering until we are dropping
+        // the actual object
+        if arc.data().ref_count.fetch_sub(1, Ordering::Release) == 1 {
+            // Now that we are taking the actual object, need Acquire
+            // as we take ownership of the object in order to take it
+            fence(Ordering::Acquire);
+            // Safety: The Box was created once on calling new, and is
+            // only dropped by a single Arc reference holder
+            let data = unsafe { Box::from_raw(arc.ptr.as_ptr()) };
+            Some(data.data)
+        } else {
+            None
+        }
     }
 }
 
@@ -304,5 +352,149 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<u32>>();
         assert_send_sync::<Arc<AtomicUsize>>();
+    }
+
+    #[test]
+    fn get_mut_on_a_sole_arc_gives_the_value() {
+        let mut a = Arc::new(1u32);
+        *Arc::get_mut(&mut a).expect("only one holder") += 41;
+        assert_eq!(*a, 42);
+        // The count is untouched by get_mut
+        assert_eq!(a.data().ref_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn get_mut_is_refused_while_shared_and_returns_after() {
+        let mut a = Arc::new(5u32);
+        let mut b = a.clone();
+        // Neither holder is alone
+        assert!(Arc::get_mut(&mut a).is_none());
+        assert!(Arc::get_mut(&mut b).is_none());
+        assert_eq!(*a, 5);
+        drop(b);
+        // Alone again
+        *Arc::get_mut(&mut a).expect("clone was dropped") = 6;
+        assert_eq!(*a, 6);
+    }
+
+    #[test]
+    fn get_mut_after_another_thread_drops_its_clone() {
+        // The other thread reads through its clone and drops it. Once it
+        // has, this thread is the sole holder and may write. Miri checks
+        // that the write does not race with the other thread's read.
+        let mut a = Arc::new(Box::new(10u32));
+        let b = a.clone();
+        spawn(move || {
+            assert_eq!(**b, 10);
+        })
+        .join()
+        .unwrap();
+        **Arc::get_mut(&mut a).expect("other thread has finished") = 11;
+        assert_eq!(**a, 11);
+    }
+
+    #[test]
+    fn get_mut_races_with_a_dropping_thread_safely() {
+        // No join before get_mut: the answer may be Some or None
+        // depending on timing, and both must be sound.
+        for _ in 0..20 {
+            let mut a = Arc::new(0u32);
+            let b = a.clone();
+            let t = spawn(move || {
+                assert!(*b <= 1);
+            });
+            if let Some(value) = Arc::get_mut(&mut a) {
+                *value = 1;
+            }
+            t.join().unwrap();
+            assert!(Arc::get_mut(&mut a).is_some());
+        }
+    }
+
+    #[test]
+    fn value_changed_through_get_mut_is_still_dropped_once() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let mut a = Arc::new((0u32, CountDrop(&DROPS)));
+        Arc::get_mut(&mut a).expect("only one holder").0 = 9;
+        let b = a.clone();
+        assert_eq!(b.0, 9);
+        drop(a);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
+        drop(b);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn into_inner_on_a_sole_arc_returns_the_value_undropped() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let a = Arc::new((7u32, CountDrop(&DROPS)));
+        let value = Arc::into_inner(a).expect("only one holder");
+        // The value moved out; freeing the allocation did not drop it
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
+        assert_eq!(value.0, 7);
+        drop(value);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn into_inner_while_shared_gives_none_and_leaves_the_value() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let a = Arc::new((3u32, CountDrop(&DROPS)));
+        let b = a.clone();
+        // Not the last holder: the reference is given up, nothing else
+        assert!(Arc::into_inner(a).is_none());
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
+        assert_eq!(b.0, 3);
+        assert_eq!(b.data().ref_count.load(Ordering::Relaxed), 1);
+        // The remaining holder is now the last and gets the value
+        let value = Arc::into_inner(b).expect("last holder");
+        assert_eq!(value.0, 3);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 0);
+        drop(value);
+        assert_eq!(DROPS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn into_inner_moves_out_a_value_that_owns_heap_memory() {
+        // No Default, no Copy: the String's buffer must arrive intact and
+        // be freed exactly once (Miri reports a double free or a leak).
+        let a = Arc::new(String::from("hello"));
+        let mut text = Arc::into_inner(a).expect("only one holder");
+        text.push_str(", world");
+        assert_eq!(text, "hello, world");
+    }
+
+    #[test]
+    fn into_inner_hands_the_value_to_exactly_one_of_two_racing_threads() {
+        // The last two holders give up at once. A load-then-act version
+        // can answer None to both and destroy the value unseen; with
+        // fetch_sub exactly one of them is last.
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        const ROUNDS: usize = 20;
+        for round in 0..ROUNDS {
+            let a = Arc::new(CountDrop(&DROPS));
+            let b = a.clone();
+            let t1 = spawn(move || Arc::into_inner(a).is_some());
+            let t2 = spawn(move || Arc::into_inner(b).is_some());
+            let got1 = t1.join().unwrap();
+            let got2 = t2.join().unwrap();
+            assert!(got1 ^ got2, "exactly one thread should get the value");
+            assert_eq!(DROPS.load(Ordering::Relaxed), round + 1);
+        }
+    }
+
+    #[test]
+    fn into_inner_after_another_thread_used_the_value() {
+        // The other thread writes through the shared value and drops its
+        // clone; the value taken out here must show that write.
+        let a = Arc::new(AtomicUsize::new(0));
+        let b = a.clone();
+        spawn(move || {
+            b.store(99, Ordering::Relaxed);
+        })
+        .join()
+        .unwrap();
+        let value = Arc::into_inner(a).expect("other thread has finished");
+        assert_eq!(value.into_inner(), 99);
     }
 }
