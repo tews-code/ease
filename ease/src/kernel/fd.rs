@@ -8,7 +8,7 @@ use ease_abi::fds::{STDERR, STDIN, STDOUT};
 use crate::fs::FileHandle;
 use crate::kernel::collection::Arena;
 use crate::kernel::sched::process;
-use crate::kernel::sync::IrqSpinLock;
+use crate::kernel::sync::{Arc, IrqSpinLock};
 use crate::kernel::validate::{Untrusted, Validate};
 
 /// Static arena of file descriptor tables. We use IrqSpinLock to safely provide interior mutability.
@@ -43,6 +43,11 @@ impl ValidFd {
 
 impl Validate<usize> for ValidFd {
     type Error = Error;
+
+    /// Validate the untrusted file descriptor
+    ///
+    /// Returns a [ValidFd] if Ok, or an [Error::UnknownFileDescriptor] if
+    /// the untrusted value is out of range.
     fn validate(value: Untrusted<usize>) -> Result<Self, Self::Error> {
         let value = value.raw();
         if value >= MAX_OPEN_FILES {
@@ -52,6 +57,7 @@ impl Validate<usize> for ValidFd {
         }
     }
 }
+
 /// Acquire a new fd table slot for a new process and returns a handle.
 /// Takes a lock on FILE_DESCRIPTORS.
 ///
@@ -130,12 +136,27 @@ pub(super) fn kind(fds: Handle, fd: ValidFd) -> Option<Kind> {
         .map(|f| f.kind())
 }
 
-#[derive(Debug)]
+/// Clones the [Entry] for the given file descriptor.
+/// Takes a lock on FILE_DESCRIPTORS.
+///
+/// # Panics
+/// Panics if the handle is stale.
+#[expect(dead_code)]
+pub(super) fn entry(fds: Handle, fd: ValidFd) -> Option<Entry> {
+    FILE_DESCRIPTORS
+        .lock()
+        .get(fds)
+        .expect("handles should never be stale")
+        .slot(fd)
+        .clone()
+}
+
+#[derive(Debug, Clone)]
 pub(super) enum Entry {
     ConsoleInput,
     ConsoleOutput,
     DebugConsole,
-    File(FileHandle),
+    File(Arc<FileHandle>),
 }
 impl Entry {
     /// Returns what Kind the Entry is.

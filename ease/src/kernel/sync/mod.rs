@@ -19,6 +19,7 @@ pub mod tests;
 #[cfg(target_os = "none")]
 mod waitqueue;
 
+pub use arc::Arc;
 #[cfg(target_os = "none")]
 #[allow(unused_imports)]
 pub use completion::Completion;

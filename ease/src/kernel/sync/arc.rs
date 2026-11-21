@@ -4,6 +4,7 @@
 //! perfectly good implementation can be taken from the alloc crate.
 
 use alloc::boxed::Box;
+use core::fmt::Debug;
 use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
@@ -11,7 +12,6 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 /// Holds the data and a reference count
 /// The struct is deliberately private as
 /// it is internal to the [Arc] itself.
-#[expect(dead_code)]
 struct ArcData<T> {
     ref_count: AtomicUsize,
     data: T,
@@ -21,7 +21,6 @@ struct ArcData<T> {
 ///
 /// Each Arc is a handle to the ArcData, and can be cloned and shared between threads.
 /// Dropping the last Arc will also drop the ArcData.
-#[expect(dead_code)]
 pub struct Arc<T> {
     ptr: NonNull<ArcData<T>>, // Raw pointer as handle lifetime is separate to object lifetime
 }
@@ -159,6 +158,12 @@ impl<T> Drop for Arc<T> {
                 unsafe { Box::from_raw(self.ptr.as_ptr()) },
             )
         }
+    }
+}
+
+impl<T: Debug> Debug for Arc<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        Debug::fmt(&self.data().data, f)
     }
 }
 
