@@ -15,6 +15,8 @@
 
 #![no_std]
 
+use core::ops::BitOr;
+
 pub mod syscall {
     /// Exit the user process, exiting all threads and releasing all resources
     pub const EXIT: usize = 0;
@@ -27,6 +29,10 @@ pub mod syscall {
     pub const ALLOC: usize = 3;
     /// Change directory
     pub const CHDIR: usize = 4;
+    /// Open a file
+    pub const OPEN: usize = 5;
+    /// Close a file
+    pub const CLOSE: usize = 6;
 
     // Test-only syscalls live at 100+ so real syscall growth never
     // collides. The kernel only wires them up in test builds; a
@@ -81,6 +87,8 @@ pub enum Error {
     InvalidName = 20,
     /// There are too many open files for this process. See [MAX_OPEN_FILES].
     TooManyOpenFiles = 21,
+    /// Invalid file access bits combination
+    InvalidFileAccess = 22,
 }
 
 /// Convert an error number into the Error enum.
@@ -112,6 +120,7 @@ impl TryFrom<usize> for Error {
             v if v == Error::NotADirectory as usize => Ok(Error::NotADirectory),
             v if v == Error::InvalidName as usize => Ok(Error::InvalidName),
             v if v == Error::TooManyOpenFiles as usize => Ok(Error::TooManyOpenFiles),
+            v if v == Error::InvalidFileAccess as usize => Ok(Error::InvalidFileAccess),
             _ => Err(value),
         }
     }
@@ -149,4 +158,184 @@ pub mod fds {
     pub const STDIN: usize = 0;
     pub const STDOUT: usize = 1;
     pub const STDERR: usize = 2;
+}
+
+/// Access types
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileAccess(usize);
+
+impl FileAccess {
+    /// Read file access
+    pub const READ: Self = Self(1 << 0);
+    /// Write file access
+    pub const WRITE: Self = Self(1 << 1);
+    /// Ability to create a file, must be combined with WRITE access
+    pub const CREATE: Self = Self(1 << 2);
+    /// Append a file, must be combined with WRITE access
+    pub const APPEND: Self = Self(1 << 3);
+    /// Truncate a file, must be combined with WRITE access
+    pub const TRUNCATE: Self = Self(1 << 4);
+
+    // Masks
+    /// All valid bits
+    const ALL: usize =
+        Self::READ.0 | Self::WRITE.0 | Self::CREATE.0 | Self::APPEND.0 | Self::TRUNCATE.0;
+    /// READ or WRITE bit set
+    const READ_OR_WRITE: usize = Self::READ.0 | Self::WRITE.0;
+    /// Flags that need an underlying WRITE
+    const FLAGS_NEEDING_WRITE: usize = Self::CREATE.0 | Self::APPEND.0 | Self::TRUNCATE.0;
+
+    /// Get the bits as a raw usize
+    pub fn raw(&self) -> usize {
+        self.0
+    }
+
+    /// Check if the FileAccess contains the given flag
+    pub fn contains(&self, flag: FileAccess) -> bool {
+        self.0 & flag.0 == flag.0
+    }
+}
+
+impl TryFrom<usize> for FileAccess {
+    type Error = Error;
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        // Check the bits are valid
+        if value & !Self::ALL != 0 {
+            return Err(Error::InvalidFileAccess);
+        };
+        // Check that the bits include either read or write
+        if value & Self::READ_OR_WRITE == 0 {
+            return Err(Error::InvalidFileAccess);
+        }
+        // Check if the flags are attached to a WRITE
+        if value & Self::FLAGS_NEEDING_WRITE != 0 && value & Self::WRITE.0 == 0 {
+            return Err(Error::InvalidFileAccess);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl BitOr for FileAccess {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const R: FileAccess = FileAccess::READ;
+    const W: FileAccess = FileAccess::WRITE;
+    const C: FileAccess = FileAccess::CREATE;
+    const A: FileAccess = FileAccess::APPEND;
+    const T: FileAccess = FileAccess::TRUNCATE;
+
+    fn accepted(access: FileAccess) -> bool {
+        FileAccess::try_from(access.raw()) == Ok(access)
+    }
+
+    fn refused(raw: usize) -> bool {
+        FileAccess::try_from(raw) == Err(Error::InvalidFileAccess)
+    }
+
+    #[test]
+    fn each_constant_is_one_distinct_bit() {
+        let all = [R, W, C, A, T];
+        for (i, a) in all.iter().enumerate() {
+            assert_eq!(a.raw().count_ones(), 1, "constant {i} is not a single bit");
+            for b in &all[i + 1..] {
+                assert_ne!(a.raw(), b.raw());
+            }
+        }
+    }
+
+    #[test]
+    fn bitor_combines_and_raw_round_trips() {
+        let rw = R | W;
+        assert_eq!(rw.raw(), R.raw() | W.raw());
+        assert_eq!(FileAccess::try_from(rw.raw()), Ok(rw));
+        // Joining a flag with itself changes nothing
+        assert_eq!(R | R, R);
+    }
+
+    #[test]
+    fn plain_access_is_accepted() {
+        assert!(accepted(R), "read");
+        assert!(accepted(W), "write");
+        assert!(accepted(R | W), "read and write");
+    }
+
+    #[test]
+    fn flags_with_write_are_accepted() {
+        assert!(accepted(W | C), "write, create");
+        assert!(accepted(W | A), "write, append");
+        assert!(accepted(W | T), "write, truncate");
+        assert!(accepted(W | C | T), "save: write, create, truncate");
+        assert!(accepted(W | C | A), "log: write, create, append");
+        assert!(accepted(R | W | C), "read, write, create");
+        assert!(accepted(R | W | C | A | T), "everything");
+    }
+
+    #[test]
+    fn no_access_at_all_is_refused() {
+        assert!(refused(0), "zero");
+    }
+
+    #[test]
+    fn flags_without_write_are_refused() {
+        // A flag alone: neither read nor write
+        assert!(refused(C.raw()), "create alone");
+        assert!(refused(A.raw()), "append alone");
+        assert!(refused(T.raw()), "truncate alone");
+        // A flag with read only: still no write
+        assert!(refused((R | C).raw()), "read, create");
+        assert!(refused((R | A).raw()), "read, append");
+        assert!(refused((R | T).raw()), "read, truncate");
+        assert!(refused((R | C | A | T).raw()), "read and every flag");
+    }
+
+    #[test]
+    fn unknown_bits_are_refused() {
+        // The first bit past the known ones, alone and with valid access
+        let unknown = 1 << 5;
+        assert!(refused(unknown));
+        assert!(refused(unknown | R.raw()));
+        assert!(refused(unknown | (R | W).raw()));
+        assert!(refused(1 << (usize::BITS - 1)), "top bit");
+        assert!(refused(usize::MAX), "every bit");
+    }
+
+    #[test]
+    fn every_five_bit_value_follows_the_three_rules() {
+        // Exhaustive over the known bits, against the rules stated plainly:
+        // at least one of read/write, and any flag needs write.
+        for raw in 0..(1usize << 5) {
+            let read = raw & R.raw() != 0;
+            let write = raw & W.raw() != 0;
+            let flag = raw & (C.raw() | A.raw() | T.raw()) != 0;
+            let valid = (read || write) && (!flag || write);
+            assert_eq!(
+                FileAccess::try_from(raw).is_ok(),
+                valid,
+                "raw {raw:#07b}: read={read} write={write} flag={flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn contains_means_all_the_bits_not_any() {
+        let rw = R | W;
+        assert!(rw.contains(R));
+        assert!(rw.contains(W));
+        assert!(rw.contains(rw));
+        assert!(!rw.contains(C));
+        // Read alone has one of the two bits of read-write, not both
+        assert!(!R.contains(rw), "read does not contain read-and-write");
+        assert!(!(W | C).contains(W | T), "shares write, lacks truncate");
+        assert!((W | C | T).contains(W | T));
+    }
 }
