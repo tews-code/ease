@@ -354,3 +354,96 @@ Tick with [x] when done, or delete the line.
     counterpart of the kernel's sched::Builder), and wait for it to
     finish. Needs syscalls and their ease-ulib wrappers. The kernel
     side of join is the item above.
+
+[ ] SEEK syscall: move the position of an open file. Noted 2026-11-20.
+    Wanted for Doom, which reads its WAD by jumping to offsets, and
+    for any program that does not read a file front to back.
+    Today: fs::file::lseek moves an open file's position (seeking past
+    the end is refused); nothing exposes it to user programs.
+    Wanted: a syscall and its ease-ulib wrapper, taking a file fd.
+    Notes:
+      - Not an open flag: it is an operation on an fd that is already
+        open, for read or write access alike.
+      - A console fd (0, 1, 2) has no position; seeking one is refused.
+      - On a file opened with append, writes still go to the end;
+        seeking only affects reads.
+
+[ ] Rename, for saving without losing the old file. Noted 2026-11-20.
+    Why: EASE must never lose a file. Saving by truncating a document
+    and writing over it leaves a half-written file, and the old
+    version gone, if power fails part way. Writing the new contents to
+    a temporary file and renaming it over the original leaves the old
+    version intact until the new one is complete.
+    Today: the filesystem has no rename.
+    Wanted: rename in fs, a syscall and its ease-ulib wrapper, and a
+    save path in the editor built on it.
+    To design before file writes land:
+      - What a rename over an existing file does on FAT, which has no
+        journal: the order of the directory and allocation-table
+        writes, and what a power cut leaves behind at each step.
+      - When the block cache writes to the card, so "saved" means on
+        the card.
+      - Autosave, so work is not lost for want of a save command.
+
+[ ] EASE appears as a USB drive when plugged into a computer. Noted
+    2026-11-20.
+    Why: EASE must never lose a file. Plugged into the MacBook, the
+    documents can be copied off by hand, and the Mac's own backups
+    then cover them. No network, no wifi, no battery cost.
+    What: USB device mode (not host), mass storage class, serving the
+    blocks of the storage card.
+    To design:
+      - Mass storage hands the computer raw blocks, so the computer
+        mounts the FAT volume itself. Two systems must not have it
+        mounted at once. While connected, EASE flushes and gives up
+        the volume, as a camera does, and takes it back on unplug.
+      - What the screen shows and what the keyboard does meanwhile.
+      - QEMU has no RP2350 USB device to test against; this is
+        hardware bring-up work.
+
+[ ] Real-time clock: EASE knows the date and time without being told
+    at each boot. Noted 2026-11-20.
+    Why: file dates. Documents need a true "last changed" time for a
+    recent-documents list, for backups, and for what the Mac shows
+    when EASE is plugged in as a USB drive. Also the shell's date and
+    time commands.
+    Today: only time since boot (the timer); the filesystem code has
+    no timestamp handling.
+    Shape:
+      - Wall-clock time = the clock chip's time read once at boot,
+        plus time since boot. The chip is only read at boot and
+        written when the time is set.
+      - A clock role in the board table: QEMU's virt machine has a
+        goldfish RTC giving the host's time (to confirm); the RP2350
+        board gets a clock chip on I2C with its own backup cell.
+      - A syscall to read the time, and one to set it.
+      - FAT stores local time, with no time zone. Keep local time
+        throughout; decide what happens at daylight saving changes.
+
+[ ] Batch files: the shell runs command lines from a file, and CI
+    uses them as end-to-end tests. Noted 2026-11-20.
+    Why: one script exercises keyboard input, the line editor, command
+    parsing, syscalls, the filesystem and the disk together. Today
+    each of those needs its own Rust probe program.
+    Waiting on: file reading from user space (OPEN, READ on a file,
+    CLOSE). run is cat that executes each line instead of printing it.
+    Steps:
+    [ ] 1. A run command: open the file, split it into lines, pass
+           each to execute(). Lines starting with # are comments.
+    [ ] 2. Commands return success or failure (today they return
+           nothing and print their own error). run stops at the first
+           failure and prints the file name and line number.
+    [ ] 3. Check commands: a file exists; two files are identical;
+           "this command is expected to fail" (run it, invert the
+           result).
+    [ ] 4. CI: a kernel test types the run command into the shell
+           (keyboard::inject_key) and looks for a marker line the
+           script prints last, as the heap-probe test does. The test
+           disk is rebuilt each run, so scripts may create and delete.
+    Decisions:
+      - No variables, conditions or loops. A flat list of commands
+        with stop-on-failure is enough for tests; real scripting would
+        be a case for MicroPython.
+      - Open: a startup file the shell runs at boot if present, as
+        another way to start a script (and something the appliance
+        may want anyway).

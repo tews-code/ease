@@ -1,0 +1,16 @@
+# Raspberry Pi Debug Probe (CMSIS-DAP), USB ID 2e8a:000c
+#
+# Lets the user logged in at this machine use the probe without sudo:
+#   - the debug side (SWD), a raw USB device used by OpenOCD and similar
+#   - the serial side (UART bridge), which appears as /dev/ttyACM*
+#
+# Install:
+#   sudo cp 60-debug-probe.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   then unplug the probe and plug it in again
+#
+# The file number must stay below 73: the uaccess tag is applied by
+# 73-seat-late.rules, so it has to be set before that file runs.
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000c", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000c", TAG+="uaccess"

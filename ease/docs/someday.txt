@@ -35,3 +35,18 @@ order, and lower priority than docs/todo.txt and docs/cleanup.txt.
     Before then, the cheaper step: validated newtypes shared by the
     handlers (a ValidPath beside ValidFd) once a second path-taking
     syscall exists.
+[ ] Networking and cloud save. Noted 2026-11-20.
+    TCP/IP is the easy part: smoltcp is a no_std stack that needs
+    only a driver for raw network frames, and tens of KB of buffers.
+    QEMU-first path: a virtio-net driver (next to virtio blk and
+    input) plus smoltcp, with no radio hardware.
+    The radio is the hard part. In order of difficulty: an ESP32
+    co-processor running AT firmware over a UART (it does wifi, TCP
+    and TLS itself); a board with wifi on it (Pico 2 W, cyw43 driver,
+    written for an async framework); a USB wifi dongle (USB host
+    stack plus a vendor driver; not realistic).
+    Cloud save on top needs TLS, so certificates, so correct time,
+    plus DNS, an HTTP client and somewhere to keep credentials.
+    Wifi is the most power-hungry part there could be: off except
+    while syncing. The USB drive item in todo.txt meets "never loses
+    a file" without any of this.
