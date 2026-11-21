@@ -240,6 +240,10 @@ cargo test --package ease --lib --target "$HOST_TARGET" \
     --no-default-features --features "$FEATURES"
 # TODO: Enable when binary is target-conditional
 # cargo test --package ease --tests --target "$HOST_TARGET"
+# ease-abi's host tests (FileAccess: the open flags and their validation).
+# Run from its own directory with the host target: the workspace default
+# target is riscv32, which has no test harness.
+(cd ../ease-abi && cargo test --lib --target "$HOST_TARGET")
 # ease-ulib's host tests (the user-heap allocator). Its syscall layer and
 # panic handler are gated to riscv32, so the host build leaves just the
 # allocator and its lock. Run from its own directory: it is outside the
@@ -260,6 +264,7 @@ if [ $MIRI -eq 1 ]; then
     fi
     cargo +nightly miri test --package ease --lib --target "$HOST_TARGET" \
         --no-default-features --features "$FEATURES"
+    (cd ../ease-abi && cargo +nightly miri test --lib --target "$HOST_TARGET")
     (cd ../ease-ulib && cargo +nightly miri test --lib --target "$HOST_TARGET")
     (cd ../ease-user && cargo +nightly miri test --bin shell --target "$HOST_TARGET")
 fi
