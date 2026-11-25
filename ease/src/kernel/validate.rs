@@ -1,5 +1,7 @@
 //! Untrusted data from u-mode and validation
 
+use ease_abi::FileAccess;
+
 pub(crate) struct Untrusted<T>(T);
 
 impl<T> Untrusted<T> {
@@ -18,4 +20,14 @@ pub(crate) trait Validate<T>: Sized {
 
     /// Performs the validation
     fn validate(value: Untrusted<T>) -> Result<Self, Self::Error>;
+}
+
+impl Validate<usize> for FileAccess {
+    type Error = ease_abi::Error;
+
+    /// Validate the usize against [ease_abi::FileAccess] bits using the
+    /// try_from associated function
+    fn validate(value: Untrusted<usize>) -> Result<Self, Self::Error> {
+        FileAccess::try_from(value.raw())
+    }
 }

@@ -89,6 +89,12 @@ pub enum Error {
     TooManyOpenFiles = 21,
     /// Invalid file access bits combination
     InvalidFileAccess = 22,
+    /// Invalid path
+    InvalidPath = 23,
+    /// Not supported - the request is valid but not yet implemented
+    NotSupported = 24,
+    /// The file has already been opened by another thread with exclusive access
+    FileIsBusy = 25,
 }
 
 /// Convert an error number into the Error enum.
@@ -121,6 +127,9 @@ impl TryFrom<usize> for Error {
             v if v == Error::InvalidName as usize => Ok(Error::InvalidName),
             v if v == Error::TooManyOpenFiles as usize => Ok(Error::TooManyOpenFiles),
             v if v == Error::InvalidFileAccess as usize => Ok(Error::InvalidFileAccess),
+            v if v == Error::InvalidPath as usize => Ok(Error::InvalidPath),
+            v if v == Error::NotSupported as usize => Ok(Error::NotSupported),
+            v if v == Error::FileIsBusy as usize => Ok(Error::FileIsBusy),
             _ => Err(value),
         }
     }

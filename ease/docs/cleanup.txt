@@ -158,3 +158,20 @@ Planned features and roadmap work live in docs/todo.txt, not here.
         Debug prints UnknownFlag(&str) with str Debug. ArgsError has
         Display and both print with `{}` (done).
     Done 2026-11-17: the shell is 25.9 KB and fits the 32 KB window.
+[ ] Split kernel/syscall.rs by area, not by call. Noted 2026-11-21
+    while adding OPEN and CLOSE.
+    Today: one file of 368 lines holds the dispatch, every handler and
+    the error conversions. Each file syscall adds a handler pair
+    (open + try_open), so it will pass 1,000 lines by the time write,
+    seek, rename and directory listing exist.
+    Wanted: a syscall directory. mod.rs keeps the two dispatch
+    functions, the error conversions and helpers shared by several
+    calls (copy_path_from_user). One file per area beside it: console
+    and file I/O (read, write), files and paths (open, close, chdir),
+    memory (alloc), test-only calls.
+    How: one commit that only moves code, with nothing else in it, so
+    the diff can be checked as a pure move.
+    Related: fifteen places set frame.a0 and frame.a1 by hand to
+    report a result. One helper that writes a Result into the frame
+    would shorten every handler; the chdir / try_chdir pair already
+    points that way.

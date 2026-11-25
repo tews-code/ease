@@ -695,11 +695,11 @@ pub extern "C" fn user_chdir_probe() {
         fail |= 1 << 0;
     }
     // 1: an empty path is refused
-    if user_chdir_packed(CDTEST, 0) != Error::DirectoryInvalid as usize {
+    if user_chdir_packed(CDTEST, 0) != Error::InvalidPath as usize {
         fail |= 1 << 1;
     }
     // 2: a path one byte over the limit is refused, not truncated
-    if user_chdir_packed(CDTEST, ease_abi::MAX_PATH_TEXT + 1) != Error::InvalidName as usize {
+    if user_chdir_packed(CDTEST, ease_abi::MAX_PATH_TEXT + 1) != Error::InvalidPath as usize {
         fail |= 1 << 2;
     }
     // 3: a name that does not exist
@@ -711,7 +711,7 @@ pub extern "C" fn user_chdir_probe() {
         fail |= 1 << 4;
     }
     // 5: bytes that are not valid text
-    if user_chdir_packed(NOT_TEXT, 2) != Error::InvalidName as usize {
+    if user_chdir_packed(NOT_TEXT, 2) != Error::InvalidPath as usize {
         fail |= 1 << 5;
     }
     // 6: a relative name from the root, where every process starts
