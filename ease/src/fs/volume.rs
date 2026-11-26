@@ -12,7 +12,7 @@ use crate::kernel::sync::SpinLock;
 
 use super::blockcache::BlockCache;
 use super::bpb::Bpb;
-use super::dir::{self, DirEntry, DirEntryKind, FileInfo};
+use super::dir::{self, Attributes, DirEntry, DirEntryKind, FileInfo};
 use super::fat::{self, FatEntry};
 use super::{Dir, Error, Location, SECTOR_SIZE, VolumeType};
 
@@ -254,14 +254,14 @@ impl Volume {
         let self_dir_file_info = FileInfo {
             name: *b".       ",
             extension: *b"   ",
-            attributes: dir::ATTR_DIR,
+            attributes: Attributes::DIR,
             first_cluster: new_cluster,
             file_size: 0,
         };
         let parent_dir_file_info = FileInfo {
             name: *b"..      ",
             extension: *b"   ",
-            attributes: dir::ATTR_DIR,
+            attributes: Attributes::DIR,
             first_cluster: match dir {
                 Dir::Root => 0,
                 Dir::SubDir(c) => c,
@@ -281,7 +281,7 @@ impl Volume {
         let new_dir_file_info = FileInfo {
             name,
             extension: ext,
-            attributes: dir::ATTR_DIR,
+            attributes: Attributes::DIR,
             first_cluster: new_cluster,
             file_size: 0,
         };
@@ -318,7 +318,7 @@ impl Volume {
     // Helper function for directories - find subdir by name and check it is valid
     fn subdir_info(&mut self, dir: Dir, dirname: &str) -> Result<(Location, FileInfo), Error> {
         let (location, file_info) = self.find_file_dir_entry(dir, dirname)?;
-        if file_info.attributes & dir::ATTR_DIR == 0 || file_info.file_size != 0 {
+        if !file_info.attributes.contains(Attributes::DIR) || file_info.file_size != 0 {
             Err(Error::NotADirectory)
         } else {
             Ok((location, file_info))
@@ -469,7 +469,7 @@ impl Volume {
         let file_info = FileInfo {
             name,
             extension,
-            attributes: dir::ATTR_ARCHIVE,
+            attributes: Attributes::ARCHIVE,
             first_cluster: 0,
             file_size: 0,
         };
@@ -543,7 +543,7 @@ impl Volume {
         file_info: &FileInfo,
     ) -> Result<(), Error> {
         // Check if this is a directory
-        if file_info.attributes & dir::ATTR_DIR != 0 {
+        if file_info.attributes.contains(Attributes::DIR) {
             return Err(Error::DirectoryInsteadOfFile);
         }
         self.delete_file_chain(file_info.first_cluster)?;
@@ -589,7 +589,7 @@ impl Volume {
     ) -> Result<OpenFileSnapshot, Error> {
         let file_info = self.get_file_info(snapshot.dir_entry_location)?;
         // Check if this is a file
-        if file_info.attributes & dir::ATTR_DIR != 0 {
+        if file_info.attributes.contains(Attributes::DIR) {
             return Err(Error::DirectoryInsteadOfFile);
         }
         snapshot.first_cluster = 0;

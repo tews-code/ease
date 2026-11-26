@@ -255,9 +255,8 @@ fn disk_image_root_dir_no_volume_label_entries() {
     with_volume(|vol| {
         let _ = vol
             .read_dir(root_dir, |entry| {
-                assert_eq!(
-                    entry.attributes & 0x08,
-                    0,
+                assert!(
+                    !entry.attributes.contains(Attributes::VOLUME_LABEL),
                     "volume label entry should not be returned"
                 );
                 ControlFlow::<()>::Continue(())
@@ -378,7 +377,7 @@ fn mkdir_creates_directory() {
         // The parent lists it, marked as a directory with an allocated cluster.
         let (_, fi) = vol.find_file_dir_entry(ROOT, "MKDIR1").unwrap();
         assert!(
-            fi.attributes & dir::ATTR_DIR != 0,
+            fi.attributes.contains(Attributes::DIR),
             "entry should be flagged as a directory"
         );
         let cluster = fi.first_cluster;
@@ -963,7 +962,7 @@ fn dir_iter_ignores_stale_bytes_beyond_terminator() {
         let phantom = FileInfo {
             name: *b"PHANTOM ",
             extension: *b"TXT",
-            attributes: dir::ATTR_ARCHIVE,
+            attributes: Attributes::ARCHIVE,
             first_cluster: 2,
             file_size: 5,
         };
