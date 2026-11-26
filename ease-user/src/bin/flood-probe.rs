@@ -8,10 +8,8 @@
 #![no_std]
 #![no_main]
 
-use ease_ulib::{println, write_all};
+use ease_ulib::{STDOUT, println, write_all};
 
-/// Standard output (ease-ulib does not re-export ease_abi::fds)
-const STDOUT: usize = 1;
 /// 32 lines x 64 bytes = 2 KB: twice the transmit queue, and small enough
 /// to fit the kernel test's 4 KB output capture
 const FLOOD_LINES: usize = 32;
@@ -30,7 +28,7 @@ pub extern "C" fn main() {
         line[7] = b'0' + (i % 10) as u8;
         line[8] = b' ';
         line[LINE_LEN - 1] = b'\n';
-        if let Err(e) = write_all(STDOUT, &line) {
+        if let Err(e) = write_all(&STDOUT, &line) {
             failed = Some(e);
             break;
         }

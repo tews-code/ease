@@ -3,7 +3,6 @@
 #![cfg_attr(not(test), no_std)]
 
 pub use ease_abi::ascii;
-pub use ease_abi::fds;
 #[cfg(target_arch = "riscv32")]
 pub use heap::heap_init;
 
@@ -13,7 +12,9 @@ mod sync;
 mod syscall;
 
 #[cfg(target_arch = "riscv32")]
-pub use syscall::{_start, Writer, chdir, exit, put_char, read, write, write_all};
+pub use syscall::{
+    _start, Fd, STDERR, STDIN, STDOUT, Writer, chdir, exit, open, put_char, read, write, write_all,
+};
 
 // Host test builds link std, which brings its own panic handler
 #[cfg(target_arch = "riscv32")]

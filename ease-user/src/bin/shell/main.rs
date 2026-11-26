@@ -19,9 +19,9 @@ use crate::line_editor::{EditResult, LineEditor};
 #[cfg(target_os = "none")]
 use crate::vt_parse::{KeyEvent, vt_out};
 use alloc::vec::Vec;
-use ease_ulib::{ascii, fds};
+use ease_ulib::ascii;
 #[cfg(target_os = "none")]
-use ease_ulib::{print, put_char, read, write_all};
+use ease_ulib::{STDIN, STDOUT, print, put_char, read, write_all};
 
 /// Terminal is assumed to have an 80 character width
 const WIDTH: usize = 80;
@@ -53,8 +53,8 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
         }
         EditResult::Append(ch) => print!("{ch}"),
         EditResult::ClearScreen => {
-            let _ = write_all(fds::STDOUT, vt_out::CLEAR_SCREEN);
-            let _ = write_all(fds::STDOUT, vt_out::CURSOR_HOME);
+            let _ = write_all(&STDOUT, vt_out::CLEAR_SCREEN);
+            let _ = write_all(&STDOUT, vt_out::CURSOR_HOME);
             redraw_line(write_buf, line_editor.line().as_str(), line_editor.cursor());
         }
         EditResult::Complete => {
@@ -65,7 +65,7 @@ fn handle_key(write_buf: &mut Vec<u8>, line_editor: &mut LineEditor, key_event: 
             line_editor.reset();
         }
         EditResult::CursorMoveRight => {
-            let _ = write_all(fds::STDOUT, vt_out::CURSOR_RIGHT);
+            let _ = write_all(&STDOUT, vt_out::CURSOR_RIGHT);
         }
         EditResult::CursorMoveLeft => {
             let _ = put_char(ascii::BS);
@@ -95,7 +95,7 @@ fn redraw_line(write_buf: &mut Vec<u8>, line: &str, cursor_pos: usize) {
     let backspace_count = line.chars().count().saturating_sub(cursor_pos);
     write_buf.extend(core::iter::repeat_n(ascii::BS, backspace_count));
     // 6. Write this in one syscall
-    let _ = write_all(fds::STDOUT, write_buf.as_slice());
+    let _ = write_all(&STDOUT, write_buf.as_slice());
 }
 
 /// Execute the given command
@@ -158,7 +158,7 @@ pub extern "C" fn main() {
         } else {
             u32::MAX
         };
-        let Ok(bytes_read) = read(fds::STDIN, &mut read_buf, timeout) else {
+        let Ok(bytes_read) = read(&STDIN, &mut read_buf, timeout) else {
             continue;
         };
         // Check if this was a timeout

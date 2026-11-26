@@ -2,11 +2,32 @@
 
 use core::arch::asm;
 use core::num::NonZeroUsize;
-use ease_abi::{Error, fds, syscall};
+use ease_abi::{Error, FileAccess, fds, syscall};
+
+/// File descriptor newtype
+///
+/// Note this is not Copy. It is created by the
+/// relevant syscalls, e.g. [open]
+pub struct Fd(usize);
+
+pub const STDIN: Fd = Fd(ease_abi::fds::STDIN);
+pub const STDOUT: Fd = Fd(ease_abi::fds::STDOUT);
+pub const STDERR: Fd = Fd(ease_abi::fds::STDERR);
 
 /// Change working directory
 pub fn chdir(path: &str) -> Result<(), Error> {
     ecall2(syscall::CHDIR, path.as_ptr().addr(), path.len()).map(|_| ())
+}
+
+/// Open a file
+pub fn open(path: &str, access: FileAccess) -> Result<Fd, Error> {
+    ecall3(
+        syscall::OPEN,
+        path.as_ptr().addr(),
+        path.len(),
+        access.raw(),
+    )
+    .map(Fd)
 }
 
 /// Print a single u8 byte to standard out
@@ -22,10 +43,10 @@ pub fn put_char(ch: u8) -> Result<(), Error> {
 /// is no timeout and the thread blocks until it has read at least one byte.
 ///
 /// Returns the number of bytes received.
-pub fn read(fd: usize, buf: &mut [u8], timeout: u32) -> Result<usize, Error> {
+pub fn read(fd: &Fd, buf: &mut [u8], timeout: u32) -> Result<usize, Error> {
     ecall4(
         syscall::READ,
-        fd,
+        fd.0,
         buf.as_mut_ptr().addr(),
         buf.len(),
         timeout as usize,
@@ -37,15 +58,15 @@ pub fn read(fd: usize, buf: &mut [u8], timeout: u32) -> Result<usize, Error> {
 /// Writes as many bytes as permitted by the syscall.
 /// Returns the number of bytes written on success
 /// or holds an `Error` on failure.
-pub fn write(fd: usize, buf: &[u8]) -> Result<usize, Error> {
-    ecall3(syscall::WRITE, fd, buf.as_ptr().addr(), buf.len())
+pub fn write(fd: &Fd, buf: &[u8]) -> Result<usize, Error> {
+    ecall3(syscall::WRITE, fd.0, buf.as_ptr().addr(), buf.len())
 }
 
 /// Writes the complete buffer in a user slice to file descriptor `fd`.
 /// Loops over [write()] until the buffer is empty.
 ///
 /// Returns `Ok(())` on success or `Err(Error)` on failure.
-pub fn write_all(fd: usize, buf: &[u8]) -> Result<(), Error> {
+pub fn write_all(fd: &Fd, buf: &[u8]) -> Result<(), Error> {
     let mut idx = 0;
     while idx < buf.len() {
         let bytes_written = write(fd, &buf[idx..])?;
@@ -224,7 +245,7 @@ pub struct Writer;
 
 impl core::fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        write_all(fds::STDOUT, s.as_bytes()).map_err(|_| core::fmt::Error)?;
+        write_all(&STDOUT, s.as_bytes()).map_err(|_| core::fmt::Error)?;
         Ok(())
     }
 }

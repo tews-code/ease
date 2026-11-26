@@ -13,7 +13,7 @@
 
 use crate::args::Args;
 use crate::vt_parse::vt_out;
-use ease_ulib::{chdir, fds, println, write_all};
+use ease_ulib::{STDOUT, chdir, println, write_all};
 
 // /// Reads file content to console
 // #[allow(dead_code)]
@@ -82,8 +82,8 @@ use ease_ulib::{chdir, fds, println, write_all};
 
 /// Clears the screen.
 pub fn clear() {
-    let _ = write_all(fds::STDOUT, vt_out::CURSOR_HOME);
-    let _ = write_all(fds::STDOUT, vt_out::CLEAR_SCREEN);
+    let _ = write_all(&STDOUT, vt_out::CURSOR_HOME);
+    let _ = write_all(&STDOUT, vt_out::CLEAR_SCREEN);
 }
 
 /// Change working directory
