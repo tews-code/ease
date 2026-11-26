@@ -2,7 +2,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
-pub use ease_abi::ascii;
+pub use ease_abi::{FileAccess, ascii};
 #[cfg(target_arch = "riscv32")]
 pub use heap::heap_init;
 

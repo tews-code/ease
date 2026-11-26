@@ -3374,6 +3374,72 @@ fn chdir_syscall_validates_its_path_and_moves_the_process() {
     }
 }
 
+// OPEN end to end through ease-ulib. The test puts a file and a directory in
+// the root and a file inside the directory, then runs open-probe, which
+// prints one line per case with what `open` returned. A plain name and a
+// path through a directory must open; a missing file, an empty or over-long
+// path, bad or unsupported access flags and a directory must each be refused
+// with their own error. The probe never closes anything, so it then opens
+// until the table refuses: 8 slots less the 3 standard descriptors leaves 5.
+// Once the process has exited the file must open for write, which the file
+// system only allows when nothing else has it open: exit closed them all.
+#[test_case]
+fn open_syscall_opens_for_read_and_exit_closes_the_files() {
+    use crate::fs::{self, Dir};
+    match fs::file::mkdir(Dir::Root, "OPENDIR") {
+        Ok(()) | Err(fs::Error::DuplicateDirName) => {}
+        Err(e) => panic!("could not create the OPENDIR directory: {:?}", e),
+    }
+    fs::file::touch(Dir::Root, "OPENME.TXT").expect("could not create OPENME.TXT");
+    fs::file::touch(Dir::Root, "OPENDIR/INNER.TXT").expect("could not create OPENDIR/INNER.TXT");
+    #[cfg(feature = "test-io")]
+    crate::io::test_io::clear();
+    assert!(run_to_exit("open-probe"), "open probe never exited");
+    #[cfg(feature = "test-io")]
+    {
+        assert!(
+            !crate::io::test_io::contains("USER PANIC"),
+            "open probe panicked (see USER PANIC on the console)"
+        );
+        for line in [
+            "OPEN plain: ok\n",
+            "OPEN missing: NotFound\n",
+            "OPEN empty: InvalidPath\n",
+            "OPEN long: InvalidPath\n",
+            "OPEN create-only: InvalidFileAccess\n",
+            "OPEN write: NotSupported\n",
+            "OPEN subdir: ok\n",
+            "OPEN directory: DirectoryInsteadOfFile\n",
+            "OPEN full after 5: TooManyOpenFiles\n",
+            "OPEN DONE\n",
+        ] {
+            assert!(
+                crate::io::test_io::contains(line),
+                "open probe did not print {:?} (see the OPEN lines on the console)",
+                line
+            );
+        }
+    }
+    // The fd table is dropped during process teardown, which can finish a
+    // little after the process leaves the table, so allow it a moment
+    let mut closed = false;
+    for _ in 0..50 {
+        match fs::file::open(fs::file::Access::Write, Dir::Root, "OPENME.TXT") {
+            Ok(file) => {
+                file.close().expect("closing OPENME.TXT should succeed");
+                closed = true;
+                break;
+            }
+            Err(fs::Error::OpeningForWriteButAlreadyOpen) => crate::kernel::sched::sleep(10),
+            Err(e) => panic!("could not open OPENME.TXT for write: {:?}", e),
+        }
+    }
+    assert!(
+        closed,
+        "OPENME.TXT is still open after the probe exited: process exit did not close its files"
+    );
+}
+
 // READ with a long timeout still returns as soon as input arrives:
 // user_read_timed_input_probe asks for 30 s, the test injects one byte once
 // the probe has parked, and the probe must exit having read exactly it.

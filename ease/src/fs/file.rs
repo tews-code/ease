@@ -4,6 +4,7 @@
 use crate::kernel::collection::{Arena, Handle};
 use crate::kernel::sync::IrqSpinLock;
 
+use super::dir::Attributes;
 use super::volume::with_volume;
 use super::{Dir, Error, FileInfo, Location};
 
@@ -99,6 +100,7 @@ impl OpenFileTable {
             .expect("file handle should index the open file table to an open file entry");
         (open_file.access == Access::Write).then(|| open_file.into())
     }
+
     /// Gets a snapshot copy of open file state
     /// Note that a separate write back method needs to be called to save updated values
     ///
@@ -111,6 +113,7 @@ impl OpenFileTable {
             .expect("file handle should index the open file table to an open file entry");
         open_file.into()
     }
+
     /// Create a new entry in the open file table
     ///
     /// Takes an access type and directory entry location
@@ -218,6 +221,9 @@ pub(crate) fn mkdir(dir: Dir, dirname: &str) -> Result<(), Error> {
     with_volume(|vol| vol.make_dir(dir, dirname))
 }
 
+/// Open a file by file name
+///
+/// Returns a handle to the file or an [Error]
 pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandle, Error> {
     // Need both volume and table locks for safe opening
     // The table lock disables IRQs, so must always be the inner lock
@@ -226,6 +232,9 @@ pub(crate) fn open(access: Access, dir: Dir, filename: &str) -> Result<FileHandl
         let (dir, filename) = vol.resolve_parent(dir, filename)?;
         // Check if this file already exists
         let (location, file_info) = vol.find_file_dir_entry(dir, filename)?;
+        if file_info.attributes.contains(Attributes::DIR) {
+            return Err(Error::DirectoryInsteadOfFile);
+        }
         // Set up the open file table
         let handle = OPEN_FILE_TABLE
             .lock()
